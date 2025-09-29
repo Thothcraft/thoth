@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Environment Variables
+.env
+.env.local
+.env.production
+
+# Data and Logs (keep structure, ignore content)
+data/logs/*.json
+data/logs/*.log
+data/logs/*.csv
+!data/logs/.gitkeep
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Configuration files with sensitive data
+src/backend/button_config.json
+
+# Hardware-specific configs
+/etc/hostapd/
+/etc/dnsmasq.d/
+/tmp/thoth_*
+
+# Backup files
+*.backup
+*.bak
+
+# PiSugar configs
+/etc/pisugar/
+
+# Service logs
+*.service.log
