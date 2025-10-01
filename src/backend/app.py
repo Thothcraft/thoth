@@ -10,32 +10,103 @@ import json
 import subprocess
 import threading
 import time
-from datetime import datetime
-from typing import Dict, List, Optional, Any
+import logging
+import uuid
+import socket
+import psutil
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any, Tuple
 
-from flask import Flask, jsonify, request, render_template_string
+from flask import (
+    Flask, jsonify, request, render_template, 
+    redirect, url_for, flash, session, send_from_directory
+)
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 import requests
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # Add src directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.config import Config, BUTTON_ACTIONS, SENSOR_CONFIG
 from backend.models import SensorReading, SystemStatus, ButtonConfig, UploadResult
+from backend.device_manager import DeviceManager
+from backend.auth_manager import AuthManager
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(Config.LOG_FILE)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Initialize Flask app
-app = Flask(__name__)
+app = Flask(__name__, template_folder='templates', static_folder='static')
 app.config.from_object(Config)
+app.secret_key = Config.SECRET_KEY
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # Disable caching for development
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+
+# Ensure required directories exist
+os.makedirs(Config.CONFIG_DIR, exist_ok=True)
+os.makedirs(Config.LOGS_DIR, exist_ok=True)
+
+# Initialize managers
+auth_manager = AuthManager(Config)
+device_manager = DeviceManager(Config)
 
 # Global state
 collection_active = False
 wifi_manager = None
 
-def get_system_status() -> SystemStatus:
-    """Get current system status."""
+# Mock user for local authentication (in production, use a proper user database)
+USERS = {
+    'admin': {
+        'password': generate_password_hash('admin123'),
+        'role': 'admin'
+    },
+    'user': {
+        'password': generate_password_hash('password123'),
+        'role': 'user'
+    }
+}
+
+# Mock network scan function (replace with actual implementation)
+def scan_wifi_networks():
+    """Scan for available WiFi networks."""
+    # This is a mock implementation - replace with actual WiFi scanning code
+    return [
+        {'ssid': 'MyHomeWiFi', 'secure': True, 'signal': 85},
+        {'ssid': 'GuestWiFi', 'secure': False, 'signal': 65},
+        {'ssid': 'NeighborsWiFi', 'secure': True, 'signal': 45}
+    ]
+
+def get_system_uptime() -> str:
+    """Get system uptime in a human-readable format."""
+    with open('/proc/uptime', 'r') as f:
+        uptime_seconds = float(f.readline().split()[0])
+        return str(timedelta(seconds=uptime_seconds)).split('.')[0]  # Remove microseconds
+
+# Global state
+collection_active = False
+wifi_manager = None
+
+def get_system_status(update_remote: bool = True) -> SystemStatus:
+    """Get current system status and optionally update the Brain server.
+    
+    Args:
+        update_remote: If True, update the status on the Brain server
+        
+    Returns:
+        SystemStatus: Current system status
+    """
     try:
         # Check WiFi connection
         wifi_connected = subprocess.run(
@@ -55,23 +126,79 @@ def get_system_status() -> SystemStatus:
             # This would use the actual PiSugar library
             # For now, return a placeholder
             battery_level = 85  # Placeholder
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Could not get battery level: {e}")
         
         # Get uptime
         uptime_output = subprocess.run(
             ["uptime", "-p"], capture_output=True, text=True
         ).stdout.strip()
         
-        return SystemStatus(
+        # Get CPU temperature
+        cpu_temp = None
+        try:
+            with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
+                cpu_temp = float(f.read().strip()) / 1000.0  # Convert millidegrees to degrees
+        except Exception as e:
+            logger.warning(f"Could not get CPU temperature: {e}")
+        
+        # Get disk usage
+        disk_usage = None
+        try:
+            import shutil
+            total, used, free = shutil.disk_usage('/')
+            disk_usage = {
+                'total_gb': round(total / (2**30), 2),
+                'used_gb': round(used / (2**30), 2),
+                'free_gb': round(free / (2**30), 2),
+                'percent_used': round((used / total) * 100, 1)
+            }
+        except Exception as e:
+            logger.warning(f"Could not get disk usage: {e}")
+        
+        # Get IP address
+        ip_address = None
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip_address = s.getsockname()[0]
+            s.close()
+        except Exception as e:
+            logger.warning(f"Could not get IP address: {e}")
+        
+        # Create status object
+        status = SystemStatus(
             status="ok",
             battery_level=battery_level,
             wifi_connected=wifi_connected,
             ap_mode=not wifi_connected,
             collection_active=collection_status,
-            uptime=uptime_output
+            uptime=uptime_output,
+            temperature=cpu_temp,
+            disk_usage=disk_usage,
+            ip_address=ip_address
         )
+        
+        # Update device manager status
+        if update_remote:
+            try:
+                device_manager.update_status({
+                    'battery_level': battery_level,
+                    'wifi_connected': wifi_connected,
+                    'collection_active': collection_status,
+                    'online': True,
+                    'ip_address': ip_address,
+                    'temperature': cpu_temp,
+                    'disk_usage': disk_usage
+                })
+            except Exception as e:
+                logger.error(f"Error updating device status: {e}")
+        
+        return status
+        
     except Exception as e:
+        logger.error(f"Error getting system status: {e}", exc_info=True)
         return SystemStatus(status="error", error=str(e))
 
 def tail_sensor_data():
@@ -100,8 +227,16 @@ def tail_sensor_data():
             print(f"Error in sensor data tail: {e}")
             time.sleep(5)
 
-# Start background task
+# Start background tasks
 socketio.start_background_task(tail_sensor_data)
+
+# Start device heartbeat if registered
+if device_manager.registered:
+    try:
+        device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
+        logger.info("Started device heartbeat")
+    except Exception as e:
+        logger.error(f"Failed to start device heartbeat: {e}")
 
 # Routes
 @app.route('/')

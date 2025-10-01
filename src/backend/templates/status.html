@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+
+{% block title %}Device Status - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <!-- Device Information -->
+    <div class="card">
+        <h2 class="text-xl font-semibold mb-4 text-gray-900">
+            <i class="fas fa-microchip mr-2 text-blue-600"></i>
+            Device Information
+        </h2>
+        
+        <div class="space-y-3">
+            <div class="flex justify-between">
+                <span class="text-gray-600">Device Name:</span>
+                <span class="font-medium">{{ device_info.device_name or 'N/A' }}</span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-gray-600">Device ID:</span>
+                <span class="font-mono text-sm">{{ device_info.device_id }}</span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-gray-600">Status:</span>
+                <span class="inline-flex items-center">
+                    {% if device_info.registered %}
+                    <span class="h-2.5 w-2.5 rounded-full bg-green-500 mr-2"></span>
+                    <span>Connected to Brain</span>
+                    {% else %}
+                    <span class="h-2.5 w-2.5 rounded-full bg-yellow-500 mr-2"></span>
+                    <span>Not Registered</span>
+                    {% endif %}
+                </span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-gray-600">Last Seen:</span>
+                <span>{{ system_status.last_seen or 'Never' }}</span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-gray-600">IP Address:</span>
+                <span>{{ system_status.ip_address or 'N/A' }}</span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-gray-600">MAC Address:</span>
+                <span class="font-mono text-sm">{{ device_info.mac_address or 'N/A' }}</span>
+            </div>
+        </div>
+    </div>
+    
+    <!-- System Status -->
+    <div class="card">
+        <h2 class="text-xl font-semibold mb-4 text-gray-900">
+            <i class="fas fa-heartbeat mr-2 text-red-600"></i>
+            System Status
+        </h2>
+        
+        <div class="space-y-3">
+            <div class="flex justify-between">
+                <span class="text-gray-600">Status:</span>
+                <span class="inline-flex items-center">
+                    <span class="h-2.5 w-2.5 rounded-full {{ 'bg-green-500' if system_status.status == 'ok' else 'bg-red-500' }} mr-2"></span>
+                    <span>{{ system_status.status|title }}</span>
+                </span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-gray-600">Uptime:</span>
+                <span>{{ system_status.uptime or 'N/A' }}</span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-gray-600">Battery:</span>
+                <div class="battery-container">
+                    <div class="battery-level" 
+                         style="width: {{ system_status.battery_level or 0 }}%"></div>
+                </div>
+                <span class="w-12 text-right">{{ system_status.battery_level or 0 }}%</span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-gray-600">CPU Temperature:</span>
+                <span>{{ system_status.temperature|default('N/A') }}{% if system_status.temperature is not none %}°C{% endif %}</span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-gray-600">WiFi:</span>
+                <span class="inline-flex items-center">
+                    <span class="h-2.5 w-2.5 rounded-full {{ 'bg-green-500' if system_status.wifi_connected else 'bg-red-500' }} mr-2"></span>
+                    <span>{{ 'Connected' if system_status.wifi_connected else 'Disconnected' }}</span>
+                </span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-gray-600">Collection:</span>
+                <span class="inline-flex items-center">
+                    <span class="h-2.5 w-2.5 rounded-full {{ 'bg-green-500' if system_status.collection_active else 'bg-red-500' }} mr-2"></span>
+                    <span>{{ 'Active' if system_status.collection_active else 'Inactive' }}</span>
+                </span>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Disk Usage -->
+    {% if system_status.disk_usage %}
+    <div class="card md:col-span-2">
+        <h2 class="text-xl font-semibold mb-4 text-gray-900">
+            <i class="fas fa-hdd mr-2 text-purple-600"></i>
+            Disk Usage
+        </h2>
+        
+        <div class="space-y-4">
+            <div>
+                <div class="flex justify-between mb-1">
+                    <span class="text-sm font-medium text-gray-700">Storage</span>
+                    <span class="text-sm font-medium text-gray-700">
+                        {{ '%.1f'|format(system_status.disk_usage.used_gb) }} GB of {{ '%.1f'|format(system_status.disk_usage.total_gb) }} GB used
+                    </span>
+                </div>
+                <div class="disk-usage-container">
+                    <div class="disk-usage-level" 
+                         style="width: {{ system_status.disk_usage.percent_used }}%"></div>
+                </div>
+                <div class="flex justify-between mt-1">
+                    <span class="text-xs text-gray-500">{{ system_status.disk_usage.percent_used }}% used</span>
+                    <span class="text-xs text-gray-500">{{ '%.1f'|format(system_status.disk_usage.free_gb) }} GB free</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+    
+    <!-- Actions -->
+    <div class="card md:col-span-2">
+            <i class="fas fa-cogs mr-2 text-yellow-600"></i>
+            Actions
+        </h2>
+        
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <button onclick="toggleCollection()" class="btn collection-start">
+                <i class="fas fa-{{ 'play' if not system_status.collection_active else 'stop' }} mr-2"></i>
+                {{ 'Start' if not system_status.collection_active else 'Stop' }} Collection
+            </button>
+            
+            <button onclick="restartService('thoth-collector')" class="btn btn-action">
+{{ ... }}
+
+// Refresh status every 30 seconds
+setTimeout(() => {
+    window.location.reload();
+}, 30000);
+</{% block scripts %}
+<style>
+    .battery-container, .disk-usage-container {
+        width: 100%;
+        background-color: #e5e7eb;
+        border-radius: 9999px;
+        height: 0.625rem;
+        margin: 0.25rem 0;
+        overflow: hidden;
+    }
+    
+    .battery-level, .disk-usage-level {
+        height: 100%;
+        border-radius: 9999px;
+    }
+    
+    .battery-level {
+        background-color: #3b82f6;
+    }
+    
+    .disk-usage-level {
+        background-color: #8b5cf6;
+    }
+    
+    .collection-start {
+        background-color: #059669;
+        color: white;
+    }
+    
+    .collection-start:hover {
+        background-color: #047857;
+    }
+    
+    .collection-stop {
+        background-color: #dc2626;
+        color: white;
+    }
+    
+    .collection-stop:hover {
+        background-color: #b91c1c;
+    }
+    
+    .btn-action {
+        background-color: #2563eb;
+        color: white;
+    }
+    
+    .btn-action:hover {
+        background-color: #1d4ed8;
+    }
+    
+    .btn-warning {
+        background-color: #d97706;
+        color: white;
+    }
+    
+    .btn-warning:hover {
+        background-color: #b45309;
+    }
+    
+    .btn-danger {
+        background-color: #dc2626;
+        color: white;
+    }
+    
+    .btn-danger:hover {
+        background-color: #b91c1c;
+    }
+</style>
+{% endblock %}
