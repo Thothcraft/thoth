@@ -73,7 +73,6 @@ document.addEventListener('DOMContentLoaded', function() {
         passwordField.classList.toggle('hidden', !isSecure);
         if (isSecure) {
             passwordInput.required = true;
-            loginFields.classList.remove('hidden');
         } else {
             passwordInput.required = false;
             loginFields.classList.add('hidden');
@@ -89,21 +88,41 @@ document.addEventListener('DOMContentLoaded', function() {
             ssid: formData.get('ssid'),
             password: formData.get('password'),
             username: formData.get('username'),
-            login: formData.get('username') ? true : undefined,
             user_password: formData.get('user_password')
         };
         
+        const connectButton = document.getElementById('connectButton');
+        connectButton.disabled = true;
+        connectButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Connecting...';
+        
         try {
             const response = await axios.post('/wifi/config', data);
-            showAlert('WiFi configured successfully!', 'success');
             
-            if (response.data.redirect) {
-                setTimeout(() => {
-                    window.location.href = response.data.redirect;
-                }, 2000);
+            if (response.data.status === 'success') {
+                showAlert(response.data.message, 'success');
+                
+                if (response.data.redirect) {
+                    // If we have a redirect URL, go there after a short delay
+                    setTimeout(() => {
+                        window.location.href = response.data.redirect;
+                    }, 2000);
+                } else if (data.username && data.user_password) {
+                    // If we logged in but didn't get a redirect, reload the page
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 2000);
+                }
+            } else {
+                showAlert(response.data.error || 'An error occurred', 'error');
+                connectButton.disabled = false;
+                connectButton.innerHTML = '<i class="fas fa-wifi mr-2"></i>Connect';
             }
         } catch (error) {
-            handleError(error);
+            console.error('Error:', error);
+            const errorMessage = error.response?.data?.error || 'Failed to configure WiFi. Please try again.';
+            showAlert(errorMessage, 'error');
+            connectButton.disabled = false;
+            connectButton.innerHTML = '<i class="fas fa-wifi mr-2"></i>Connect';
         }
     });
     

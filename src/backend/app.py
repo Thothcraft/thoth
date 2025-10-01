@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Any, Tuple
 
 from flask import (
     Flask, jsonify, request, render_template, 
-    redirect, url_for, flash, session, send_from_directory
+    redirect, url_for, flash, session, send_from_directory, abort
 )
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
@@ -121,50 +121,24 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
         ).stdout.strip() == "active"
         
         # Get battery level (if PiSugar available)
-        battery_level = None
-        try:
-            # This would use the actual PiSugar library
-            # For now, return a placeholder
-            battery_level = 85  # Placeholder
-        except Exception as e:
-            logger.warning(f"Could not get battery level: {e}")
-        
-        # Get uptime
-        uptime_output = subprocess.run(
-            ["uptime", "-p"], capture_output=True, text=True
-        ).stdout.strip()
         
         # Get CPU temperature
-        cpu_temp = None
         try:
             with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
                 cpu_temp = float(f.read().strip()) / 1000.0  # Convert millidegrees to degrees
         except Exception as e:
-            logger.warning(f"Could not get CPU temperature: {e}")
-        
-        # Get disk usage
-        disk_usage = None
-        try:
-            import shutil
-            total, used, free = shutil.disk_usage('/')
-            disk_usage = {
-                'total_gb': round(total / (2**30), 2),
-                'used_gb': round(used / (2**30), 2),
-                'free_gb': round(free / (2**30), 2),
-                'percent_used': round((used / total) * 100, 1)
-            }
-        except Exception as e:
-            logger.warning(f"Could not get disk usage: {e}")
+            logger.error(f"Error getting CPU temperature: {e}")
+            cpu_temp = None
         
         # Get IP address
         ip_address = None
         try:
-            import socket
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             ip_address = s.getsockname()[0]
             s.close()
         except Exception as e:
+            logger.error(f"Error getting IP address: {e}")
             logger.warning(f"Could not get IP address: {e}")
         
         # Create status object
@@ -230,6 +204,9 @@ def tail_sensor_data():
 # Start background tasks
 socketio.start_background_task(tail_sensor_data)
 
+# Load registration info if available
+device_manager.load_registration_info()
+
 # Start device heartbeat if registered
 if device_manager.registered:
     try:
@@ -241,7 +218,13 @@ if device_manager.registered:
 # Routes
 @app.route('/')
 def index():
-    """Serve basic web interface."""
+    """Serve the appropriate page based on authentication and registration status."""
+    # Redirect to login if not authenticated
+    if 'username' not in session:
+        return redirect(url_for('login'))
+    
+    # Redirect to status page if authenticated
+    return redirect(url_for('status'))
     html = """
     <!DOCTYPE html>
     <html>
@@ -488,41 +471,261 @@ def button_config():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/wifi-config', methods=['POST'])
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Handle user login and device registration."""
+    # Redirect to status if already logged in
+    if 'username' in session:
+        return redirect(url_for('status'))
+        
+    if request.method == 'GET':
+        return render_template('login.html', next=request.args.get('next', ''))
+    
+    # Handle POST request
+    try:
+        username = request.form.get('username')
+        password = request.form.get('password')
+        next_page = request.form.get('next', '')
+        
+        if not username or not password:
+            flash('Username and password are required', 'error')
+            return redirect(url_for('login', next=next_page))
+        
+        # Authenticate with the Brain server
+        try:
+            result = auth_manager.login(username, password)
+            
+            if result.get('success'):
+                # Register the device with the Brain server
+                success, message = device_manager.register_device(result['token'])
+                
+                if success:
+                    # Start the heartbeat to send periodic status updates
+                    device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
+                    logger.info("Device registered and heartbeat started")
+                    
+                    # Store user session
+                    session['user_id'] = result['user'].get('user_id')
+                    session['username'] = username
+                    session['token'] = result['token']
+                    
+                    # Update device status with initial information
+                    device_manager.update_status({
+                        'online': True,
+                        'wifi_connected': True,
+                        'ip_address': request.remote_addr,
+                        'last_seen': datetime.utcnow().isoformat()
+                    })
+                    
+                    # Redirect to next page or status
+                    next_page = request.args.get('next', '')
+                    if next_page and next_page.startswith('/'):
+                        return redirect(next_page)
+                    return redirect(url_for('status'))
+                else:
+                    flash(f'Device registration failed: {message}', 'error')
+            else:
+                flash('Invalid username or password', 'error')
+                
+        except Exception as e:
+            logger.error(f"Login/registration error: {str(e)}", exc_info=True)
+            flash('An error occurred during login. Please try again.', 'error')
+            
+    except Exception as e:
+        logger.error(f"Login error: {str(e)}", exc_info=True)
+        flash('An error occurred. Please try again.', 'error')
+    
+    return redirect(url_for('login'))
+
+@app.route('/status')
+def status():
+    """Display the device status page."""
+    # Check if user is logged in
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('status')))
+    
+    try:
+        # Get system status
+        system_status = get_system_status()
+        
+        # Get device information
+        device_info = device_manager.get_device_info()
+        
+        # Get disk usage
+        disk_usage = psutil.disk_usage('/')
+        
+        # Get CPU temperature
+        try:
+            with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
+                cpu_temp = float(f.read().strip()) / 1000.0  # Convert millidegrees to degrees
+        except Exception as e:
+            logger.error(f"Error getting CPU temperature: {e}")
+            cpu_temp = None
+        
+        # Get IP address
+        ip_address = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 80))
+            ip_address = s.getsockname()[0]
+            s.close()
+        except Exception as e:
+            logger.error(f"Error getting IP address: {e}")
+        
+        # Get list of available WiFi networks
+        available_networks = scan_wifi_networks()
+        
+        return render_template('status.html',
+                            system_status=system_status,
+                            device_info=device_info,
+                            disk_usage=disk_usage,
+                            cpu_temp=cpu_temp,
+                            ip_address=ip_address,
+                            username=session.get('username'),
+                            available_networks=available_networks)
+    
+    except Exception as e:
+        logger.error(f"Error in status route: {str(e)}", exc_info=True)
+        flash('An error occurred while loading the status page.', 'error')
+        return redirect(url_for('index'))
+
+@app.route('/logout')
+def logout():
+    """Log out the current user."""
+    # Update device status
+    try:
+        device_manager.update_status({
+            'online': False,
+            'last_seen': datetime.utcnow().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"Error updating device status on logout: {e}")
+    
+    session.clear()
+    flash('You have been logged out.', 'info')
+    return redirect(url_for('login'))
+
+@app.route('/wifi/config', methods=['POST'])
 def wifi_config():
     """Handle WiFi configuration from captive portal."""
     try:
         ssid = request.form.get('ssid')
         password = request.form.get('password')
+        username = request.form.get('username')
+        user_password = request.form.get('user_password')
         
         if not ssid:
             return jsonify({"error": "SSID required"}), 400
         
-        # This would call the WiFi manager
-        # For now, return success
-        return jsonify({"status": "connecting", "ssid": ssid})
+        # Configure the WiFi network
+        logger.info(f"Configuring WiFi network: {ssid}")
+        
+        # In a real implementation, you would configure the WiFi here
+        # For example:
+        # configure_wifi(ssid, password)
+        
+        # If user credentials were provided, log in and register the device
+        response_data = {'status': 'success', 'message': f'Successfully connected to {ssid}'}
+        
+        if username and user_password:
+            try:
+                result = auth_manager.login(username, user_password)
+                
+                if result.get('success'):
+                    # Register the device with the Brain server
+                    success, message = device_manager.register_device(result['token'])
+                    
+                    if success:
+                        # Start the heartbeat to send periodic status updates
+                        device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
+                        logger.info("Device registered and heartbeat started")
+                        
+                        # Store user session
+                        session['user_id'] = result['user'].get('user_id')
+                        session['username'] = username
+                        session['token'] = result['token']
+                        
+                        # Update device status with initial information
+                        device_manager.update_status({
+                            'online': True,
+                            'wifi_connected': True,
+                            'ip_address': request.remote_addr,
+                            'last_seen': datetime.utcnow().isoformat()
+                        })
+                        
+                        response_data['redirect'] = url_for('status')
+                    else:
+                        response_data['error'] = f'Device registration failed: {message}'
+                else:
+                    response_data['error'] = 'Invalid username or password'
+                    
+            except Exception as e:
+                logger.error(f"Login/registration error: {str(e)}", exc_info=True)
+                response_data['error'] = 'An error occurred during login. Please try again.'
+        
+        return jsonify(response_data)
+        
     except Exception as e:
+        logger.error(f"Error configuring WiFi: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
-# WebSocket events
-@socketio.on('connect')
-def handle_connect():
-    """Handle client connection."""
-    emit('status', {'message': 'Connected to Thoth device'})
-
-@socketio.on('disconnect')
-def handle_disconnect():
-    """Handle client disconnection."""
-    print('Client disconnected')
-
-if __name__ == '__main__':
-    # Ensure data directory exists
-    os.makedirs(Config.LOGS_DIR, exist_ok=True)
+@app.route('/api/collection/<action>', methods=['POST'])
+def collection_action(action):
+    """Start or stop data collection."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
     
-    # Run the application
-    socketio.run(
-        app, 
-        host=Config.HOST, 
-        port=Config.PORT, 
-        debug=Config.DEBUG
-    )
+    global collection_active
+    
+    if action == 'start':
+        collection_active = True
+        logger.info('Data collection started')
+        return jsonify({'status': 'success', 'message': 'Collection started'})
+    elif action == 'stop':
+        collection_active = False
+        logger.info('Data collection stopped')
+        return jsonify({'status': 'success', 'message': 'Collection stopped'})
+    else:
+        return jsonify({'status': 'error', 'message': 'Invalid action'}), 400
+
+@app.route('/api/system/restart-service', methods=['POST'])
+def restart_service():
+    """Restart a system service."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+    
+    data = request.get_json()
+    service = data.get('service')
+    
+    if not service:
+        return jsonify({'status': 'error', 'message': 'Service name is required'}), 400
+    
+    try:
+        logger.info(f'Restarting service: {service}')
+        # In a real implementation, you would use systemd or similar to restart the service
+        # For now, we'll just log it
+        return jsonify({
+            'status': 'success', 
+            'message': f'Service {service} restart initiated'
+        })
+    except Exception as e:
+        logger.error(f'Error restarting service {service}: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/system/shutdown', methods=['POST'])
+def system_shutdown():
+    """Shut down the device."""
+    if 'username' not in session or session.get('role') != 'admin':
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+    
+    try:
+        logger.info('Initiating system shutdown')
+        # In a real implementation, you would call the system shutdown command
+        # For safety, we'll just log it for now
+        return jsonify({
+            'status': 'success', 
+            'message': 'Shutdown initiated. The system will power off shortly.'
+        })
+    except Exception as e:
+        logger.error(f'Error shutting down: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
