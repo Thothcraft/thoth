@@ -37,6 +37,15 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # Add src directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Try to import Sense HAT, fall back to mock if not available
+try:
+    from sense_hat import SenseHat
+    sense = SenseHat()
+    print("Using real Sense HAT")
+except (ImportError, OSError):
+    print("Sense HAT not found, using mock implementation")
+    from .mock_sense_hat import sense
+
 from backend.config import Config, BUTTON_ACTIONS, SENSOR_CONFIG
 from backend.models import SensorReading, SystemStatus, ButtonConfig, UploadResult
 from backend.device_manager import DeviceManager
