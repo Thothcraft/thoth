@@ -65,6 +65,16 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__, template_folder='templates', static_folder='static')
 app.config.from_object(Config)
 
+# Add request logging
+@app.before_request
+def log_request():
+    logger.info(f"Request: {request.method} {request.path} - {request.remote_addr}")
+
+@app.after_request
+def log_response(response):
+    logger.info(f"Response: {request.method} {request.path} - {response.status_code}")
+    return response
+
 # Add current date to all templates
 @app.context_processor
 def inject_now():
@@ -312,12 +322,8 @@ def register_device_periodically():
             'device_type': 'thoth',
             'hardware_info': hardware_info
         }
-
-        # Send registration request to Brain server
-        headers = {
-            'Authorization': f'Bearer {access_token}',
-            'Content-Type': 'application/json'
-        }
+        
+        logger.info(f"Registering device with Brain server: {data}")
         
         response = requests.post(
             'https://web-production-d7d37.up.railway.app/device/register',
@@ -327,12 +333,54 @@ def register_device_periodically():
         )
         
         if response.status_code == 200:
-            logger.info(f"Device registration successful: {response.json()}")
+            logger.info(f"Successfully registered device with Brain server. Response: {response.json()}")
         else:
-            logger.error(f"Device registration failed: {response.status_code} - {response.text}")
+            logger.error(f"Failed to register device: {response.status_code} - {response.text}")
             
     except requests.exceptions.RequestException as e:
-        logger.error(f"Error sending device registration: {str(e)}")
+        logger.error(f"Network error during device registration: {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error in device registration: {str(e)}", exc_info=True)
+
+def register_device_periodically():
+    """Register device with Brain server every minute."""
+    try:
+        if not Config.BRAIN_SERVER_URL or not Config.DEVICE_TOKEN:
+            logger.warning("Brain server URL or device token not configured, skipping registration")
+            return
+            
+        device_info = get_device_info()
+        headers = {
+            'Authorization': f'Bearer {Config.DEVICE_TOKEN}',
+            'Content-Type': 'application/json'
+        }
+        
+        device_data = {
+            'device_id': Config.DEVICE_ID,
+            'name': Config.DEVICE_NAME,
+            'type': 'thoth',
+            'status': 'online',
+            'info': device_info,
+            'last_seen': datetime.utcnow().isoformat(),
+            'last_heartbeat': datetime.utcnow().isoformat()  # Add last_heartbeat
+        }
+        
+        logger.info(f"Registering device with Brain server: {device_data}")
+        
+        response = requests.post(
+            f"{Config.BRAIN_SERVER_URL}/api/devices/register",
+            json=device_data,
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"Successfully registered device with Brain server. Response: {response.json()}")
+        else:
+            logger.error(f"Failed to register device: {response.status_code} - {response.text}")
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error during device registration: {str(e)}")
     except Exception as e:
         logger.error(f"Unexpected error in device registration: {str(e)}", exc_info=True)
 
