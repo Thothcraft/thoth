@@ -14,8 +14,16 @@ import logging
 import uuid
 import socket
 import psutil
+import platform
+import netifaces
+import requests
 from datetime import datetime, timedelta
+from apscheduler.schedulers.background import BackgroundScheduler
 from typing import Dict, List, Optional, Any, Tuple
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 from flask import (
     Flask, jsonify, request, render_template, 
@@ -48,6 +56,9 @@ logger = logging.getLogger(__name__)
 # Initialize Flask app
 app = Flask(__name__, template_folder='templates', static_folder='static')
 app.config.from_object(Config)
+
+# Initialize scheduler
+device_scheduler = BackgroundScheduler()
 app.secret_key = Config.SECRET_KEY
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # Disable caching for development
@@ -201,8 +212,128 @@ def tail_sensor_data():
             print(f"Error in sensor data tail: {e}")
             time.sleep(5)
 
+def get_device_info() -> Dict[str, Any]:
+    """Get detailed information about the device."""
+    try:
+        # Get network interfaces and MAC addresses
+        interfaces = {}
+        for iface in netifaces.interfaces():
+            addrs = netifaces.ifaddresses(iface)
+            if netifaces.AF_LINK in addrs and addrs[netifaces.AF_LINK]:
+                mac = addrs[netifaces.AF_LINK][0].get('addr')
+                if mac and mac != '00:00:00:00:00:00':
+                    interfaces[iface] = mac
+        
+        # Get system information
+        system_info = {
+            'system': platform.system(),
+            'node': platform.node(),
+            'release': platform.release(),
+            'version': platform.version(),
+            'machine': platform.machine(),
+            'processor': platform.processor(),
+            'cpu_count': os.cpu_count(),
+            'memory': psutil.virtual_memory()._asdict(),
+            'disk_usage': psutil.disk_usage('/')._asdict(),
+            'network_interfaces': interfaces,
+            'hostname': socket.gethostname(),
+            'ip_address': socket.gethostbyname(socket.gethostname()),
+            'python_version': platform.python_version(),
+            'boot_time': datetime.fromtimestamp(psutil.boot_time()).isoformat()
+        }
+        return system_info
+    except Exception as e:
+        logger.error(f"Error getting device info: {e}")
+        return {}
+
+def register_device_periodically():
+    """Register device with Brain server every minute."""
+    try:
+        # Get device info
+        device_info = get_device_info()
+        hardware_info = {
+            'os': {
+                'system': device_info.get('system'),
+                'release': device_info.get('release'),
+                'version': device_info.get('version'),
+                'machine': device_info.get('machine'),
+                'python_version': device_info.get('python_version')
+            },
+            'hardware': {
+                'cpu': {
+                    'count': device_info.get('cpu_count'),
+                    'processor': device_info.get('processor')
+                },
+                'memory': device_info.get('memory', {}),
+                'disk': device_info.get('disk_usage', {})
+            },
+            'network': {
+                'hostname': device_info.get('hostname'),
+                'ip_address': device_info.get('ip_address'),
+                'interfaces': device_info.get('network_interfaces', {})
+            }
+        }
+
+        # Get device ID from session or generate one
+        device_id = session.get('device_id')
+        if not device_id:
+            # Try to get MAC address as device ID
+            mac_address = next(iter(device_info.get('network_interfaces', {}).values()), None)
+            device_id = mac_address or str(uuid.uuid4())
+            session['device_id'] = device_id
+
+        # Get device name from session or use hostname
+        device_name = session.get('device_name', device_info.get('hostname', 'Thoth Device'))
+
+        # Get access token from environment
+        access_token = os.getenv('BRAIN_ACCESS_TOKEN')
+        if not access_token:
+            logger.error("No BRAIN_ACCESS_TOKEN found in environment variables")
+            return
+
+        # Prepare request data
+        data = {
+            'device_id': device_id,
+            'device_name': device_name,
+            'device_type': 'thoth',
+            'hardware_info': hardware_info
+        }
+
+        # Send registration request to Brain server
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.post(
+            'https://web-production-d7d37.up.railway.app/device/register',
+            json=data,
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"Device registration successful: {response.json()}")
+        else:
+            logger.error(f"Device registration failed: {response.status_code} - {response.text}")
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error sending device registration: {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error in device registration: {str(e)}", exc_info=True)
+
 # Start background tasks
 socketio.start_background_task(tail_sensor_data)
+
+# Start device registration scheduler
+device_scheduler.add_job(
+    register_device_periodically,
+    'interval',
+    minutes=1,
+    id='device_registration',
+    replace_existing=True
+)
+device_scheduler.start()
 
 # Load registration info if available
 device_manager.load_registration_info()
