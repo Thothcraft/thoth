@@ -57,7 +57,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(Config.LOG_FILE)
     ]
 )
 logger = logging.getLogger(__name__)
@@ -66,9 +65,15 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__, template_folder='templates', static_folder='static')
 app.config.from_object(Config)
 
+# Add current date to all templates
+@app.context_processor
+def inject_now():
+    return {'now': datetime.utcnow()}
+
 # Initialize scheduler
 device_scheduler = BackgroundScheduler()
 app.secret_key = Config.SECRET_KEY
+{{ ... }}
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # Disable caching for development
 CORS(app)

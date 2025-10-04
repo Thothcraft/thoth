@@ -18,3 +18,89 @@
 2025-10-04 21:25:26,443 - werkzeug - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
  * Running on http://127.0.0.1:5000
 2025-10-04 21:25:26,446 - werkzeug - INFO - [33mPress CTRL+C to quit[0m
+2025-10-04 21:25:54,397 - werkzeug - INFO - 127.0.0.1 - - [04/Oct/2025 21:25:54] "[32mGET / HTTP/1.1[0m" 302 -
+2025-10-04 21:25:54,687 - app - ERROR - Exception on /login [GET]
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/flask/app.py", line 1473, in wsgi_app
+    response = self.full_dispatch_request()
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/flask/app.py", line 882, in full_dispatch_request
+    rv = self.handle_user_exception(e)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/flask_cors/extension.py", line 178, in wrapped_function
+    return cors_after_request(app.make_response(f(*args, **kwargs)))
+                                                ^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/flask/app.py", line 880, in full_dispatch_request
+    rv = self.dispatch_request()
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/flask/app.py", line 865, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 622, in login
+    return render_template('login.html', next=request.args.get('next', ''))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/flask/templating.py", line 150, in render_template
+    return _render(app, template, context)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/flask/templating.py", line 131, in _render
+    rv = template.render(context)
+         ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/jinja2/environment.py", line 1295, in render
+    self.environment.handle_exception()
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/jinja2/environment.py", line 942, in handle_exception
+    raise rewrite_traceback_stack(source=source)
+  File "/home/gadpi/Desktop/thoth/src/backend/templates/login.html", line 1, in top-level template code
+    {% extends "base.html" %}
+  File "/home/gadpi/Desktop/thoth/src/backend/templates/base.html", line 113, in top-level template code
+    <p>&copy; {{ now.year }} Thoth Device. All rights reserved.</p>
+    ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/jinja2/environment.py", line 490, in getattr
+    return getattr(obj, attribute)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+jinja2.exceptions.UndefinedError: 'now' is undefined
+2025-10-04 21:25:54,723 - werkzeug - INFO - 127.0.0.1 - - [04/Oct/2025 21:25:54] "[35m[1mGET /login HTTP/1.1[0m" 500 -
+2025-10-04 21:25:54,829 - werkzeug - INFO - 127.0.0.1 - - [04/Oct/2025 21:25:54] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+2025-10-04 21:26:26,123 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:27:26 BST)" (scheduled at 2025-10-04 21:26:26.089825+01:00)
+2025-10-04 21:26:26,534 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    device_id = session.get('device_id')
+                ^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:26:26,558 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:27:26 BST)" executed successfully
+2025-10-04 21:27:27,527 - apscheduler.executors.default - WARNING - Run time of job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:28:26 BST)" was missed by 0:00:01.436643
+2025-10-04 21:28:28,562 - apscheduler.executors.default - WARNING - Run time of job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:29:26 BST)" was missed by 0:00:01.564264
+2025-10-04 21:29:26,553 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:30:26 BST)" (scheduled at 2025-10-04 21:29:26.089825+01:00)
+2025-10-04 21:29:26,961 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'interfaces': device_info.get('network_interfaces', {})
+        ^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:29:27,367 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:30:26 BST)" executed successfully
