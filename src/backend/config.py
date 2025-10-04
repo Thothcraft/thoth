@@ -50,15 +50,15 @@ class Config:
     DATA_RETENTION_DAYS = int(os.getenv('DATA_RETENTION_DAYS', 30))
     
     # File paths
-    BASE_DIR = '/opt/thoth'
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     DATA_DIR = os.path.join(BASE_DIR, 'data')
-    LOGS_DIR = os.path.join(DATA_DIR, 'logs')
+    LOGS_DIR = os.path.join(BASE_DIR, 'logs')
     CONFIG_DIR = os.path.join(DATA_DIR, 'config')
-    SENSOR_DATA_FILE = os.path.join(LOGS_DIR, 'sensors.json')
+    SENSOR_DATA_FILE = os.path.join(DATA_DIR, 'sensor_data.json')
     
     # Logging
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-    LOG_FILE = os.getenv('LOG_FILE', os.path.join(LOGS_DIR, 'thoth.log'))
+    LOG_FILE = os.path.join(LOGS_DIR, 'thoth.log')
     
     # Device management
     HEARTBEAT_INTERVAL = int(os.getenv('HEARTBEAT_INTERVAL', 60))  # seconds
