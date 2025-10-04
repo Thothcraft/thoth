@@ -44,7 +44,7 @@ try:
     print("Using real Sense HAT")
 except (ImportError, OSError):
     print("Sense HAT not found, using mock implementation")
-    from .mock_sense_hat import sense
+    from backend.mock_sense_hat import sense
 
 from backend.config import Config, BUTTON_ACTIONS, SENSOR_CONFIG
 from backend.models import SensorReading, SystemStatus, ButtonConfig, UploadResult
