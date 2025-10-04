@@ -104,3 +104,1431 @@ This typically means that you attempted to use functionality that needed
 an active HTTP request. Consult the documentation on testing for
 information about how to avoid this problem.
 2025-10-04 21:29:27,367 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:30:26 BST)" executed successfully
+2025-10-04 21:30:26,589 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:31:26 BST)" (scheduled at 2025-10-04 21:30:26.089825+01:00)
+2025-10-04 21:30:27,047 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'interfaces': device_info.get('network_interfaces', {})
+        ^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:30:28,314 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:31:26 BST)" executed successfully
+2025-10-04 21:31:26,560 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:32:26 BST)" (scheduled at 2025-10-04 21:31:26.089825+01:00)
+2025-10-04 21:31:26,852 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:31:26,945 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:32:26 BST)" executed successfully
+2025-10-04 21:32:26,305 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:33:26 BST)" (scheduled at 2025-10-04 21:32:26.089825+01:00)
+2025-10-04 21:32:26,343 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:32:26,356 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:33:26 BST)" executed successfully
+2025-10-04 21:33:26,101 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:34:26 BST)" (scheduled at 2025-10-04 21:33:26.089825+01:00)
+2025-10-04 21:33:26,110 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:33:26,116 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:34:26 BST)" executed successfully
+2025-10-04 21:34:26,092 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:35:26 BST)" (scheduled at 2025-10-04 21:34:26.089825+01:00)
+2025-10-04 21:34:26,099 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:34:26,106 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:35:26 BST)" executed successfully
+2025-10-04 21:35:26,094 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:36:26 BST)" (scheduled at 2025-10-04 21:35:26.089825+01:00)
+2025-10-04 21:35:26,101 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:35:26,107 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:36:26 BST)" executed successfully
+2025-10-04 21:36:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:37:26 BST)" (scheduled at 2025-10-04 21:36:26.089825+01:00)
+2025-10-04 21:36:26,103 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:36:26,125 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:37:26 BST)" executed successfully
+2025-10-04 21:37:26,096 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:38:26 BST)" (scheduled at 2025-10-04 21:37:26.089825+01:00)
+2025-10-04 21:37:26,114 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:37:26,121 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:38:26 BST)" executed successfully
+2025-10-04 21:38:26,092 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:39:26 BST)" (scheduled at 2025-10-04 21:38:26.089825+01:00)
+2025-10-04 21:38:26,101 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:38:26,107 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:39:26 BST)" executed successfully
+2025-10-04 21:39:26,092 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:40:26 BST)" (scheduled at 2025-10-04 21:39:26.089825+01:00)
+2025-10-04 21:39:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:39:26,105 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:40:26 BST)" executed successfully
+2025-10-04 21:40:26,100 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:41:26 BST)" (scheduled at 2025-10-04 21:40:26.089825+01:00)
+2025-10-04 21:40:26,123 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:40:26,143 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:41:26 BST)" executed successfully
+2025-10-04 21:41:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:42:26 BST)" (scheduled at 2025-10-04 21:41:26.089825+01:00)
+2025-10-04 21:41:26,099 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:41:26,107 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:42:26 BST)" executed successfully
+2025-10-04 21:42:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:43:26 BST)" (scheduled at 2025-10-04 21:42:26.089825+01:00)
+2025-10-04 21:42:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:42:26,102 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:43:26 BST)" executed successfully
+2025-10-04 21:43:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:44:26 BST)" (scheduled at 2025-10-04 21:43:26.089825+01:00)
+2025-10-04 21:43:26,102 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:43:26,108 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:44:26 BST)" executed successfully
+2025-10-04 21:44:26,094 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:45:26 BST)" (scheduled at 2025-10-04 21:44:26.089825+01:00)
+2025-10-04 21:44:26,107 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:44:26,123 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:45:26 BST)" executed successfully
+2025-10-04 21:45:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:46:26 BST)" (scheduled at 2025-10-04 21:45:26.089825+01:00)
+2025-10-04 21:45:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:45:26,103 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:46:26 BST)" executed successfully
+2025-10-04 21:46:26,092 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:47:26 BST)" (scheduled at 2025-10-04 21:46:26.089825+01:00)
+2025-10-04 21:46:26,099 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:46:26,104 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:47:26 BST)" executed successfully
+2025-10-04 21:47:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:48:26 BST)" (scheduled at 2025-10-04 21:47:26.089825+01:00)
+2025-10-04 21:47:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:47:26,106 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:48:26 BST)" executed successfully
+2025-10-04 21:48:26,093 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:49:26 BST)" (scheduled at 2025-10-04 21:48:26.089825+01:00)
+2025-10-04 21:48:26,101 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:48:26,105 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:49:26 BST)" executed successfully
+2025-10-04 21:49:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:50:26 BST)" (scheduled at 2025-10-04 21:49:26.089825+01:00)
+2025-10-04 21:49:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:49:26,103 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:50:26 BST)" executed successfully
+2025-10-04 21:50:26,092 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:51:26 BST)" (scheduled at 2025-10-04 21:50:26.089825+01:00)
+2025-10-04 21:50:26,101 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:50:26,107 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:51:26 BST)" executed successfully
+2025-10-04 21:51:26,092 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:52:26 BST)" (scheduled at 2025-10-04 21:51:26.089825+01:00)
+2025-10-04 21:51:26,099 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:51:26,104 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:52:26 BST)" executed successfully
+2025-10-04 21:52:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:53:26 BST)" (scheduled at 2025-10-04 21:52:26.089825+01:00)
+2025-10-04 21:52:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:52:26,103 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:53:26 BST)" executed successfully
+2025-10-04 21:53:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:54:26 BST)" (scheduled at 2025-10-04 21:53:26.089825+01:00)
+2025-10-04 21:53:26,099 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:53:26,106 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:54:26 BST)" executed successfully
+2025-10-04 21:54:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:55:26 BST)" (scheduled at 2025-10-04 21:54:26.089825+01:00)
+2025-10-04 21:54:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:54:26,102 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:55:26 BST)" executed successfully
+2025-10-04 21:55:26,092 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:56:26 BST)" (scheduled at 2025-10-04 21:55:26.089825+01:00)
+2025-10-04 21:55:26,100 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:55:26,105 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:56:26 BST)" executed successfully
+2025-10-04 21:56:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:57:26 BST)" (scheduled at 2025-10-04 21:56:26.089825+01:00)
+2025-10-04 21:56:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:56:26,102 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:57:26 BST)" executed successfully
+2025-10-04 21:57:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:58:26 BST)" (scheduled at 2025-10-04 21:57:26.089825+01:00)
+2025-10-04 21:57:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:57:26,104 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:58:26 BST)" executed successfully
+2025-10-04 21:58:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:59:26 BST)" (scheduled at 2025-10-04 21:58:26.089825+01:00)
+2025-10-04 21:58:26,102 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:58:26,108 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 21:59:26 BST)" executed successfully
+2025-10-04 21:59:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:00:26 BST)" (scheduled at 2025-10-04 21:59:26.089825+01:00)
+2025-10-04 21:59:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 21:59:26,106 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:00:26 BST)" executed successfully
+2025-10-04 22:00:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:01:26 BST)" (scheduled at 2025-10-04 22:00:26.089825+01:00)
+2025-10-04 22:00:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:00:26,103 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:01:26 BST)" executed successfully
+2025-10-04 22:01:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:02:26 BST)" (scheduled at 2025-10-04 22:01:26.089825+01:00)
+2025-10-04 22:01:26,099 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:01:26,104 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:02:26 BST)" executed successfully
+2025-10-04 22:02:26,092 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:03:26 BST)" (scheduled at 2025-10-04 22:02:26.089825+01:00)
+2025-10-04 22:02:26,100 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:02:26,105 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:03:26 BST)" executed successfully
+2025-10-04 22:03:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:04:26 BST)" (scheduled at 2025-10-04 22:03:26.089825+01:00)
+2025-10-04 22:03:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:03:26,104 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:04:26 BST)" executed successfully
+2025-10-04 22:04:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:05:26 BST)" (scheduled at 2025-10-04 22:04:26.089825+01:00)
+2025-10-04 22:04:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:04:26,104 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:05:26 BST)" executed successfully
+2025-10-04 22:05:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:06:26 BST)" (scheduled at 2025-10-04 22:05:26.089825+01:00)
+2025-10-04 22:05:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:05:26,102 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:06:26 BST)" executed successfully
+2025-10-04 22:06:26,093 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:07:26 BST)" (scheduled at 2025-10-04 22:06:26.089825+01:00)
+2025-10-04 22:06:26,102 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:06:26,120 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:07:26 BST)" executed successfully
+2025-10-04 22:07:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:08:26 BST)" (scheduled at 2025-10-04 22:07:26.089825+01:00)
+2025-10-04 22:07:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:07:26,102 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:08:26 BST)" executed successfully
+2025-10-04 22:08:26,092 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:09:26 BST)" (scheduled at 2025-10-04 22:08:26.089825+01:00)
+2025-10-04 22:08:26,099 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:08:26,106 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:09:26 BST)" executed successfully
+2025-10-04 22:09:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:10:26 BST)" (scheduled at 2025-10-04 22:09:26.089825+01:00)
+2025-10-04 22:09:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:09:26,102 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:10:26 BST)" executed successfully
+2025-10-04 22:10:26,092 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:11:26 BST)" (scheduled at 2025-10-04 22:10:26.089825+01:00)
+2025-10-04 22:10:26,099 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:10:26,106 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:11:26 BST)" executed successfully
+2025-10-04 22:11:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:12:26 BST)" (scheduled at 2025-10-04 22:11:26.089825+01:00)
+2025-10-04 22:11:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:11:26,102 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:12:26 BST)" executed successfully
+2025-10-04 22:12:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:13:26 BST)" (scheduled at 2025-10-04 22:12:26.089825+01:00)
+2025-10-04 22:12:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:12:26,103 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:13:26 BST)" executed successfully
+2025-10-04 22:13:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:14:26 BST)" (scheduled at 2025-10-04 22:13:26.089825+01:00)
+2025-10-04 22:13:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:13:26,103 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:14:26 BST)" executed successfully
+2025-10-04 22:14:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:15:26 BST)" (scheduled at 2025-10-04 22:14:26.089825+01:00)
+2025-10-04 22:14:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:14:26,103 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:15:26 BST)" executed successfully
+2025-10-04 22:15:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:16:26 BST)" (scheduled at 2025-10-04 22:15:26.089825+01:00)
+2025-10-04 22:15:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:15:26,103 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:16:26 BST)" executed successfully
+2025-10-04 22:16:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:17:26 BST)" (scheduled at 2025-10-04 22:16:26.089825+01:00)
+2025-10-04 22:16:26,099 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:16:26,110 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:17:26 BST)" executed successfully
+2025-10-04 22:17:26,090 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:18:26 BST)" (scheduled at 2025-10-04 22:17:26.089825+01:00)
+2025-10-04 22:17:26,094 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:17:26,098 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:18:26 BST)" executed successfully
+2025-10-04 22:18:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:19:26 BST)" (scheduled at 2025-10-04 22:18:26.089825+01:00)
+2025-10-04 22:18:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:18:26,102 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:19:26 BST)" executed successfully
+2025-10-04 22:19:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:20:26 BST)" (scheduled at 2025-10-04 22:19:26.089825+01:00)
+2025-10-04 22:19:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:19:26,103 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:20:26 BST)" executed successfully
+2025-10-04 22:20:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:21:26 BST)" (scheduled at 2025-10-04 22:20:26.089825+01:00)
+2025-10-04 22:20:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:20:26,104 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:21:26 BST)" executed successfully
+2025-10-04 22:21:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:22:26 BST)" (scheduled at 2025-10-04 22:21:26.089825+01:00)
+2025-10-04 22:21:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:21:26,102 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:22:26 BST)" executed successfully
+2025-10-04 22:22:26,092 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:23:26 BST)" (scheduled at 2025-10-04 22:22:26.089825+01:00)
+2025-10-04 22:22:26,104 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:22:26,112 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:23:26 BST)" executed successfully
+2025-10-04 22:23:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:24:26 BST)" (scheduled at 2025-10-04 22:23:26.089825+01:00)
+2025-10-04 22:23:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:23:26,103 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:24:26 BST)" executed successfully
+2025-10-04 22:24:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:25:26 BST)" (scheduled at 2025-10-04 22:24:26.089825+01:00)
+2025-10-04 22:24:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:24:26,102 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:25:26 BST)" executed successfully
+2025-10-04 22:25:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:26:26 BST)" (scheduled at 2025-10-04 22:25:26.089825+01:00)
+2025-10-04 22:25:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:25:26,104 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:26:26 BST)" executed successfully
+2025-10-04 22:26:26,090 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:27:26 BST)" (scheduled at 2025-10-04 22:26:26.089825+01:00)
+2025-10-04 22:26:26,094 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:26:26,097 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:27:26 BST)" executed successfully
+2025-10-04 22:27:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:28:26 BST)" (scheduled at 2025-10-04 22:27:26.089825+01:00)
+2025-10-04 22:27:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:27:26,102 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:28:26 BST)" executed successfully
+2025-10-04 22:28:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:29:26 BST)" (scheduled at 2025-10-04 22:28:26.089825+01:00)
+2025-10-04 22:28:26,099 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:28:26,106 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:29:26 BST)" executed successfully
+2025-10-04 22:29:26,090 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:30:26 BST)" (scheduled at 2025-10-04 22:29:26.089825+01:00)
+2025-10-04 22:29:26,094 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:29:26,098 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:30:26 BST)" executed successfully
+2025-10-04 22:30:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:31:26 BST)" (scheduled at 2025-10-04 22:30:26.089825+01:00)
+2025-10-04 22:30:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:30:26,105 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:31:26 BST)" executed successfully
+2025-10-04 22:31:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:32:26 BST)" (scheduled at 2025-10-04 22:31:26.089825+01:00)
+2025-10-04 22:31:26,101 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:31:26,113 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:32:26 BST)" executed successfully
+2025-10-04 22:32:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:33:26 BST)" (scheduled at 2025-10-04 22:32:26.089825+01:00)
+2025-10-04 22:32:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:32:26,103 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:33:26 BST)" executed successfully
+2025-10-04 22:33:26,093 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:34:26 BST)" (scheduled at 2025-10-04 22:33:26.089825+01:00)
+2025-10-04 22:33:26,099 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:33:26,105 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:34:26 BST)" executed successfully
+2025-10-04 22:34:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:35:26 BST)" (scheduled at 2025-10-04 22:34:26.089825+01:00)
+2025-10-04 22:34:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:34:26,102 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:35:26 BST)" executed successfully
+2025-10-04 22:35:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:36:26 BST)" (scheduled at 2025-10-04 22:35:26.089825+01:00)
+2025-10-04 22:35:26,097 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:35:26,102 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:36:26 BST)" executed successfully
+2025-10-04 22:36:26,091 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:37:26 BST)" (scheduled at 2025-10-04 22:36:26.089825+01:00)
+2025-10-04 22:36:26,098 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:36:26,103 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:37:26 BST)" executed successfully
+2025-10-04 22:37:26,090 - apscheduler.executors.default - INFO - Running job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:38:26 BST)" (scheduled at 2025-10-04 22:37:26.089825+01:00)
+2025-10-04 22:37:26,095 - app - ERROR - Unexpected error in device registration: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+Traceback (most recent call last):
+  File "/home/gadpi/Desktop/thoth/src/backend/app.py", line 287, in register_device_periodically
+    'cpu': {
+        ^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 318, in __get__
+    obj = instance._get_current_object()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gadpi/Desktop/thoth/venv/lib/python3.11/site-packages/werkzeug/local.py", line 519, in _get_current_object
+    raise RuntimeError(unbound_message) from None
+RuntimeError: Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request. Consult the documentation on testing for
+information about how to avoid this problem.
+2025-10-04 22:37:26,102 - apscheduler.executors.default - INFO - Job "register_device_periodically (trigger: interval[0:01:00], next run at: 2025-10-04 22:38:26 BST)" executed successfully
