@@ -144,19 +144,12 @@ class DeviceManager:
             import platform
             python_version = platform.python_version()
             
-            # Get device model
-            try:
-                with open('/proc/device-tree/model', 'r') as f:
-                    device_model = f.read().strip('\x00').strip()
-            except FileNotFoundError:
-                device_model = "Raspberry Pi (unknown model)"
-            
+
             # Prepare registration data
             data = {
                 "device_id": self.device_id,
                 "device_name": f"Thoth-{self.device_id[:8]}",
                 "device_type": "thoth",
-                "device_model": device_model,
                 "os_version": f"{os_name} {os_version}",
                 "app_version": self.config.VERSION if hasattr(self.config, 'VERSION') else "1.0.0",
                 "mac_address": self.status['mac_address']
