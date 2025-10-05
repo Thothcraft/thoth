@@ -83,7 +83,6 @@ def inject_now():
 # Initialize scheduler
 device_scheduler = BackgroundScheduler()
 app.secret_key = Config.SECRET_KEY
-{{ ... }}
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # Disable caching for development
 CORS(app)
@@ -345,24 +344,35 @@ def register_device_periodically():
 def register_device_periodically():
     """Register device with Brain server every minute."""
     try:
-        if not Config.BRAIN_SERVER_URL or not Config.DEVICE_TOKEN:
-            logger.warning("Brain server URL or device token not configured, skipping registration")
+        # Skip if Brain server URL is not configured
+        if not getattr(Config, 'BRAIN_SERVER_URL', None):
+            logger.warning("Brain server URL not configured, skipping device registration")
+            return
+            
+        # Skip if authentication token is not configured
+        auth_token = getattr(Config, 'BRAIN_AUTH_TOKEN', None)
+        if not auth_token:
+            logger.warning("Authentication token not configured, skipping device registration")
             return
             
         device_info = get_device_info()
         headers = {
-            'Authorization': f'Bearer {Config.DEVICE_TOKEN}',
+            'Authorization': f'Bearer {auth_token}',
             'Content-Type': 'application/json'
         }
         
+        # Generate a unique device ID if not already set
+        device_id = getattr(Config, 'DEVICE_ID', str(uuid.uuid4()))
+        device_name = getattr(Config, 'DEVICE_NAME', 'Thoth-Device')
+        
         device_data = {
-            'device_id': Config.DEVICE_ID,
-            'name': Config.DEVICE_NAME,
+            'device_id': device_id,
+            'name': device_name,
             'type': 'thoth',
             'status': 'online',
             'info': device_info,
             'last_seen': datetime.utcnow().isoformat(),
-            'last_heartbeat': datetime.utcnow().isoformat()  # Add last_heartbeat
+            'last_heartbeat': datetime.utcnow().isoformat()
         }
         
         logger.info(f"Registering device with Brain server: {device_data}")
@@ -922,3 +932,17 @@ def system_shutdown():
     except Exception as e:
         logger.error(f'Error shutting down: {str(e)}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+if __name__ == '__main__':
+    # Start the scheduler
+    if not device_scheduler.running:
+        device_scheduler.start()
+    
+    # Run the application
+    socketio.run(
+        app,
+        host='0.0.0.0',
+        port=5000,
+        debug=False,
+        use_reloader=False
+    )
