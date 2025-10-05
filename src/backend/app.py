@@ -350,9 +350,10 @@ def register_device_periodically():
             return
             
         # Skip if authentication token is not configured
-        auth_token = getattr(Config, 'BRAIN_AUTH_TOKEN', None)
+        auth_token = getattr(Config, 'BRAIN_ACCESS_TOKEN', None)
         if not auth_token:
             logger.warning("Authentication token not configured, skipping device registration")
+            logger.warning(f"auth_token: {auth_token}")
             return
             
         device_info = get_device_info()
@@ -375,14 +376,29 @@ def register_device_periodically():
             'last_heartbeat': datetime.utcnow().isoformat()
         }
         
-        logger.info(f"Registering device with Brain server: {device_data}")
+        # Prepare the device registration payload
+        registration_data = {
+            'device_id': device_id,
+            'device_name': device_name,
+            'device_type': 'thoth',
+            'hardware_info': device_info
+        }
         
-        response = requests.post(
-            f"{Config.BRAIN_SERVER_URL}/api/devices/register",
-            json=device_data,
-            headers=headers,
-            timeout=10
-        )
+        logger.info(f"Registering device with Brain server: {registration_data}")
+        
+        try:
+            response = requests.post(
+                f"{Config.BRAIN_SERVER_URL}/device/register",
+                json=registration_data,
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()  # Raise an exception for HTTP errors
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error registering device: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response: {e.response.status_code} - {e.response.text}")
+            raise
         
         if response.status_code == 200:
             logger.info(f"Successfully registered device with Brain server. Response: {response.json()}")
