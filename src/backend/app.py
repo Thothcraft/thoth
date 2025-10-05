@@ -309,9 +309,9 @@ def register_device_periodically():
         device_name = session.get('device_name', device_info.get('hostname', 'Thoth Device'))
 
         # Get access token from environment
-        access_token = os.getenv('BRAIN_ACCESS_TOKEN')
+        access_token = os.getenv('BRAIN_AUTH_TOKEN')
         if not access_token:
-            logger.error("No BRAIN_ACCESS_TOKEN found in environment variables")
+            logger.error("No BRAIN_AUTH_TOKEN found in environment variables")
             return
 
         # Prepare request data
@@ -350,7 +350,7 @@ def register_device_periodically():
             return
             
         # Skip if authentication token is not configured
-        auth_token = getattr(Config, 'BRAIN_ACCESS_TOKEN', None)
+        auth_token = getattr(Config, 'BRAIN_AUTH_TOKEN', None)
         if not auth_token:
             logger.warning("Authentication token not configured, skipping device registration")
             logger.warning(f"auth_token: {auth_token}")
