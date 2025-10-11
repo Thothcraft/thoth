@@ -318,23 +318,6 @@ def register_device_periodically():
         data = {
             'device_id': device_id,
             'device_name': device_name,
-            'device_type': 'thoth',
-            'hardware_info': hardware_info
-        }
-        
-        logger.info(f"Registering device with Brain server: {data}")
-        
-        response = requests.post(
-            'https://web-production-d7d37.up.railway.app/device/register',
-            json=data,
-            headers=headers,
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            logger.info(f"Successfully registered device with Brain server. Response: {response.json()}")
-        else:
-            logger.error(f"Failed to register device: {response.status_code} - {response.text}")
             
     except requests.exceptions.RequestException as e:
         logger.error(f"Network error during device registration: {str(e)}")
@@ -388,7 +371,7 @@ def register_device_periodically():
         
         try:
             response = requests.post(
-                f"{Config.BRAIN_SERVER_URL}/device/register",
+                f"{Config.BRAIN_SERVER_URL}/api/device/register",
                 json=registration_data,
                 headers=headers,
                 timeout=10
