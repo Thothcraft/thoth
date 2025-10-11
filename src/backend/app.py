@@ -369,7 +369,7 @@ def register_device_periodically():
         
         # Send registration request
         response = requests.post(
-            f"{Config.BRAIN_SERVER_URL}/api/device/register",
+            f"{Config.BRAIN_SERVER_URL}/device/register",
             json=registration_data,
             headers=headers,
             timeout=30
