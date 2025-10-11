@@ -374,21 +374,30 @@ def register_device_periodically():
         logger.info(f"Registering device with data: {json.dumps(registration_data, indent=2)}")
         
         # Send registration request
-        response = requests.post(
-            f"{Config.BRAIN_SERVER_URL}/device/register",
-            json=registration_data,
-            headers=headers,
-            timeout=30
-        )
-        
-        # Handle response
-        if response.status_code in (200, 201):
-            result = response.json()
-            logger.info(f"Device registration successful: {result}")
-            return True
-        else:
-            logger.error(f"Device registration failed with status {response.status_code}")
-            logger.error(f"Response: {response.text}")
+        try:
+            response = requests.post(
+                f"{Config.BRAIN_SERVER_URL}/device/register",
+                json=registration_data,
+                headers=headers,
+                timeout=30
+            )
+            
+            # Handle response
+            if response.status_code in (200, 201):
+                result = response.json()
+                if result.get('success') == True:
+                    logger.info(f"Device registration successful: {result}")
+                    return True
+                else:
+                    logger.error(f"Device registration failed: {result.get('message', 'Unknown error')}")
+                    return False
+            else:
+                logger.error(f"Device registration failed with status {response.status_code}")
+                logger.error(f"Response: {response.text}")
+                return False
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error during device registration: {str(e)}")
             return False
             
     except requests.exceptions.RequestException as e:
