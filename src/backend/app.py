@@ -350,16 +350,22 @@ def register_device_periodically():
         # Get or generate device ID
         device_id = getattr(Config, 'DEVICE_ID', None)
         if not device_id:
-            # Try to get MAC address as device ID
+            # Try to get MAC address and generate a UUID from it
             mac_address = next(iter(device_info.get('network_interfaces', {}).values()), None)
-            device_id = mac_address or str(uuid.uuid4())
+            if mac_address:
+                # Create a UUID from the MAC address (version 5 with DNS namespace)
+                device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, mac_address))
+            else:
+                device_id = str(uuid.uuid4())
+            
             Config.DEVICE_ID = device_id
             logger.info(f"Generated new device ID: {device_id}")
         
-        # Prepare registration data
+        # Prepare registration data with a display name based on MAC if available
+        mac_display = next(iter(device_info.get('network_interfaces', {}).values()), '')[:8]
         registration_data = {
             'device_id': device_id,
-            'device_name': f"Thoth-{device_id[:8]}",
+            'device_name': f"Thoth-{mac_display}" if mac_display else f"Thoth-{device_id[:8]}",
             'device_type': 'thoth',
             'hardware_info': device_info
         }
