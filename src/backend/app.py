@@ -274,29 +274,7 @@ def register_device_periodically():
     try:
         # Get device info
         device_info = get_device_info()
-        hardware_info = {
-            'os': {
-                'system': device_info.get('system'),
-                'release': device_info.get('release'),
-                'version': device_info.get('version'),
-                'machine': device_info.get('machine'),
-                'python_version': device_info.get('python_version')
-            },
-            'hardware': {
-                'cpu': {
-                    'count': device_info.get('cpu_count'),
-                    'processor': device_info.get('processor')
-                },
-                'memory': device_info.get('memory', {}),
-                'disk': device_info.get('disk_usage', {})
-            },
-            'network': {
-                'hostname': device_info.get('hostname'),
-                'ip_address': device_info.get('ip_address'),
-                'interfaces': device_info.get('network_interfaces', {})
-            }
-        }
-
+        
         # Get device ID from session or generate one
         device_id = session.get('device_id')
         if not device_id:
@@ -318,9 +296,30 @@ def register_device_periodically():
         data = {
             'device_id': device_id,
             'device_name': device_name,
-            
+            'device_type': 'thoth',
+            'hardware_info': device_info
+        }
+        
+        # Send registration request
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.post(
+            f"{Config.BRAIN_SERVER_URL}/api/device/register",
+            json=data,
+            headers=headers,
+            timeout=10
+        )
+        response.raise_for_status()
+        
+        logger.info(f"Device registration successful: {response.json()}")
+        
     except requests.exceptions.RequestException as e:
         logger.error(f"Network error during device registration: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.status_code} - {e.response.text}")
     except Exception as e:
         logger.error(f"Unexpected error in device registration: {str(e)}", exc_info=True)
 
