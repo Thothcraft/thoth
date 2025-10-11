@@ -127,7 +127,7 @@ class DeviceManager:
         if not self.config.BRAIN_SERVER_URL:
             return False, "Brain server URL not configured"
         
-        url = f"{self.config.BRAIN_SERVER_URL}/device/register"
+        url = f"{self.config.BRAIN_SERVER_URL}/api/device/register"
         
         # Get device information
         try:
