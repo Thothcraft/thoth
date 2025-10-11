@@ -331,66 +331,68 @@ def register_device_periodically():
             logger.warning("Brain server URL not configured, skipping device registration")
             return
             
-        # Skip if authentication token is not configured
-        auth_token = getattr(Config, 'BRAIN_AUTH_TOKEN', None)
+        # Get authentication token from environment
+        auth_token = os.getenv('BRAIN_AUTH_TOKEN')
         if not auth_token:
-            logger.warning("Authentication token not configured, skipping device registration")
-            logger.warning(f"auth_token: {auth_token}")
+            logger.warning("BRAIN_AUTH_TOKEN not found in environment variables")
             return
             
+        # Get device information
         device_info = get_device_info()
+        
+        # Prepare headers with the authentication token
         headers = {
-            'Authorization': f'Bearer {auth_token}',
-            'Content-Type': 'application/json'
+            'Authorization': f'Bearer {auth_token.strip()}',
+            'Content-Type': 'application/json',
+            'User-Agent': 'Thoth-Device/1.0'
         }
         
-        # Generate a unique device ID if not already set
-        device_id = getattr(Config, 'DEVICE_ID', str(uuid.uuid4()))
-        device_name = getattr(Config, 'DEVICE_NAME', 'Thoth-Device')
+        # Get or generate device ID
+        device_id = getattr(Config, 'DEVICE_ID', None)
+        if not device_id:
+            # Try to get MAC address as device ID
+            mac_address = next(iter(device_info.get('network_interfaces', {}).values()), None)
+            device_id = mac_address or str(uuid.uuid4())
+            Config.DEVICE_ID = device_id
+            logger.info(f"Generated new device ID: {device_id}")
         
-        device_data = {
-            'device_id': device_id,
-            'name': device_name,
-            'type': 'thoth',
-            'status': 'online',
-            'info': device_info,
-            'last_seen': datetime.utcnow().isoformat(),
-            'last_heartbeat': datetime.utcnow().isoformat()
-        }
-        
-        # Prepare the device registration payload
+        # Prepare registration data
         registration_data = {
             'device_id': device_id,
-            'device_name': device_name,
+            'device_name': f"Thoth-{device_id[:8]}",
             'device_type': 'thoth',
             'hardware_info': device_info
         }
         
-        logger.info(f"Registering device with Brain server: {registration_data}")
+        # Log the request for debugging
+        logger.info(f"Registering device with data: {json.dumps(registration_data, indent=2)}")
         
-        try:
-            response = requests.post(
-                f"{Config.BRAIN_SERVER_URL}/api/device/register",
-                json=registration_data,
-                headers=headers,
-                timeout=10
-            )
-            response.raise_for_status()  # Raise an exception for HTTP errors
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error registering device: {str(e)}")
-            if hasattr(e, 'response') and e.response is not None:
-                logger.error(f"Response: {e.response.status_code} - {e.response.text}")
-            raise
+        # Send registration request
+        response = requests.post(
+            f"{Config.BRAIN_SERVER_URL}/api/device/register",
+            json=registration_data,
+            headers=headers,
+            timeout=30
+        )
         
-        if response.status_code == 200:
-            logger.info(f"Successfully registered device with Brain server. Response: {response.json()}")
+        # Handle response
+        if response.status_code in (200, 201):
+            result = response.json()
+            logger.info(f"Device registration successful: {result}")
+            return True
         else:
-            logger.error(f"Failed to register device: {response.status_code} - {response.text}")
+            logger.error(f"Device registration failed with status {response.status_code}")
+            logger.error(f"Response: {response.text}")
+            return False
             
     except requests.exceptions.RequestException as e:
         logger.error(f"Network error during device registration: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.status_code} - {e.response.text}")
+        return False
     except Exception as e:
         logger.error(f"Unexpected error in device registration: {str(e)}", exc_info=True)
+        return False
 
 # Start background tasks
 socketio.start_background_task(tail_sensor_data)
