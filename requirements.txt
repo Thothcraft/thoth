@@ -2,7 +2,7 @@ flask==3.0.3
 flask-socketio==5.3.6
 flask-cors==4.0.1
 # sense-hat==2.5.0  # Raspberry Pi specific, install manually if needed
-sugarpie==0.1.0
+# sugarpie==0.1.0
 paho-mqtt==1.6.1
 pandas==2.1.4
 requests==2.31.0
@@ -10,3 +10,7 @@ python-dotenv==1.0.0
 eventlet==0.33.3
 netifaces
 APScheduler
+requests
+psutil
+jwt
+
