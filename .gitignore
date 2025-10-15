@@ -69,3 +69,7 @@ src/backend/button_config.json
 
 # Service logs
 *.service.log
+
+
+# Wifi sensing
+WS/data/
