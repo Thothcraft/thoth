@@ -13,4 +13,11 @@ APScheduler
 requests
 psutil
 jwt
-
+scikit-learn
+numpy
+torch
+matplotlib
+seaborn
+tqdm
+plotly
+nbformat
