@@ -21,3 +21,7 @@ seaborn
 tqdm
 plotly
 nbformat
+skorch
+scipy
+PyWavelets
+pytorch-tabnet
