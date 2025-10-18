@@ -25,3 +25,6 @@ skorch
 scipy
 PyWavelets
 pytorch-tabnet
+pytorch-tabular 
+torch-geometric 
+lightgbm
