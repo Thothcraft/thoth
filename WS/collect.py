@@ -6,7 +6,7 @@ CSI collector for two-ESP32 setup (sender + receiver).
 - Prints live sampling rate (CSI lines/sec).
 - Runs for a fixed duration, then exits.
 
-Run using: python collect.py --rx-port /dev/ttyACM1 --tx-port /dev/ttyACM0 --out data/csi_raw13.csv --duration 120 
+Run using: python collect.py --rx-port /dev/ttyACM1 --tx-port /dev/ttyACM0 --out data/csi_raw13.csv --duration 1000 --times 3
 """
 
 import argparse
