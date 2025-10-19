@@ -114,6 +114,39 @@ class DeviceManager:
         except Exception as e:
             logger.error(f"Error getting MAC address: {e}")
             return None
+            
+    def _get_local_ip(self) -> Optional[str]:
+        """Get the device's local IP address."""
+        try:
+            # Try to get IP address by connecting to a known IP and checking the local address
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                # Doesn't need to be reachable
+                s.connect(('10.254.254.254', 1))
+                ip = s.getsockname()[0]
+            except Exception:
+                ip = '127.0.0.1'
+            finally:
+                s.close()
+            
+            # If we got a non-loopback address, return it
+            if ip != '127.0.0.1':
+                return ip
+                
+            # Fallback: try to get IP from network interfaces
+            import netifaces
+            for iface in netifaces.interfaces():
+                addrs = netifaces.ifaddresses(iface)
+                if netifaces.AF_INET in addrs:
+                    for addr in addrs[netifaces.AF_INET]:
+                        if 'addr' in addr and addr['addr'] != '127.0.0.1':
+                            return addr['addr']
+            
+            return None
+        except Exception as e:
+            logger.error(f"Error getting local IP address: {e}")
+            return None
     
     def register_device(self, user_token: str) -> Tuple[bool, str]:
         """Register the device with the Brain server.
@@ -145,6 +178,9 @@ class DeviceManager:
             python_version = platform.python_version()
             
 
+            # Get local IP address
+            local_ip = self._get_local_ip()
+            
             # Prepare registration data
             data = {
                 "device_id": self.device_id,
@@ -152,7 +188,12 @@ class DeviceManager:
                 "device_type": "thoth",
                 "os_version": f"{os_name} {os_version}",
                 "app_version": self.config.VERSION if hasattr(self.config, 'VERSION') else "1.0.0",
-                "mac_address": self.status['mac_address']
+                "mac_address": self.status['mac_address'],
+                "ip_address": local_ip,
+                "hardware_info": {
+                    "local_ip": local_ip,
+                    "hostname": platform.node()
+                }
             }
             
             # Send registration request
