@@ -74,16 +74,25 @@ def reader_thread(rx_port, baud, outfile, duration):
 
 def rate_monitor_thread():
     """Print live CSI sampling rate (lines/sec) every second."""
-    last = 0
-    start = time.time()
+    last_count = 0
+    run_start = time.time()
+    last_time = run_start
+    
     while not stop_event.is_set():
         time.sleep(1.0)
+        current_time = time.time()
         with _csi_count_lock:
-            curr = _csi_count
-        cps = curr - last
-        elapsed = time.time() - start
-        print(f"[rate] {cps:6d} CSI/s   (total={curr}, elapsed={elapsed:5.1f}s)")
-        last = curr
+            current_count = _csi_count
+        
+        # Calculate rate based on actual time elapsed since last print
+        time_elapsed = current_time - last_time
+        if time_elapsed > 0:
+            cps = int((current_count - last_count) / time_elapsed)
+            total_elapsed = current_time - run_start
+            print(f"[rate] {cps:6d} CSI/s   (total={current_count}, elapsed={total_elapsed:5.1f}s)")
+        
+        last_count = current_count
+        last_time = current_time
 
 def discover_note(port_hint):
     """Utility text to help user see connected ports."""
@@ -98,16 +107,18 @@ def main():
     ap.add_argument("--rx-port", required=True, help="Serial port of the receiver ESP32 (e.g. /dev/ttyACM1 or COM5)")
     ap.add_argument("--tx-port", default=None, help="(Optional) Serial port of the sender ESP32 (only reset pulse, no logging)")
     ap.add_argument("--baud", type=int, default=115200, help="Baud rate (default: 115200)")
-    ap.add_argument("--out", required=True, help="Output CSV file path")
+    ap.add_argument("--out", required=True, help="Output CSV file path (without extension)")
     ap.add_argument("--duration", type=float, required=True, help="Recording duration in seconds")
+    ap.add_argument("--times", type=int, default=1, help="Number of times to repeat the collection (default: 1)")
     ap.add_argument("--no-reset", action="store_true", help="Skip reset pulses on the boards")
     args = ap.parse_args()
 
     print(f"[info] Receiver: {args.rx_port} @ {args.baud}")
     if args.tx_port:
         print(f"[info] Sender  : {args.tx_port} @ {args.baud} (no logging, optional reset only)")
-    print(f"[info] Output  : {args.out}")
+    print(f"[info] Base output: {args.out}")
     print(f"[info] Duration: {args.duration:.3f} s")
+    print(f"[info] Repeats: {args.times}")
     print(discover_note(args.rx_port))
 
     # Optional reset pulses to (re)start apps on both boards
@@ -116,32 +127,47 @@ def main():
         if args.tx_port:
             reset_board(args.tx_port, args.baud, "sender")
 
-    # Threads: serial reader + live rate monitor
-    t_reader = threading.Thread(target=reader_thread, args=(args.rx_port, args.baud, args.out, args.duration), daemon=True)
-    t_rate   = threading.Thread(target=rate_monitor_thread, daemon=True)
+    for i in range(args.times):
+        global _csi_count
+        _csi_count = 0  # Reset counter for each run
+        stop_event.clear()  # Reset the stop event
+        
+        # Add sequence number to output filename
+        base_name = args.out.replace('.csv', '')
+        output_file = f"{base_name}_{i+1}.csv"
+        
+        print(f"\n[info] Starting collection {i+1}/{args.times} -> {output_file}")
+        
+        # Threads: serial reader + live rate monitor
+        t_reader = threading.Thread(
+            target=reader_thread, 
+            args=(args.rx_port, args.baud, output_file, args.duration), 
+            daemon=True
+        )
+        t_rate = threading.Thread(target=rate_monitor_thread, daemon=True)
 
-    def handle_sigint(signum, frame):
-        stop_event.set()
-    signal.signal(signal.SIGINT, handle_sigint)
+        def handle_sigint(signum, frame):
+            stop_event.set()
+        signal.signal(signal.SIGINT, handle_sigint)
 
-    t_reader.start()
-    t_rate.start()
+        t_reader.start()
+        t_rate.start()
 
-    # Wait until duration elapsed or Ctrl-C
-    deadline = time.time() + args.duration
-    try:
-        while t_reader.is_alive():
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            time.sleep(min(0.2, max(0.0, remaining)))
-    finally:
-        stop_event.set()
-        t_reader.join()
-        # rate thread is daemon; give it a moment to print final line if desired
-        time.sleep(0.05)
+        # Wait until duration elapsed or Ctrl-C
+        deadline = time.time() + args.duration
+        try:
+            while t_reader.is_alive():
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.2, max(0.0, remaining)))
+        finally:
+            stop_event.set()
+            t_reader.join()
+            # rate thread is daemon; give it a moment to print final line if desired
+            time.sleep(0.05)
 
-    print("[info] Collection stopped.")
+    print("\n[info] All collections completed.")
 
 if __name__ == "__main__":
     main()
