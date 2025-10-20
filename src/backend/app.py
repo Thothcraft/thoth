@@ -65,6 +65,13 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__, template_folder='templates', static_folder='static')
 app.config.from_object(Config)
 
+# Register blueprints
+from backend.routes import files as files_bp
+app.register_blueprint(files_bp.bp)
+
+# Initialize file manager
+from backend.file_manager import file_manager
+
 # Add request logging
 @app.before_request
 def log_request():

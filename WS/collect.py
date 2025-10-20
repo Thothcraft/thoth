@@ -7,6 +7,7 @@ CSI collector for two-ESP32 setup (sender + receiver).
 - Runs for a fixed duration, then exits.
 
 Run using: python collect.py --rx-port /dev/ttyACM1 --tx-port /dev/ttyACM0 --out data/csi_raw13.csv --duration 1000 --times 3
+python collect.py   --rx-port /dev/cu.usbmodem1301   --tx-port /dev/cu.usbmodem1201   --out mac_data/train/work.csv   --duration 1000 --times 3
 """
 
 import argparse

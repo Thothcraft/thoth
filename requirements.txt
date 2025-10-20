@@ -28,3 +28,4 @@ pytorch-tabnet
 pytorch-tabular 
 torch-geometric 
 lightgbm
+pyserial

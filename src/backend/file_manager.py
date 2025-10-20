@@ -53,5 +53,14 @@ class FileManager:
             pass
         return None
 
-# Initialize file manager with the thoth_data directory
-file_manager = FileManager('/Users/gadmohamed/Desktop/thothcraft/thoth/WS/thoth_data')
+import os
+from pathlib import Path
+
+# Use a standard data directory in the user's home directory
+DATA_DIR = Path.home() / 'thoth_data'
+
+# Initialize file manager with the data directory
+file_manager = FileManager(DATA_DIR)
+
+# Ensure the data directory exists
+DATA_DIR.mkdir(parents=True, exist_ok=True)
