@@ -131,9 +131,17 @@ def scan_wifi_networks():
 
 def get_system_uptime() -> str:
     """Get system uptime in a human-readable format."""
-    with open('/proc/uptime', 'r') as f:
-        uptime_seconds = float(f.readline().split()[0])
-        return str(timedelta(seconds=uptime_seconds)).split('.')[0]  # Remove microseconds
+    try:
+        if platform.system() == 'Windows':
+            # Use psutil for Windows
+            uptime_seconds = time.time() - psutil.boot_time()
+            return str(timedelta(seconds=int(uptime_seconds)))
+        else:
+            with open('/proc/uptime', 'r') as f:
+                uptime_seconds = float(f.readline().split()[0])
+                return str(timedelta(seconds=uptime_seconds)).split('.')[0]
+    except Exception:
+        return "unknown"
 
 # Global state
 collection_active = False
@@ -149,26 +157,54 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
         SystemStatus: Current system status
     """
     try:
-        # Check WiFi connection
-        wifi_connected = subprocess.run(
-            ["ping", "-c1", "8.8.8.8"], 
-            capture_output=True, timeout=5
-        ).returncode == 0
+        is_windows = platform.system() == 'Windows'
         
-        # Check collection status
-        collection_status = subprocess.run(
-            ["systemctl", "is-active", "thoth-collector"],
-            capture_output=True, text=True
-        ).stdout.strip() == "active"
+        # Check WiFi connection (platform-aware)
+        try:
+            if is_windows:
+                wifi_connected = subprocess.run(
+                    ["ping", "-n", "1", "8.8.8.8"], 
+                    capture_output=True, timeout=5
+                ).returncode == 0
+            else:
+                wifi_connected = subprocess.run(
+                    ["ping", "-c1", "8.8.8.8"], 
+                    capture_output=True, timeout=5
+                ).returncode == 0
+        except Exception:
+            wifi_connected = False
         
-        # Get battery level (if PiSugar available)
+        # Check collection status (Linux only, mock on Windows)
+        collection_status = False
+        if not is_windows:
+            try:
+                collection_status = subprocess.run(
+                    ["systemctl", "is-active", "thoth-collector"],
+                    capture_output=True, text=True
+                ).stdout.strip() == "active"
+            except Exception:
+                collection_status = False
+        
+        # Get battery level (mock for now)
+        battery_level = None
+        try:
+            battery = psutil.sensors_battery()
+            if battery:
+                battery_level = int(battery.percent)
+        except Exception:
+            battery_level = None
         
         # Get CPU temperature
+        cpu_temp = None
         try:
-            with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
-                cpu_temp = float(f.read().strip()) / 1000.0  # Convert millidegrees to degrees
+            if is_windows:
+                # Windows doesn't expose CPU temp easily, skip
+                cpu_temp = None
+            else:
+                with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
+                    cpu_temp = float(f.read().strip()) / 1000.0
         except Exception as e:
-            logger.error(f"Error getting CPU temperature: {e}")
+            logger.debug(f"Could not get CPU temperature: {e}")
             cpu_temp = None
         
         # Get IP address
@@ -179,8 +215,23 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
             ip_address = s.getsockname()[0]
             s.close()
         except Exception as e:
-            logger.error(f"Error getting IP address: {e}")
-            logger.warning(f"Could not get IP address: {e}")
+            logger.debug(f"Could not get IP address: {e}")
+        
+        # Get disk usage
+        disk_usage = None
+        try:
+            disk = psutil.disk_usage('/')
+            disk_usage = {
+                'total': disk.total,
+                'used': disk.used,
+                'free': disk.free,
+                'percent': disk.percent
+            }
+        except Exception:
+            pass
+        
+        # Get uptime
+        uptime_output = get_system_uptime()
         
         # Create status object
         status = SystemStatus(

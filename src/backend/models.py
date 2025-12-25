@@ -78,6 +78,8 @@ class SystemStatus:
     uptime: Optional[str] = None
     temperature: Optional[float] = None
     disk_usage: Optional[Dict[str, Any]] = None
+    ip_address: Optional[str] = None
+    error: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
