@@ -116,9 +116,8 @@
 
     <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
     <script>
-        // CSRF protection for AJAX requests
-        const csrf_token = "{{ csrf_token() }}";
-        axios.defaults.headers.common['X-CSRFToken'] = csrf_token;
+        // CSRF protection for AJAX requests (disabled for now)
+        // const csrf_token = "";
         
         // Utility functions
         function showAlert(message, type = 'success') {

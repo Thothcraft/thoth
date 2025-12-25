@@ -126,19 +126,19 @@ class AuthManager:
         if not self.config.BRAIN_SERVER_URL:
             raise Exception("Brain server URL not configured")
             
-        url = f"{self.config.BRAIN_SERVER_URL}/auth/token"
+        url = f"{self.config.BRAIN_SERVER_URL}/token"
         
         try:
             # Send login request
             response = requests.post(
                 url,
-                data={
+                json={
                     'username': username,
                     'password': password
                 },
                 headers={
                     'accept': 'application/json',
-                    'Content-Type': 'application/x-www-form-urlencoded'
+                    'Content-Type': 'application/json'
                 },
                 timeout=10
             )

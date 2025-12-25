@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}Login Successful - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto">
+    <div class="text-center mb-8">
+        <div class="inline-flex items-center justify-center w-16 h-16 bg-green-100 rounded-full mb-4">
+            <i class="fas fa-check-circle text-3xl text-green-600"></i>
+        </div>
+        <h1 class="text-3xl font-bold text-gray-900">Login Successful!</h1>
+        <p class="mt-2 text-gray-600">Welcome back, <strong>{{ username }}</strong></p>
+    </div>
+    
+    <div class="card">
+        <h2 class="text-xl font-semibold text-gray-800 mb-4">
+            <i class="fas fa-key mr-2 text-blue-600"></i>
+            Access Token
+        </h2>
+        <div class="bg-gray-900 rounded-lg p-4 overflow-x-auto">
+            <code class="text-green-400 text-sm break-all select-all" id="access-token">{{ access_token }}</code>
+        </div>
+        <div class="mt-4 flex space-x-3">
+            <button onclick="copyToken()" class="btn btn-primary">
+                <i class="fas fa-copy mr-2"></i>
+                Copy Token
+            </button>
+            <a href="{{ url_for('status') }}" class="btn btn-secondary">
+                <i class="fas fa-tachometer-alt mr-2"></i>
+                Go to Dashboard
+            </a>
+        </div>
+    </div>
+    
+    {% if user_info %}
+    <div class="card">
+        <h2 class="text-xl font-semibold text-gray-800 mb-4">
+            <i class="fas fa-user mr-2 text-blue-600"></i>
+            User Information
+        </h2>
+        <dl class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            {% if user_info.user_id %}
+            <div>
+                <dt class="text-sm font-medium text-gray-500">User ID</dt>
+                <dd class="mt-1 text-sm text-gray-900">{{ user_info.user_id }}</dd>
+            </div>
+            {% endif %}
+            {% if user_info.username %}
+            <div>
+                <dt class="text-sm font-medium text-gray-500">Username</dt>
+                <dd class="mt-1 text-sm text-gray-900">{{ user_info.username }}</dd>
+            </div>
+            {% endif %}
+            {% if user_info.email %}
+            <div>
+                <dt class="text-sm font-medium text-gray-500">Email</dt>
+                <dd class="mt-1 text-sm text-gray-900">{{ user_info.email }}</dd>
+            </div>
+            {% endif %}
+        </dl>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+function copyToken() {
+    const token = document.getElementById('access-token').textContent;
+    navigator.clipboard.writeText(token).then(() => {
+        showAlert('Token copied to clipboard!', 'success');
+    }).catch(err => {
+        console.error('Failed to copy token:', err);
+        showAlert('Failed to copy token', 'error');
+    });
+}
+</script>
+{% endblock %}

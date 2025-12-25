@@ -93,7 +93,7 @@ app.secret_key = Config.SECRET_KEY
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # Disable caching for development
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # Ensure required directories exist
 os.makedirs(Config.CONFIG_DIR, exist_ok=True)
@@ -331,17 +331,18 @@ def register_device_periodically():
         logger.error(f"Unexpected error in device registration: {str(e)}", exc_info=True)
 
 def register_device_periodically():
-    """Register device with Brain server every minute."""
+    """Register device with Brain server every minute (only if user is authenticated)."""
     try:
         # Skip if Brain server URL is not configured
         if not getattr(Config, 'BRAIN_SERVER_URL', None):
             logger.warning("Brain server URL not configured, skipping device registration")
             return
             
-        # Get authentication token from environment
-        auth_token = os.getenv('BRAIN_AUTH_TOKEN')
+        # Get authentication token from the authenticated user's session
+        # This is stored globally after successful login
+        auth_token = getattr(Config, 'USER_AUTH_TOKEN', None)
         if not auth_token:
-            logger.warning("BRAIN_AUTH_TOKEN not found in environment variables")
+            logger.debug("No authenticated user token available, skipping device registration")
             return
             
         # Get device information
@@ -411,7 +412,7 @@ def register_device_periodically():
                     return True  # Still consider it a success since the device was registered
                 
                 logger.warning(f"Registration attempt {attempt + 1} failed with status {response.status_code}")
-                logger.debug(f"Response: {response.text}")
+                logger.warning(f"Response body: {response.text}")
                 
                 # If we're out of retries, log the final error
                 if attempt == max_retries - 1:
@@ -744,40 +745,28 @@ def login():
             result = auth_manager.login(username, password)
             
             if result.get('success'):
-                # Register the device with the Brain server
-                success, message = device_manager.register_device(result['token'])
+                # Store user session
+                session['user_id'] = result['user'].get('user_id')
+                session['username'] = username
+                session['token'] = result['token']
                 
-                if success:
-                    # Start the heartbeat to send periodic status updates
-                    device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
-                    logger.info("Device registered and heartbeat started")
-                    
-                    # Store user session
-                    session['user_id'] = result['user'].get('user_id')
-                    session['username'] = username
-                    session['token'] = result['token']
-                    
-                    # Update device status with initial information
-                    device_manager.update_status({
-                        'online': True,
-                        'wifi_connected': True,
-                        'ip_address': request.remote_addr,
-                        'last_seen': datetime.utcnow().isoformat()
-                    })
-                    
-                    # Redirect to next page or status
-                    next_page = request.args.get('next', '')
-                    if next_page and next_page.startswith('/'):
-                        return redirect(next_page)
-                    return redirect(url_for('status'))
-                else:
-                    flash(f'Device registration failed: {message}', 'error')
+                # Store token globally for device registration
+                Config.USER_AUTH_TOKEN = result['token']
+                
+                logger.info(f"Login successful for user: {username}")
+                logger.info("Device registration will now use this user's token")
+                
+                # Show the token on success page
+                return render_template('login_success.html', 
+                                     username=username,
+                                     access_token=result['token'],
+                                     user_info=result['user'])
             else:
                 flash('Invalid username or password', 'error')
                 
         except Exception as e:
-            logger.error(f"Login/registration error: {str(e)}", exc_info=True)
-            flash('An error occurred during login. Please try again.', 'error')
+            logger.error(f"Login error: {str(e)}", exc_info=True)
+            flash(f'Login failed: {str(e)}', 'error')
             
     except Exception as e:
         logger.error(f"Login error: {str(e)}", exc_info=True)
@@ -848,6 +837,9 @@ def logout():
         })
     except Exception as e:
         logger.error(f"Error updating device status on logout: {e}")
+    
+    # Clear the user's auth token so device registration stops
+    Config.USER_AUTH_TOKEN = None
     
     session.clear()
     flash('You have been logged out.', 'info')
@@ -983,11 +975,12 @@ if __name__ == '__main__':
     if not device_scheduler.running:
         device_scheduler.start()
     
-    # Run the application
+    # Run the application with threading mode (more compatible on Windows)
     socketio.run(
         app,
         host='0.0.0.0',
         port=5000,
-        debug=False,
-        use_reloader=False
+        debug=True,
+        use_reloader=False,
+        allow_unsafe_werkzeug=True
     )

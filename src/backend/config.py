@@ -27,7 +27,7 @@ class Config:
     DEVICE_TYPE = 'thoth'
     
     # Brain server configuration
-    BRAIN_SERVER_URL = os.getenv('BRAIN_SERVER_URL', 'http://localhost:8000')
+    BRAIN_SERVER_URL = os.getenv('BRAIN_SERVER_URL', 'https://web-production-d7d37.up.railway.app')
     BRAIN_AUTH_TOKEN = os.getenv('BRAIN_AUTH_TOKEN', '')
     
     # WiFi configuration
