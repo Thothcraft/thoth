@@ -391,6 +391,109 @@ class DeviceManager:
             'brain_server': self.config.BRAIN_SERVER_URL if hasattr(self.config, 'BRAIN_SERVER_URL') else None
         }
     
+    def sync_files_to_cloud(self) -> Tuple[int, int, list]:
+        """Sync local data files to the Brain server.
+        
+        Returns:
+            Tuple of (uploaded_count, skipped_count, errors)
+        """
+        if not self.registered or not self.auth_token:
+            logger.warning("Cannot sync files: Device not registered")
+            return 0, 0, ["Device not registered"]
+        
+        import base64
+        
+        uploaded = 0
+        skipped = 0
+        errors = []
+        
+        try:
+            data_dir = self.config.DATA_DIR
+            if not os.path.exists(data_dir):
+                return 0, 0, ["Data directory not found"]
+            
+            # Get list of data files (with recognized prefixes)
+            prefixes = ['imu_', 'csi_', 'mfcw_', 'img_', 'vid_']
+            local_files = []
+            for item in os.listdir(data_dir):
+                item_path = os.path.join(data_dir, item)
+                if os.path.isfile(item_path):
+                    if any(item.lower().startswith(p) for p in prefixes):
+                        local_files.append(item)
+            
+            if not local_files:
+                logger.info("No data files to sync")
+                return 0, 0, []
+            
+            # Get list of files already on cloud
+            url = f"{self.config.BRAIN_SERVER_URL}/file/files"
+            headers = {
+                "Authorization": f"Bearer {self.auth_token}",
+                "Content-Type": "application/json"
+            }
+            
+            cloud_files = set()
+            try:
+                response = self.session.get(url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    for f in data.get('files', []):
+                        cloud_files.add(f.get('filename', ''))
+            except Exception as e:
+                logger.warning(f"Could not fetch cloud files: {e}")
+            
+            # Upload files not already on cloud
+            for filename in local_files:
+                if filename in cloud_files:
+                    skipped += 1
+                    continue
+                
+                file_path = os.path.join(data_dir, filename)
+                try:
+                    # Read and encode file
+                    with open(file_path, 'rb') as f:
+                        content = base64.b64encode(f.read()).decode('utf-8')
+                    
+                    file_size = os.path.getsize(file_path)
+                    
+                    # Upload to Brain server
+                    upload_url = f"{self.config.BRAIN_SERVER_URL}/file/upload"
+                    upload_data = {
+                        "filename": filename,
+                        "content": content,
+                        "device_id": self.device_id,
+                        "metadata": {
+                            "source": "thoth_device",
+                            "device_id": self.device_id,
+                            "original_size": file_size
+                        }
+                    }
+                    
+                    response = self.session.post(
+                        upload_url,
+                        json=upload_data,
+                        headers=headers,
+                        timeout=60
+                    )
+                    
+                    if response.status_code in [200, 201]:
+                        uploaded += 1
+                        logger.info(f"Uploaded {filename} to cloud")
+                    else:
+                        errors.append(f"{filename}: {response.status_code}")
+                        logger.error(f"Failed to upload {filename}: {response.status_code}")
+                        
+                except Exception as e:
+                    errors.append(f"{filename}: {str(e)}")
+                    logger.error(f"Error uploading {filename}: {e}")
+            
+            logger.info(f"File sync complete: {uploaded} uploaded, {skipped} skipped, {len(errors)} errors")
+            return uploaded, skipped, errors
+            
+        except Exception as e:
+            logger.error(f"Error during file sync: {e}")
+            return uploaded, skipped, [str(e)]
+    
     def __del__(self):
         """Clean up resources."""
         self.stop_heartbeat()

@@ -259,16 +259,12 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
         
         # Get CPU temperature
         cpu_temp = None
-        try:
-            if is_windows:
-                # Windows doesn't expose CPU temp easily, skip
-                cpu_temp = None
-            else:
+        if not is_windows:
+            try:
                 with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
                     cpu_temp = float(f.read().strip()) / 1000.0
-        except Exception as e:
-            logger.debug(f"Could not get CPU temperature: {e}")
-            cpu_temp = None
+            except Exception:
+                pass  # Temperature not available on this system
         
         # Get IP address
         ip_address = None
@@ -1130,13 +1126,14 @@ def status():
         # Get disk usage
         disk_usage = psutil.disk_usage('/')
         
-        # Get CPU temperature
-        try:
-            with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
-                cpu_temp = float(f.read().strip()) / 1000.0  # Convert millidegrees to degrees
-        except Exception as e:
-            logger.error(f"Error getting CPU temperature: {e}")
-            cpu_temp = None
+        # Get CPU temperature (Linux only)
+        cpu_temp = None
+        if platform.system() != 'Windows':
+            try:
+                with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
+                    cpu_temp = float(f.read().strip()) / 1000.0  # Convert millidegrees to degrees
+            except Exception:
+                pass
         
         # Get IP address
         ip_address = None
@@ -1307,6 +1304,25 @@ def system_shutdown():
         })
     except Exception as e:
         logger.error(f'Error shutting down: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/files/sync', methods=['POST'])
+def sync_files_to_cloud():
+    """Sync local data files to the Brain server cloud storage."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+    
+    try:
+        uploaded, skipped, errors = device_manager.sync_files_to_cloud()
+        return jsonify({
+            'status': 'success',
+            'uploaded': uploaded,
+            'skipped': skipped,
+            'errors': errors,
+            'message': f'Synced {uploaded} files to cloud ({skipped} already synced)'
+        })
+    except Exception as e:
+        logger.error(f'Error syncing files: {str(e)}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 if __name__ == '__main__':
