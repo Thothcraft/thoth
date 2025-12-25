@@ -181,6 +181,9 @@ class DeviceManager:
             # Get local IP address
             local_ip = self._get_local_ip()
             
+            # Get list of data files to send to Brain
+            files_list = self._get_data_files_list()
+            
             # Prepare registration data
             data = {
                 "device_id": self.device_id,
@@ -193,7 +196,8 @@ class DeviceManager:
                 "hardware_info": {
                     "local_ip": local_ip,
                     "hostname": platform.node()
-                }
+                },
+                "files": files_list  # Push file list to Brain
             }
             
             # Send registration request
@@ -236,6 +240,42 @@ class DeviceManager:
             error_msg = f"Error during device registration: {str(e)}"
             logger.error(error_msg, exc_info=True)
             return False, error_msg
+    
+    def _get_data_files_list(self) -> List[Dict[str, Any]]:
+        """Get list of data files in the data directory.
+        
+        Returns:
+            List of file info dicts with name, size, created, modified, type
+        """
+        files_list = []
+        try:
+            data_dir = self.config.DATA_DIR
+            if not os.path.exists(data_dir):
+                return files_list
+            
+            # Only include files with recognized data prefixes
+            prefixes = ['imu_', 'csi_', 'mfcw_', 'img_', 'vid_']
+            
+            for item in os.listdir(data_dir):
+                item_path = os.path.join(data_dir, item)
+                if os.path.isfile(item_path):
+                    # Check if it's a data file
+                    if any(item.lower().startswith(p) for p in prefixes):
+                        stat = os.stat(item_path)
+                        files_list.append({
+                            'name': item,
+                            'size': stat.st_size,
+                            'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                            'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                            'type': os.path.splitext(item)[1][1:].lower() if '.' in item else 'unknown'
+                        })
+            
+            logger.info(f"Found {len(files_list)} data files to report")
+            
+        except Exception as e:
+            logger.error(f"Error getting data files list: {e}")
+        
+        return files_list
     
     def _save_registration_info(self, device_info: Dict[str, Any], auth_token: str) -> None:
         """Save device registration information to disk."""

@@ -485,11 +485,16 @@ def register_device_periodically():
         
         # Prepare registration data with a display name based on MAC if available
         mac_display = next(iter(device_info.get('network_interfaces', {}).values()), '')[:8]
+        
+        # Get list of data files to send to Brain
+        files_list = device_manager._get_data_files_list()
+        
         registration_data = {
             'device_id': device_id,
             'device_name': f"Thoth-{mac_display}" if mac_display else f"Thoth-{device_id[:8]}",
             'device_type': 'thoth',
-            'hardware_info': device_info
+            'hardware_info': device_info,
+            'files': files_list  # Push file list to Brain
         }
         
         # Log the request for debugging
