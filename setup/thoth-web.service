@@ -1,0 +1,16 @@
+[Unit]
+Description=Thoth Device Web Application
+After=network.target thoth-hotspot.service
+Wants=thoth-hotspot.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/thoth/src/backend
+Environment=PATH=/home/pi/thoth/venv/bin:/usr/bin:/bin
+ExecStart=/home/pi/thoth/venv/bin/python app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

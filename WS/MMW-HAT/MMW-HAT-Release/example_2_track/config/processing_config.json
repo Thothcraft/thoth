@@ -1,0 +1,16 @@
+{
+    "num_beams": 55,
+    "max_angle_deg": 40,
+    "buffer_len": 10,
+    "buffer_decay": 0.8,
+    "xy_map": 1,
+    "max_x": 5,
+    "max_y": 5,
+    "spatial_resolution": 0.05,
+    "dead_zone": 1.0,
+    "detection": {
+        "num_frames": 5,
+        "range_win": 0.25,
+        "angle_win": 10
+    }
+}

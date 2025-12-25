@@ -108,16 +108,20 @@
                 <div class="flex justify-between mb-1">
                     <span class="text-sm font-medium text-gray-700">Storage</span>
                     <span class="text-sm font-medium text-gray-700">
-                        {{ '%.1f'|format(system_status.disk_usage.used_gb) }} GB of {{ '%.1f'|format(system_status.disk_usage.total_gb) }} GB used
+                        {% if system_status.disk_usage %}
+                        {{ '%.1f'|format(system_status.disk_usage['used_gb']|default(0)) }} GB of {{ '%.1f'|format(system_status.disk_usage['total_gb']|default(0)) }} GB used
+                        {% else %}
+                        N/A
+                        {% endif %}
                     </span>
                 </div>
                 <div class="disk-usage-container">
                     <div class="disk-usage-level" 
-                         data-level="{{ system_status.disk_usage.percent_used }}"></div>
+                         data-level="{{ system_status.disk_usage['percent_used']|default(0) if system_status.disk_usage else 0 }}"></div>
                 </div>
                 <div class="flex justify-between mt-1">
-                    <span class="text-xs text-gray-500">{{ system_status.disk_usage.percent_used }}% used</span>
-                    <span class="text-xs text-gray-500">{{ '%.1f'|format(system_status.disk_usage.free_gb) }} GB free</span>
+                    <span class="text-xs text-gray-500">{{ system_status.disk_usage['percent_used']|default(0) if system_status.disk_usage else 0 }}% used</span>
+                    <span class="text-xs text-gray-500">{% if system_status.disk_usage %}{{ '%.1f'|format(system_status.disk_usage['free_gb']|default(0)) }} GB free{% else %}N/A{% endif %}</span>
                 </div>
             </div>
         </div>
@@ -130,8 +134,8 @@
             Actions
         </h2>
         
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <button onclick="toggleCollection()" class="btn collection-start">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <button onclick="toggleCollection()" class="btn collection-start">
                 <i class="fas fa-{{ 'play' if not system_status.collection_active else 'stop' }} mr-2"></i>
                 {{ 'Start' if not system_status.collection_active else 'Stop' }} Collection
             </button>
@@ -141,18 +145,14 @@
                 Restart Collector
             </button>
             
-            <button onclick="restartService('thoth-web')" class="btn btn-warning">
-                <i class="fas fa-sync-alt mr-2"></i>
-                Restart Web Interface
-            </button>
-            
-            <button onclick="shutdownDevice()" class="btn btn-danger">
-                <i class="fas fa-power-off mr-2"></i>
-                Shutdown
-            </button>
+            <a href="{{ url_for('logout') }}" class="btn btn-danger">
+                <i class="fas fa-sign-out-alt mr-2"></i>
+                Logout
+            </a>
         </div>
     </div>
 </div>
+{% endblock %}
 
 {% block scripts %}
 <script>

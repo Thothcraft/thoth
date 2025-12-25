@@ -1,0 +1,13 @@
+[Unit]
+Description=Thoth Hotspot Manager
+Before=thoth-web.service
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/pi/thoth/setup/hotspot-manager.sh start
+ExecStop=/home/pi/thoth/setup/hotspot-manager.sh stop
+
+[Install]
+WantedBy=multi-user.target
