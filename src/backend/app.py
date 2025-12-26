@@ -585,13 +585,15 @@ def register_device_periodically():
                     # Try to parse the response as JSON
                     try:
                         result = response.json()
+                        logger.info(f"Registration response JSON: {result}")
                         if result.get('success') == True or 'device_id' in result:
-                            logger.info(f"Device registration successful: {result}")
+                            logger.info(f"Device registration successful")
                             
                             # Check for pending upload requests
                             pending_uploads = result.get('pending_uploads', [])
+                            logger.info(f"Pending uploads in response: {pending_uploads}")
                             if pending_uploads:
-                                logger.info(f"Pending uploads requested: {pending_uploads}")
+                                logger.info(f"Processing {len(pending_uploads)} pending uploads...")
                                 _process_pending_uploads(pending_uploads, auth_token)
                             
                             return True
