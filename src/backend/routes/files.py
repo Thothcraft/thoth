@@ -2,7 +2,13 @@
 from flask import Blueprint, jsonify, request, send_file, abort
 from pathlib import Path
 import os
+import base64
+import requests
+import logging
 from ..file_manager import file_manager
+from ..config import Config
+
+logger = logging.getLogger(__name__)
 
 bp = Blueprint('files', __name__, url_prefix='/api/files')
 
@@ -93,6 +99,92 @@ def upload_file():
         })
         
     except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@bp.route('/upload-to-cloud/<path:filename>', methods=['POST'])
+def upload_to_cloud(filename):
+    """Upload a local file to the Brain cloud server.
+    
+    This endpoint is called by the Research Portal to trigger Thoth to push
+    a file to Brain (since Brain cannot reach Thoth due to NAT).
+    """
+    try:
+        # Get auth token from config (set during login)
+        auth_token = getattr(Config, 'USER_AUTH_TOKEN', None)
+        if not auth_token:
+            return jsonify({
+                'status': 'error',
+                'message': 'Device not authenticated. Please log in first.'
+            }), 401
+        
+        # Get the file path
+        file_path = file_manager.get_file(filename)
+        if not file_path or not file_path.exists():
+            return jsonify({
+                'status': 'error',
+                'message': f'File not found: {filename}'
+            }), 404
+        
+        # Read file content
+        with open(file_path, 'rb') as f:
+            content = f.read()
+        
+        # Encode as base64
+        content_b64 = base64.b64encode(content).decode('utf-8')
+        
+        # Determine content type
+        ext = file_path.suffix.lower()
+        content_type = 'application/json' if ext == '.json' else 'text/csv' if ext == '.csv' else 'application/octet-stream'
+        
+        # Get device ID
+        device_id = getattr(Config, 'DEVICE_ID', None)
+        
+        # Upload to Brain
+        brain_url = f"{Config.BRAIN_SERVER_URL}/file/upload"
+        headers = {
+            'Authorization': f'Bearer {auth_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        payload = {
+            'filename': filename,
+            'content': content_b64,
+            'is_base64': True,
+            'device_id': device_id,
+            'content_type': content_type
+        }
+        
+        logger.info(f"Uploading {filename} ({len(content)} bytes) to Brain cloud")
+        
+        response = requests.post(brain_url, json=payload, headers=headers, timeout=120)
+        
+        if response.status_code in (200, 201):
+            result = response.json()
+            logger.info(f"File uploaded successfully: {result}")
+            return jsonify({
+                'status': 'success',
+                'message': 'File uploaded to cloud',
+                'cloud_file_id': result.get('file_id'),
+                'filename': filename
+            })
+        else:
+            logger.error(f"Upload failed: {response.status_code} - {response.text}")
+            return jsonify({
+                'status': 'error',
+                'message': f'Upload failed: {response.text}'
+            }), response.status_code
+            
+    except requests.exceptions.Timeout:
+        return jsonify({
+            'status': 'error',
+            'message': 'Upload timed out'
+        }), 504
+    except Exception as e:
+        logger.error(f"Error uploading to cloud: {e}")
         return jsonify({
             'status': 'error',
             'message': str(e)

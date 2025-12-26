@@ -444,6 +444,73 @@ def register_device_periodically():
     except Exception as e:
         logger.error(f"Unexpected error in device registration: {str(e)}", exc_info=True)
 
+
+def _process_pending_uploads(filenames: list, auth_token: str):
+    """Process pending upload requests by uploading files to Brain server.
+    
+    Args:
+        filenames: List of filenames to upload
+        auth_token: User authentication token
+    """
+    import base64
+    import threading
+    
+    def upload_files():
+        for filename in filenames:
+            try:
+                # Get file path
+                file_path = os.path.join(Config.DATA_DIR, filename)
+                if not os.path.exists(file_path):
+                    logger.warning(f"File not found for upload: {filename}")
+                    continue
+                
+                # Read file content
+                with open(file_path, 'rb') as f:
+                    content = f.read()
+                
+                # Encode as base64
+                content_b64 = base64.b64encode(content).decode('utf-8')
+                
+                # Determine content type
+                ext = os.path.splitext(filename)[1].lower()
+                content_type = 'application/json' if ext == '.json' else 'text/csv' if ext == '.csv' else 'application/octet-stream'
+                
+                # Get device ID
+                device_id = getattr(Config, 'DEVICE_ID', None)
+                
+                # Upload to Brain
+                brain_url = f"{Config.BRAIN_SERVER_URL}/file/upload"
+                headers = {
+                    'Authorization': f'Bearer {auth_token}',
+                    'Content-Type': 'application/json'
+                }
+                
+                payload = {
+                    'filename': filename,
+                    'content': content_b64,
+                    'is_base64': True,
+                    'device_id': device_id,
+                    'content_type': content_type
+                }
+                
+                logger.info(f"Uploading {filename} ({len(content)} bytes) to Brain cloud")
+                
+                response = requests.post(brain_url, json=payload, headers=headers, timeout=120)
+                
+                if response.status_code in (200, 201):
+                    result = response.json()
+                    logger.info(f"File uploaded successfully: {filename} -> cloud_file_id={result.get('file_id')}")
+                else:
+                    logger.error(f"Upload failed for {filename}: {response.status_code} - {response.text}")
+                    
+            except Exception as e:
+                logger.error(f"Error uploading {filename}: {e}")
+    
+    # Run uploads in background thread to not block registration
+    thread = threading.Thread(target=upload_files, daemon=True)
+    thread.start()
+
+
 def register_device_periodically():
     """Register device with Brain server every minute (only if user is authenticated)."""
     try:
@@ -520,6 +587,13 @@ def register_device_periodically():
                         result = response.json()
                         if result.get('success') == True or 'device_id' in result:
                             logger.info(f"Device registration successful: {result}")
+                            
+                            # Check for pending upload requests
+                            pending_uploads = result.get('pending_uploads', [])
+                            if pending_uploads:
+                                logger.info(f"Pending uploads requested: {pending_uploads}")
+                                _process_pending_uploads(pending_uploads, auth_token)
+                            
                             return True
                     except ValueError:
                         # If we can't parse JSON but got a 200, consider it a success
@@ -562,11 +636,11 @@ def register_device_periodically():
 # Start background tasks
 socketio.start_background_task(tail_sensor_data)
 
-# Start device registration scheduler
+# Start device registration scheduler (10 second interval for responsive uploads)
 device_scheduler.add_job(
     register_device_periodically,
     'interval',
-    minutes=1,
+    seconds=10,
     id='device_registration',
     replace_existing=True
 )
