@@ -1,0 +1,15 @@
+[Unit]
+Description=Thoth First Boot Setup
+After=network.target
+Before=thoth-web.service
+ConditionPathExists=!/etc/thoth-first-boot-done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/pi/thoth/setup/first-boot.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

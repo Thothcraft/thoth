@@ -48,7 +48,12 @@ class AuthManager:
                         if auth_data.get('token_expiry') else None
                     self.user_info = auth_data.get('user_info')
                     
-                    logger.info("Loaded authentication data from disk")
+                    # Set token on Config for device registration
+                    if self.token:
+                        self.config.USER_AUTH_TOKEN = self.token
+                        logger.info("Loaded authentication data from disk and set USER_AUTH_TOKEN")
+                    else:
+                        logger.info("Loaded authentication data from disk (no token)")
                     
         except Exception as e:
             logger.error(f"Error loading auth data: {e}")

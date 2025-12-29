@@ -987,6 +987,53 @@ def button_config():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ============================================================================
+# CAPTIVE PORTAL DETECTION ROUTES
+# These routes handle automatic captive portal detection for various devices
+# ============================================================================
+
+@app.route('/generate_204')
+@app.route('/gen_204')
+def android_captive_portal():
+    """Android captive portal detection - redirect to setup."""
+    return redirect(url_for('setup'))
+
+@app.route('/hotspot-detect.html')
+@app.route('/library/test/success.html')
+def apple_captive_portal():
+    """Apple/iOS captive portal detection - redirect to setup."""
+    return redirect(url_for('setup'))
+
+@app.route('/connecttest.txt')
+@app.route('/ncsi.txt')
+def windows_captive_portal():
+    """Windows captive portal detection - redirect to setup."""
+    return redirect(url_for('setup'))
+
+@app.route('/success.txt')
+def firefox_captive_portal():
+    """Firefox captive portal detection - redirect to setup."""
+    return redirect(url_for('setup'))
+
+@app.route('/canonical.html')
+def ubuntu_captive_portal():
+    """Ubuntu captive portal detection - redirect to setup."""
+    return redirect(url_for('setup'))
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def catch_all(path):
+    """Catch-all route for captive portal - redirect unknown paths to setup."""
+    # Only redirect if in hotspot mode (no WiFi configured)
+    config_flag = os.path.join(Config.DATA_DIR, 'config', 'wifi_configured.flag')
+    if not os.path.exists(config_flag):
+        # In hotspot/setup mode - redirect to setup
+        if path not in ['setup', 'login', 'status', 'static', 'api', 'wifi']:
+            if not path.startswith(('static/', 'api/', 'wifi/')):
+                return redirect(url_for('setup'))
+    # Otherwise, return 404 for unknown paths
+    return abort(404)
+
 @app.route('/setup')
 def setup():
     """Show the setup page for WiFi and login."""
