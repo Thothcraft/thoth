@@ -61,7 +61,7 @@ class Config:
     LOG_FILE = os.path.join(LOGS_DIR, 'thoth.log')
     
     # Device management
-    HEARTBEAT_INTERVAL = int(os.getenv('HEARTBEAT_INTERVAL', 60))  # seconds
+    HEARTBEAT_INTERVAL = int(os.getenv('HEARTBEAT_INTERVAL', 10))  # seconds
     MAX_HEARTBEAT_FAILURES = int(os.getenv('MAX_HEARTBEAT_FAILURES', 3))
     
     # Captive portal
