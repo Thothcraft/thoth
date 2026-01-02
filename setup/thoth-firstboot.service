@@ -1,7 +1,6 @@
 [Unit]
 Description=Thoth First Boot Setup
-After=network-online.target
-Wants=network-online.target
+After=network.target
 Before=thoth-web.service
 ConditionPathExists=!/etc/thoth-first-boot-done
 

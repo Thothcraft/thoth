@@ -103,6 +103,10 @@ fi
 # Also disable wpa_supplicant auto-start (we control it manually)
 systemctl disable wpa_supplicant 2>/dev/null || true
 
+# Ensure dhcpcd is enabled (critical for interface management on Pi)
+systemctl enable dhcpcd 2>/dev/null || true
+systemctl start dhcpcd 2>/dev/null || true
+
 # Backup original configs
 [ -f /etc/hostapd/hostapd.conf ] && cp /etc/hostapd/hostapd.conf /etc/hostapd/hostapd.conf.backup
 [ -f /etc/dnsmasq.conf ] && cp /etc/dnsmasq.conf /etc/dnsmasq.conf.backup
@@ -171,12 +175,15 @@ cat /dev/null > /root/.bash_history 2>/dev/null || true
 apt-get clean
 rm -rf /var/cache/apt/archives/*
 
-# Remove temporary files
-rm -rf /tmp/*
-rm -rf /var/tmp/*
+# Remove temporary files (but keep system-critical ones)
+find /tmp -type f -name "*.tmp" -delete 2>/dev/null || true
+find /tmp -type f -name "temp*" -delete 2>/dev/null || true
+# Don't delete /tmp/* - it contains critical system files for boot
 
+# NOTE: SSH key removal and regeneration is only for final image creation
+# Commented out for testing purposes
 # Remove SSH host keys (will be regenerated on first boot)
-rm -f /etc/ssh/ssh_host_*
+# rm -f /etc/ssh/ssh_host_*
 
 # Remove any WiFi credentials used during image building
 cat > /etc/wpa_supplicant/wpa_supplicant.conf << 'WPAEOF'
@@ -185,19 +192,20 @@ update_config=1
 country=US
 WPAEOF
 
+# NOTE: SSH regeneration is only for final image creation
 # Create flag to regenerate SSH keys on first boot
-touch /etc/ssh/sshd_not_to_be_run
-cat > /etc/rc.local << 'EOF'
-#!/bin/bash
-# Regenerate SSH host keys on first boot
-if [ -f /etc/ssh/sshd_not_to_be_run ]; then
-    rm -f /etc/ssh/sshd_not_to_be_run
-    dpkg-reconfigure openssh-server
-    systemctl restart ssh
-fi
-exit 0
-EOF
-chmod +x /etc/rc.local
+# touch /etc/ssh/sshd_not_to_be_run
+# cat > /etc/rc.local << 'EOF'
+# #!/bin/bash
+# # Regenerate SSH host keys on first boot
+# if [ -f /etc/ssh/sshd_not_to_be_run ]; then
+#     rm -f /etc/ssh/sshd_not_to_be_run
+#     dpkg-reconfigure openssh-server
+#     systemctl restart ssh
+# fi
+# exit 0
+# EOF
+# chmod +x /etc/rc.local
 
 # Sync filesystem
 sync
