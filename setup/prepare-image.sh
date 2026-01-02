@@ -94,7 +94,19 @@ chmod +x "$SCRIPT_DIR/connect-wifi.sh"
 # Reload systemd
 systemctl daemon-reload
 
-echo "[8/10] Configuring hostapd and dnsmasq..."
+echo "[8/10] Disabling NetworkManager and configuring hotspot..."
+
+# Disable NetworkManager completely (it conflicts with our hotspot)
+if systemctl is-active NetworkManager &>/dev/null; then
+    echo "Disabling NetworkManager..."
+    systemctl stop NetworkManager
+    systemctl disable NetworkManager
+    systemctl mask NetworkManager
+fi
+
+# Also disable wpa_supplicant auto-start (we control it manually)
+systemctl disable wpa_supplicant 2>/dev/null || true
+
 # Backup original configs
 [ -f /etc/hostapd/hostapd.conf ] && cp /etc/hostapd/hostapd.conf /etc/hostapd/hostapd.conf.backup
 [ -f /etc/dnsmasq.conf ] && cp /etc/dnsmasq.conf /etc/dnsmasq.conf.backup
@@ -107,20 +119,23 @@ cp "$SCRIPT_DIR/dnsmasq.conf" /etc/dnsmasq.conf
 echo 'DAEMON_CONF="/etc/hostapd/hostapd.conf"' > /etc/default/hostapd
 
 # Unmask hostapd and dnsmasq (required on Pi OS - they come masked by default)
+# First remove any existing service files that might be mask symlinks
+rm -f /etc/systemd/system/hostapd.service 2>/dev/null || true
+rm -f /etc/systemd/system/dnsmasq.service 2>/dev/null || true
+systemctl daemon-reload
+
+# Now unmask them
 systemctl unmask hostapd
 systemctl unmask dnsmasq
 
-# Remove any mask symlinks that might persist
-rm -f /etc/systemd/system/hostapd.service
-rm -f /etc/systemd/system/dnsmasq.service
-systemctl daemon-reload
-systemctl unmask hostapd
-systemctl unmask dnsmasq
+# Verify they are unmasked
+echo "Verifying hostapd status:"
+systemctl is-enabled hostapd || true
 
 # Disable hostapd and dnsmasq from starting automatically
 # (first-boot service will control them)
-systemctl disable hostapd
-systemctl disable dnsmasq
+systemctl disable hostapd 2>/dev/null || true
+systemctl disable dnsmasq 2>/dev/null || true
 systemctl stop hostapd 2>/dev/null || true
 systemctl stop dnsmasq 2>/dev/null || true
 

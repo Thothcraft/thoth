@@ -28,8 +28,21 @@ sleep 10
 
 log "Setting up network interfaces..."
 
-# Ensure wlan0 is up
+# Stop and disable NetworkManager if it exists (conflicts with hotspot)
+if systemctl is-active NetworkManager &>/dev/null; then
+    log "Stopping NetworkManager..."
+    systemctl stop NetworkManager
+    systemctl disable NetworkManager
+    systemctl mask NetworkManager
+fi
+
+# Stop wpa_supplicant
+systemctl stop wpa_supplicant 2>/dev/null || true
+
+# Ensure WiFi is unblocked
 rfkill unblock wifi 2>/dev/null || true
+
+# Bring up wlan0
 ip link set wlan0 up 2>/dev/null || true
 
 # Wait for interface
@@ -43,9 +56,13 @@ done
 
 log "Configuring hotspot mode..."
 
-# Stop any existing network services that might interfere
-systemctl stop wpa_supplicant 2>/dev/null || true
-systemctl stop NetworkManager 2>/dev/null || true
+# Ensure hostapd and dnsmasq are unmasked
+log "Unmasking hostapd and dnsmasq..."
+rm -f /etc/systemd/system/hostapd.service 2>/dev/null || true
+rm -f /etc/systemd/system/dnsmasq.service 2>/dev/null || true
+systemctl daemon-reload
+systemctl unmask hostapd 2>/dev/null || true
+systemctl unmask dnsmasq 2>/dev/null || true
 
 # Configure static IP for AP mode
 ip addr flush dev wlan0 2>/dev/null || true
