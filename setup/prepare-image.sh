@@ -82,10 +82,6 @@ echo "Fixing line endings on scripts and configs..."
 find "$SCRIPT_DIR" -type f \( -name "*.sh" -o -name "*.conf" -o -name "*.service" \) -exec dos2unix {} \; 2>/dev/null || \
     find "$SCRIPT_DIR" -type f \( -name "*.sh" -o -name "*.conf" -o -name "*.service" \) -exec sed -i 's/\r$//' {} \;
 
-# Also fix the copied config files
-dos2unix /etc/hostapd/hostapd.conf 2>/dev/null || sed -i 's/\r$//' /etc/hostapd/hostapd.conf
-dos2unix /etc/dnsmasq.conf 2>/dev/null || sed -i 's/\r$//' /etc/dnsmasq.conf
-
 # Make scripts executable
 chmod +x "$SCRIPT_DIR/first-boot.sh"
 chmod +x "$SCRIPT_DIR/hotspot-manager.sh"
@@ -114,6 +110,10 @@ systemctl disable wpa_supplicant 2>/dev/null || true
 # Copy our configs
 cp "$SCRIPT_DIR/hostapd.conf" /etc/hostapd/hostapd.conf
 cp "$SCRIPT_DIR/dnsmasq.conf" /etc/dnsmasq.conf
+
+# Fix line endings on the copied config files
+dos2unix /etc/hostapd/hostapd.conf 2>/dev/null || sed -i 's/\r$//' /etc/hostapd/hostapd.conf
+dos2unix /etc/dnsmasq.conf 2>/dev/null || sed -i 's/\r$//' /etc/dnsmasq.conf
 
 # Point hostapd to config
 echo 'DAEMON_CONF="/etc/hostapd/hostapd.conf"' > /etc/default/hostapd
