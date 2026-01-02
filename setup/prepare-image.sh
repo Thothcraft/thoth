@@ -77,18 +77,21 @@ sed -i "s|/home/pi/thoth|$THOTH_DIR|g" /etc/systemd/system/thoth-web.service
 sed -i "s|/home/pi/thoth|$THOTH_DIR|g" /etc/systemd/system/thoth-hotspot.service
 sed -i "s|/home/pi/thoth|$THOTH_DIR|g" /etc/systemd/system/thoth-firstboot.service
 
+# Verify services are enabled
+systemctl enable thoth-firstboot.service
+systemctl enable thoth-web.service
+
+# Reload systemd
+systemctl daemon-reload
+
 # Fix Windows line endings (CRLF -> LF) on all scripts and configs
 echo "Fixing line endings on scripts and configs..."
 find "$SCRIPT_DIR" -type f \( -name "*.sh" -o -name "*.conf" -o -name "*.service" \) -exec dos2unix {} \; 2>/dev/null || \
     find "$SCRIPT_DIR" -type f \( -name "*.sh" -o -name "*.conf" -o -name "*.service" \) -exec sed -i 's/\r$//' {} \;
 
-# Make scripts executable
-chmod +x "$SCRIPT_DIR/first-boot.sh"
-chmod +x "$SCRIPT_DIR/hotspot-manager.sh"
-chmod +x "$SCRIPT_DIR/connect-wifi.sh"
-
-# Reload systemd
-systemctl daemon-reload
+# Ensure all scripts are executable and have correct permissions
+find "$SCRIPT_DIR" -type f \( -name "*.sh" \) -exec chmod +x {} \;
+chown -R "$THOTH_USER:$THOTH_USER" "$SCRIPT_DIR"
 
 echo "[8/10] Disabling NetworkManager and configuring hotspot..."
 

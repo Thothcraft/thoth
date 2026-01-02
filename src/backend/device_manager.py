@@ -13,7 +13,7 @@ import uuid
 import time
 import threading
 from datetime import datetime
-from typing import Dict, Optional, Any, Tuple
+from typing import Dict, Optional, Any, Tuple, List
 
 import requests
 from requests.adapters import HTTPAdapter
