@@ -106,8 +106,16 @@ cp "$SCRIPT_DIR/dnsmasq.conf" /etc/dnsmasq.conf
 # Point hostapd to config
 echo 'DAEMON_CONF="/etc/hostapd/hostapd.conf"' > /etc/default/hostapd
 
-# Unmask hostapd (required on some Pi OS versions)
+# Unmask hostapd and dnsmasq (required on Pi OS - they come masked by default)
 systemctl unmask hostapd
+systemctl unmask dnsmasq
+
+# Remove any mask symlinks that might persist
+rm -f /etc/systemd/system/hostapd.service
+rm -f /etc/systemd/system/dnsmasq.service
+systemctl daemon-reload
+systemctl unmask hostapd
+systemctl unmask dnsmasq
 
 # Disable hostapd and dnsmasq from starting automatically
 # (first-boot service will control them)
