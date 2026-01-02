@@ -1,13 +1,16 @@
 [Unit]
 Description=Thoth First Boot Setup
-After=network.target
+After=network-online.target
+Wants=network-online.target
 Before=thoth-web.service
 ConditionPathExists=!/etc/thoth-first-boot-done
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/home/pi/thoth/setup/first-boot.sh
+ExecStartPre=/bin/sleep 5
+ExecStart=/bin/bash /home/pi/thoth/setup/first-boot.sh
+TimeoutStartSec=300
 StandardOutput=journal
 StandardError=journal
 

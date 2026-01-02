@@ -15,17 +15,32 @@ start_hotspot() {
         return 0
     fi
     
+    # Unblock WiFi
+    rfkill unblock wifi 2>/dev/null || true
+    
     # Stop any existing WiFi connection
     systemctl stop wpa_supplicant 2>/dev/null || true
+    systemctl stop NetworkManager 2>/dev/null || true
+    
+    # Wait for interface to be ready
+    sleep 2
     
     # Configure static IP for AP mode
-    ip addr flush dev $INTERFACE
-    ip addr add 192.168.4.1/24 dev $INTERFACE
-    ip link set $INTERFACE up
+    ip addr flush dev $INTERFACE 2>/dev/null || true
+    ip addr add 192.168.4.1/24 dev $INTERFACE 2>/dev/null || true
+    ip link set $INTERFACE up 2>/dev/null || true
     
-    # Start hostapd and dnsmasq
-    systemctl start hostapd
-    systemctl start dnsmasq
+    # Start hostapd and dnsmasq with retries
+    for i in 1 2 3; do
+        if systemctl start hostapd; then
+            echo "hostapd started"
+            break
+        fi
+        echo "hostapd attempt $i failed, retrying..."
+        sleep 2
+    done
+    
+    systemctl start dnsmasq 2>/dev/null || true
     
     echo "Hotspot started: Thoth-AP (192.168.4.1)"
 }

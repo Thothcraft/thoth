@@ -3,7 +3,7 @@
 # This script runs once on first boot to initialize the device
 # and start the captive portal for WiFi configuration
 
-set -e
+# Don't use set -e as we want to continue even if some commands fail
 
 THOTH_DIR="/home/pi/thoth"
 FIRST_BOOT_FLAG="/etc/thoth-first-boot-done"
@@ -53,10 +53,19 @@ ip addr add 192.168.4.1/24 dev wlan0
 ip link set wlan0 up
 
 log "Starting hostapd (WiFi Access Point)..."
-systemctl start hostapd
+# Retry hostapd start a few times as it can fail on first attempt
+for i in 1 2 3; do
+    if systemctl start hostapd; then
+        log "hostapd started successfully"
+        break
+    else
+        log "hostapd start attempt $i failed, retrying..."
+        sleep 2
+    fi
+done
 
 log "Starting dnsmasq (DHCP/DNS for captive portal)..."
-systemctl start dnsmasq
+systemctl start dnsmasq || log "Warning: dnsmasq failed to start"
 
 # Enable IP forwarding for captive portal
 echo 1 > /proc/sys/net/ipv4/ip_forward
@@ -67,7 +76,7 @@ iptables -t nat -A PREROUTING -i wlan0 -p tcp --dport 443 -j DNAT --to-destinati
 iptables -t nat -A POSTROUTING -j MASQUERADE
 
 log "Starting Thoth web application..."
-systemctl start thoth-web
+systemctl start thoth-web || log "Warning: thoth-web failed to start"
 
 log "=========================================="
 log "  Thoth Hotspot Active!"

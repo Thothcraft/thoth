@@ -40,7 +40,8 @@ apt-get install -y \
     net-tools \
     git \
     iptables \
-    rfkill
+    rfkill \
+    dos2unix
 
 echo "[3/10] Installing Thoth to /home/pi/thoth..."
 # Copy thoth to standard location if not already there
@@ -75,6 +76,15 @@ cp "$SCRIPT_DIR/thoth-firstboot.service" /etc/systemd/system/
 sed -i "s|/home/pi/thoth|$THOTH_DIR|g" /etc/systemd/system/thoth-web.service
 sed -i "s|/home/pi/thoth|$THOTH_DIR|g" /etc/systemd/system/thoth-hotspot.service
 sed -i "s|/home/pi/thoth|$THOTH_DIR|g" /etc/systemd/system/thoth-firstboot.service
+
+# Fix Windows line endings (CRLF -> LF) on all scripts and configs
+echo "Fixing line endings on scripts and configs..."
+find "$SCRIPT_DIR" -type f \( -name "*.sh" -o -name "*.conf" -o -name "*.service" \) -exec dos2unix {} \; 2>/dev/null || \
+    find "$SCRIPT_DIR" -type f \( -name "*.sh" -o -name "*.conf" -o -name "*.service" \) -exec sed -i 's/\r$//' {} \;
+
+# Also fix the copied config files
+dos2unix /etc/hostapd/hostapd.conf 2>/dev/null || sed -i 's/\r$//' /etc/hostapd/hostapd.conf
+dos2unix /etc/dnsmasq.conf 2>/dev/null || sed -i 's/\r$//' /etc/dnsmasq.conf
 
 # Make scripts executable
 chmod +x "$SCRIPT_DIR/first-boot.sh"
