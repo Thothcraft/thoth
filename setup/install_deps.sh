@@ -37,13 +37,19 @@ if [ -d "nodogsplash" ]; then
 fi
 cp -r "$THOTH_DIR/nodogsplash" /tmp/
 cd nodogsplash
+
+# Fix line endings on Makefile and source files (Windows CRLF -> Unix LF)
+echo "Fixing line endings in nodogsplash files..."
+find . -type f \( -name "Makefile" -o -name "*.c" -o -name "*.h" -o -name "*.sh" \) -exec dos2unix {} \; 2>/dev/null || \
+    find . -type f \( -name "Makefile" -o -name "*.c" -o -name "*.h" -o -name "*.sh" \) -exec sed -i 's/\r$//' {} \;
+
 make
 sudo make install
 sudo systemctl enable nodogsplash
 
 echo "Setting up Python virtual environment..."
 # Python virtual environment and dependencies
-cd /opt/thoth
+cd "$THOTH_DIR"
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
@@ -51,14 +57,14 @@ pip install -r requirements.txt
 
 echo "Creating data directories..."
 # Create data directories
-mkdir -p /opt/thoth/data/logs
-chmod 755 /opt/thoth/data
-chmod 755 /opt/thoth/data/logs
+mkdir -p "$THOTH_DIR/data/logs"
+chmod 755 "$THOTH_DIR/data"
+chmod 755 "$THOTH_DIR/data/logs"
 
 echo "Setting up log rotation..."
 # Setup log rotation
 sudo tee /etc/logrotate.d/thoth > /dev/null <<EOF
-/opt/thoth/data/logs/*.log {
+$THOTH_DIR/data/logs/*.log {
     daily
     missingok
     rotate 7

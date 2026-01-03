@@ -32,6 +32,11 @@ fi
 cp -r "$SCRIPT_DIR/nodogsplash" /tmp/
 cd nodogsplash
 
+# Fix line endings on Makefile and source files (Windows CRLF -> Unix LF)
+echo "Fixing line endings in nodogsplash files..."
+find . -type f \( -name "Makefile" -o -name "*.c" -o -name "*.h" -o -name "*.sh" \) -exec dos2unix {} \; 2>/dev/null || \
+    find . -type f \( -name "Makefile" -o -name "*.c" -o -name "*.h" -o -name "*.sh" \) -exec sed -i 's/\r$//' {} \;
+
 # Build and install
 echo "[4/6] Building Nodogsplash..."
 make
