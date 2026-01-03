@@ -162,8 +162,31 @@ echo "Fixing line endings in nodogsplash files..."
 find . -type f \( -name "Makefile" -o -name "*.c" -o -name "*.h" -o -name "*.sh" \) -exec dos2unix {} \; 2>/dev/null || \
     find . -type f \( -name "Makefile" -o -name "*.c" -o -name "*.h" -o -name "*.sh" \) -exec sed -i 's/\r$//' {} \;
 
-make
-make install
+# Fix permissions
+echo "Fixing file permissions..."
+chmod 644 Makefile *.c *.h *.md 2>/dev/null || true
+chmod +x *.sh 2>/dev/null || true
+
+# Debug: Check if Makefile exists and is readable
+echo "Current directory: $(pwd)"
+echo "Makefile exists: $(test -f Makefile && echo 'YES' || echo 'NO')"
+echo "Makefile contents (first 3 lines):"
+head -3 Makefile 2>/dev/null || echo "Cannot read Makefile"
+echo "Files in current directory:"
+ls -la | head -10
+
+echo "Attempting to build nodogsplash..."
+if make; then
+    echo "Build successful, installing..."
+    make install
+else
+    echo "Build failed in /tmp, trying original directory..."
+    cd "$THOTH_DIR/nodogsplash"
+    echo "Current directory: $(pwd)"
+    echo "Makefile exists: $(test -f Makefile && echo 'YES' || echo 'NO')"
+    make
+    make install
+fi
 
 # Create configuration directory
 mkdir -p /etc/nodogsplash/htdocs
