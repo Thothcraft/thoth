@@ -149,12 +149,12 @@ systemctl stop hostapd 2>/dev/null || true
 systemctl stop dnsmasq 2>/dev/null || true
 
 echo "[9/11] Installing and configuring Nodogsplash captive portal..."
-# Clone and build Nodogsplash
+# Copy local Nodogsplash to /tmp and build
 cd /tmp
 if [ -d "nodogsplash" ]; then
     rm -rf nodogsplash
 fi
-git clone https://github.com/nodogsplash/nodogsplash.git
+cp -r "$THOTH_DIR/nodogsplash" /tmp/
 cd nodogsplash
 make
 make install

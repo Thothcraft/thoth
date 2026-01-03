@@ -23,13 +23,13 @@ apt update
 echo "[2/6] Installing dependencies..."
 apt install -y git libmicrohttpd-dev build-essential
 
-# Clone Nodogsplash repository
-echo "[3/6] Cloning Nodogsplash repository..."
+# Copy local Nodogsplash repository
+echo "[3/6] Copying local Nodogsplash repository..."
 cd /tmp
 if [ -d "nodogsplash" ]; then
     rm -rf nodogsplash
 fi
-git clone https://github.com/nodogsplash/nodogsplash.git
+cp -r "$SCRIPT_DIR/nodogsplash" /tmp/
 cd nodogsplash
 
 # Build and install

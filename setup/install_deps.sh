@@ -28,11 +28,14 @@ sudo ./install.sh
 sudo systemctl enable pisugar-power-manager
 
 echo "Installing WiFi AP/Captive portal support..."
-# WiFi AP/Captive (nodogsplash)
+# WiFi AP/Captive (nodogsplash) - use local copy
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+THOTH_DIR="$(dirname "$SCRIPT_DIR")"
 cd /tmp
-if [ ! -d "nodogsplash" ]; then
-    git clone https://github.com/nodogsplash/nodogsplash.git
+if [ -d "nodogsplash" ]; then
+    rm -rf nodogsplash
 fi
+cp -r "$THOTH_DIR/nodogsplash" /tmp/
 cd nodogsplash
 make
 sudo make install
