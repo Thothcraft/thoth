@@ -39,8 +39,8 @@ check "hostapd default config exists" $?
 
 echo ""
 echo "[3/8] Checking config file contents..."
-grep -q "Thoth-AP" /etc/hostapd/hostapd.conf 2>/dev/null
-check "hostapd.conf has Thoth-AP SSID" $?
+grep -q "Thoth" /etc/hostapd/hostapd.conf 2>/dev/null
+check "hostapd.conf has Thoth SSID" $?
 grep -q "192.168.4.1" /etc/dnsmasq.conf 2>/dev/null
 check "dnsmasq.conf has correct IP" $?
 grep -q "/etc/hostapd/hostapd.conf" /etc/default/hostapd 2>/dev/null
@@ -87,7 +87,7 @@ if [ $ERRORS -eq 0 ]; then
     echo "You can now safely reboot to test:"
     echo "  sudo reboot"
     echo ""
-    echo "After reboot, check for 'Thoth-AP' WiFi network"
+    echo "After reboot, check for 'Thoth' WiFi network"
 else
     echo "❌ $ERRORS tests failed. Fix issues before rebooting."
     echo ""

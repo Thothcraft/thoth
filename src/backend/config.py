@@ -33,7 +33,7 @@ class Config:
     # WiFi configuration
     WIFI_SSID = os.getenv('WIFI_SSID', '')
     WIFI_PASSWORD = os.getenv('WIFI_PASSWORD', '')
-    AP_SSID = os.getenv('AP_SSID', 'Thoth-AP')
+    AP_SSID = os.getenv('AP_SSID', 'Thoth')
     AP_PASSWORD = os.getenv('AP_PASSWORD', 'thoth123')
     AP_IP = '192.168.4.1'
     AP_NETMASK = '255.255.255.0'

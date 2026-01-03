@@ -24,11 +24,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 THOTH_DIR="$(dirname "$SCRIPT_DIR")"
 THOTH_USER="pi"
 
-echo "[1/10] Updating system packages..."
+echo "[1/11] Updating system packages..."
 apt-get update
 apt-get upgrade -y
 
-echo "[2/10] Installing system dependencies..."
+echo "[2/11] Installing system dependencies..."
 apt-get install -y \
     python3 \
     python3-pip \
@@ -41,9 +41,11 @@ apt-get install -y \
     git \
     iptables \
     rfkill \
-    dos2unix
+    dos2unix \
+    libmicrohttpd-dev \
+    build-essential
 
-echo "[3/10] Installing Thoth to /home/pi/thoth..."
+echo "[3/11] Installing Thoth to /home/pi/thoth..."
 # Copy thoth to standard location if not already there
 if [ "$THOTH_DIR" != "/home/pi/thoth" ]; then
     mkdir -p /home/pi/thoth
@@ -52,21 +54,21 @@ if [ "$THOTH_DIR" != "/home/pi/thoth" ]; then
     SCRIPT_DIR="$THOTH_DIR/setup"
 fi
 
-echo "[4/10] Creating Python virtual environment..."
+echo "[4/11] Creating Python virtual environment..."
 cd "$THOTH_DIR"
 python3 -m venv venv
 source venv/bin/activate
 
-echo "[5/10] Installing Python dependencies..."
+echo "[5/11] Installing Python dependencies..."
 pip install --upgrade pip
 pip install -r requirements.txt
 
-echo "[6/10] Setting up Thoth directories..."
+echo "[6/11] Setting up Thoth directories..."
 mkdir -p "$THOTH_DIR/data/config"
 mkdir -p "$THOTH_DIR/logs"
 chown -R "$THOTH_USER:$THOTH_USER" "$THOTH_DIR"
 
-echo "[7/10] Installing systemd services..."
+echo "[7/11] Installing systemd services..."
 # Copy service files
 cp "$SCRIPT_DIR/thoth-web.service" /etc/systemd/system/
 cp "$SCRIPT_DIR/thoth-hotspot.service" /etc/systemd/system/
@@ -93,7 +95,7 @@ find "$SCRIPT_DIR" -type f \( -name "*.sh" -o -name "*.conf" -o -name "*.service
 find "$SCRIPT_DIR" -type f \( -name "*.sh" \) -exec chmod +x {} \;
 chown -R "$THOTH_USER:$THOTH_USER" "$SCRIPT_DIR"
 
-echo "[8/10] Disabling NetworkManager and configuring hotspot..."
+echo "[8/11] Disabling NetworkManager and configuring hotspot..."
 
 # Disable NetworkManager completely (it conflicts with our hotspot)
 if systemctl is-active NetworkManager &>/dev/null; then
@@ -146,14 +148,51 @@ systemctl disable dnsmasq 2>/dev/null || true
 systemctl stop hostapd 2>/dev/null || true
 systemctl stop dnsmasq 2>/dev/null || true
 
-echo "[9/10] Enabling first-boot service..."
+echo "[9/11] Installing and configuring Nodogsplash captive portal..."
+# Clone and build Nodogsplash
+cd /tmp
+if [ -d "nodogsplash" ]; then
+    rm -rf nodogsplash
+fi
+git clone https://github.com/nodogsplash/nodogsplash.git
+cd nodogsplash
+make
+make install
+
+# Create configuration directory
+mkdir -p /etc/nodogsplash/htdocs
+
+# Copy configuration files
+if [ -f "$THOTH_DIR/nodogsplash.conf" ]; then
+    cp "$THOTH_DIR/nodogsplash.conf" /etc/nodogsplash/nodogsplash.conf
+    dos2unix /etc/nodogsplash/nodogsplash.conf 2>/dev/null || sed -i 's/\r$//' /etc/nodogsplash/nodogsplash.conf
+    echo "Nodogsplash configuration installed"
+else
+    echo "Warning: nodogsplash.conf not found in $THOTH_DIR"
+fi
+
+if [ -f "$THOTH_DIR/splash.html" ]; then
+    cp "$THOTH_DIR/splash.html" /etc/nodogsplash/htdocs/splash.html
+    dos2unix /etc/nodogsplash/htdocs/splash.html 2>/dev/null || sed -i 's/\r$//' /etc/nodogsplash/htdocs/splash.html
+    echo "Nodogsplash splash page installed"
+else
+    echo "Warning: splash.html not found in $THOTH_DIR"
+fi
+
+# Enable Nodogsplash service (but don't start it yet - first-boot will handle it)
+systemctl enable nodogsplash
+systemctl stop nodogsplash 2>/dev/null || true
+
+cd "$THOTH_DIR"
+
+echo "[10/11] Enabling first-boot service..."
 # Enable the first-boot service to run on next boot
 systemctl enable thoth-firstboot.service
 
 # Enable thoth-web to start after first-boot completes
 systemctl enable thoth-web.service
 
-echo "[10/10] Cleaning up for imaging..."
+echo "[11/11] Cleaning up for imaging..."
 # Remove first-boot flag if it exists (so it runs on next boot)
 rm -f /etc/thoth-first-boot-done
 
@@ -226,9 +265,9 @@ echo "  2. Remove the SD card"
 echo "  3. Use Win32DiskImager, dd, or Raspberry Pi Imager to create an image"
 echo ""
 echo "When the image boots on a new Pi:"
-echo "  1. Thoth will automatically create WiFi hotspot: Thoth-AP"
-echo "  2. Connect to Thoth-AP (password: thoth123)"
-echo "  3. A captive portal will open at http://192.168.4.1:5000"
+echo "  1. Thoth will automatically create WiFi hotspot: Thoth"
+echo "  2. Connect to Thoth (password: thoth123)"
+echo "  3. A captive portal will automatically pop up and redirect to http://192.168.4.1:5000"
 echo "  4. Select your WiFi network and login to Brain"
 echo ""
 echo "To shutdown now for imaging: sudo shutdown -h now"

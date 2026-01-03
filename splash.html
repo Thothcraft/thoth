@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome to Thoth Device</title>
+    
+    <!-- Auto-redirect to Thoth web app after 2 seconds -->
+    <!-- Change content="0" for instant redirect, or increase for longer delay -->
+    <meta http-equiv="refresh" content="2;url=http://192.168.4.1:5000/" />
+    
+    <!-- Tailwind CSS for styling -->
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <style>
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        
+        .pulse {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: .5;
+            }
+        }
+        
+        .fade-in {
+            animation: fadeIn 0.5s ease-in;
+        }
+        
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen flex items-center justify-center p-4">
+    <div class="max-w-md w-full">
+        <div class="bg-white rounded-2xl shadow-2xl p-8 text-center fade-in">
+            <!-- Icon -->
+            <div class="inline-flex items-center justify-center w-20 h-20 bg-blue-100 rounded-full mb-6">
+                <i class="fas fa-brain text-4xl text-blue-600"></i>
+            </div>
+            
+            <!-- Title -->
+            <h1 class="text-3xl font-bold text-gray-900 mb-3">
+                Welcome to Thoth Device
+            </h1>
+            
+            <!-- Description -->
+            <p class="text-gray-600 mb-6">
+                You are now connected to Thoth
+            </p>
+            
+            <!-- Loading indicator -->
+            <div class="mb-6">
+                <div class="inline-flex items-center space-x-2 text-blue-600">
+                    <i class="fas fa-spinner fa-spin text-2xl"></i>
+                    <span class="text-lg font-medium">Redirecting to web app...</span>
+                </div>
+            </div>
+            
+            <!-- Progress bar -->
+            <div class="w-full bg-gray-200 rounded-full h-2 mb-6">
+                <div class="bg-blue-600 h-2 rounded-full pulse" style="width: 66%"></div>
+            </div>
+            
+            <!-- Manual link -->
+            <div class="border-t border-gray-200 pt-6">
+                <p class="text-sm text-gray-500 mb-3">
+                    If you are not redirected automatically:
+                </p>
+                <a href="http://192.168.4.1:5000/" 
+                   class="inline-block bg-blue-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-700 transition-colors">
+                    <i class="fas fa-external-link-alt mr-2"></i>
+                    Click here to continue
+                </a>
+            </div>
+            
+            <!-- Device info -->
+            <div class="mt-8 text-xs text-gray-400">
+                <p>Thoth Device v1.0.0</p>
+                <p class="mt-1">Gateway: 192.168.4.1</p>
+            </div>
+        </div>
+        
+        <!-- Help text -->
+        <div class="mt-6 text-center text-sm text-gray-600">
+            <p>
+                <i class="fas fa-info-circle mr-1"></i>
+                Need help? Contact support@thoth.device
+            </p>
+        </div>
+    </div>
+    
+    <script>
+        // Countdown timer (optional - shows remaining seconds)
+        let seconds = 2;
+        const updateTimer = () => {
+            if (seconds > 0) {
+                seconds--;
+                setTimeout(updateTimer, 1000);
+            }
+        };
+        updateTimer();
+        
+        // Fallback redirect in case meta refresh doesn't work
+        setTimeout(() => {
+            window.location.href = 'http://192.168.4.1:5000/';
+        }, 2000);
+    </script>
+</body>
+</html>

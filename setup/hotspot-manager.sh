@@ -42,7 +42,7 @@ start_hotspot() {
     
     systemctl start dnsmasq 2>/dev/null || true
     
-    echo "Hotspot started: Thoth-AP (192.168.4.1)"
+    echo "Hotspot started: Thoth (192.168.4.1)"
 }
 
 stop_hotspot() {
