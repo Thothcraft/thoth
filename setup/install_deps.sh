@@ -35,8 +35,20 @@ cd /tmp
 if [ -d "nodogsplash" ]; then
     rm -rf nodogsplash
 fi
-cp -r "$THOTH_DIR/nodogsplash" /tmp/
-cd nodogsplash
+
+echo "Copying nodogsplash from $THOTH_DIR/nodogsplash..."
+mkdir -p nodogsplash
+cd "$THOTH_DIR/nodogsplash"
+tar --exclude='.git' -cf - . | (cd /tmp/nodogsplash && tar -xf -)
+cd /tmp/nodogsplash
+
+echo "Current directory: $(pwd)"
+echo "Checking for Makefile..."
+if [ ! -f "Makefile" ]; then
+    echo "ERROR: Makefile not found in $(pwd)"
+    ls -la
+    exit 1
+fi
 
 # Fix line endings on Makefile and source files (Windows CRLF -> Unix LF)
 echo "Fixing line endings in nodogsplash files..."

@@ -149,44 +149,35 @@ systemctl stop hostapd 2>/dev/null || true
 systemctl stop dnsmasq 2>/dev/null || true
 
 echo "[9/11] Installing and configuring Nodogsplash captive portal..."
-# Copy local Nodogsplash to /tmp and build
+# Copy local Nodogsplash to /tmp and build (exclude .git directory)
 cd /tmp
 if [ -d "nodogsplash" ]; then
     rm -rf nodogsplash
 fi
-cp -r "$THOTH_DIR/nodogsplash" /tmp/
-cd nodogsplash
+
+echo "Copying nodogsplash from $THOTH_DIR/nodogsplash..."
+mkdir -p nodogsplash
+cd "$THOTH_DIR/nodogsplash"
+tar --exclude='.git' -cf - . | (cd /tmp/nodogsplash && tar -xf -)
+cd /tmp/nodogsplash
+
+echo "Current directory: $(pwd)"
+echo "Checking for Makefile..."
+if [ ! -f "Makefile" ]; then
+    echo "ERROR: Makefile not found in $(pwd)"
+    ls -la
+    exit 1
+fi
 
 # Fix line endings on Makefile and source files (Windows CRLF -> Unix LF)
 echo "Fixing line endings in nodogsplash files..."
 find . -type f \( -name "Makefile" -o -name "*.c" -o -name "*.h" -o -name "*.sh" \) -exec dos2unix {} \; 2>/dev/null || \
     find . -type f \( -name "Makefile" -o -name "*.c" -o -name "*.h" -o -name "*.sh" \) -exec sed -i 's/\r$//' {} \;
 
-# Fix permissions
-echo "Fixing file permissions..."
-chmod 644 Makefile *.c *.h *.md 2>/dev/null || true
-chmod +x *.sh 2>/dev/null || true
-
-# Debug: Check if Makefile exists and is readable
-echo "Current directory: $(pwd)"
-echo "Makefile exists: $(test -f Makefile && echo 'YES' || echo 'NO')"
-echo "Makefile contents (first 3 lines):"
-head -3 Makefile 2>/dev/null || echo "Cannot read Makefile"
-echo "Files in current directory:"
-ls -la | head -10
-
-echo "Attempting to build nodogsplash..."
-if make; then
-    echo "Build successful, installing..."
-    make install
-else
-    echo "Build failed in /tmp, trying original directory..."
-    cd "$THOTH_DIR/nodogsplash"
-    echo "Current directory: $(pwd)"
-    echo "Makefile exists: $(test -f Makefile && echo 'YES' || echo 'NO')"
-    make
-    make install
-fi
+echo "Building nodogsplash..."
+make
+echo "Installing nodogsplash..."
+make install
 
 # Create configuration directory
 mkdir -p /etc/nodogsplash/htdocs
