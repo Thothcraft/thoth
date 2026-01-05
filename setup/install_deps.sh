@@ -11,7 +11,7 @@ sudo apt update && sudo apt upgrade -y
 
 echo "Installing core dependencies..."
 # Core dependencies
-sudo apt install -y python3-pip python3-venv git hostapd dnsmasq iptables libmicrohttpd-dev build-essential i2c-tools
+sudo apt install -y python3-pip python3-venv git hostapd dnsmasq iptables libmicrohttpd-dev libjson-c-dev build-essential i2c-tools
 
 echo "Installing Sense HAT support..."
 # Sense HAT

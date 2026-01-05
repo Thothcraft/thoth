@@ -21,7 +21,7 @@ apt update
 
 # Install dependencies
 echo "[2/6] Installing dependencies..."
-apt install -y git libmicrohttpd-dev build-essential
+apt install -y git libmicrohttpd-dev libjson-c-dev build-essential
 
 # Copy local Nodogsplash repository
 echo "[3/6] Copying local Nodogsplash repository..."

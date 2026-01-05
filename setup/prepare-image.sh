@@ -61,6 +61,7 @@ apt-get install -y \
     rfkill \
     dos2unix \
     libmicrohttpd-dev \
+    libjson-c-dev \
     build-essential
 
 echo "[3/11] Installing Thoth to /home/pi/thoth..."
