@@ -87,6 +87,18 @@ find . -type f \( -name "Makefile" -o -name "*.c" -o -name "*.h" -o -name "*.sh"
 
 make
 sudo make install
+
+# Install systemd service file
+echo "Installing nodogsplash systemd service..."
+if [ -f "debian/nodogsplash.service" ]; then
+    sudo cp debian/nodogsplash.service /etc/systemd/system/nodogsplash.service
+    sudo dos2unix /etc/systemd/system/nodogsplash.service 2>/dev/null || sudo sed -i 's/\r$//' /etc/systemd/system/nodogsplash.service
+    sudo systemctl daemon-reload
+    echo "Nodogsplash service file installed"
+else
+    echo "Warning: nodogsplash.service not found in debian directory"
+fi
+
 sudo systemctl enable nodogsplash
 
 echo "Setting up Python virtual environment..."

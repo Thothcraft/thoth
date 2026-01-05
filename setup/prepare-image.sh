@@ -238,6 +238,17 @@ make
 echo "Installing nodogsplash..."
 make install
 
+# Install systemd service file
+echo "Installing nodogsplash systemd service..."
+if [ -f "debian/nodogsplash.service" ]; then
+    cp debian/nodogsplash.service /etc/systemd/system/nodogsplash.service
+    dos2unix /etc/systemd/system/nodogsplash.service 2>/dev/null || sed -i 's/\r$//' /etc/systemd/system/nodogsplash.service
+    systemctl daemon-reload
+    echo "Nodogsplash service file installed"
+else
+    echo "Warning: nodogsplash.service not found in debian directory"
+fi
+
 # Create configuration directory
 mkdir -p /etc/nodogsplash/htdocs
 
