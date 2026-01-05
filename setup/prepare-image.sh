@@ -59,9 +59,19 @@ cd "$THOTH_DIR"
 python3 -m venv venv
 source venv/bin/activate
 
+# Set matplotlib backend for headless operation (no display)
+export MPLBACKEND=Agg
+
 echo "[5/11] Installing Python dependencies..."
 pip install --upgrade pip
-pip install -r requirements.txt
+# Use Pi-specific requirements (excludes heavy ML libraries like PyTorch)
+if [ -f "$THOTH_DIR/requirements-pi.txt" ]; then
+    echo "Installing lightweight Pi requirements..."
+    pip install -r requirements-pi.txt
+else
+    echo "Warning: requirements-pi.txt not found, using full requirements.txt (may take hours)..."
+    pip install -r requirements.txt
+fi
 
 echo "[6/11] Setting up Thoth directories..."
 mkdir -p "$THOTH_DIR/data/config"

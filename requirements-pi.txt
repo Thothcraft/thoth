@@ -1,0 +1,34 @@
+# Thoth Raspberry Pi Requirements (Minimal for headless operation)
+# Heavy ML libraries (torch, pytorch-*, lightgbm) excluded for Pi compatibility
+
+# Web Framework
+flask
+flask-socketio
+flask-cors
+eventlet
+
+# Networking
+paho-mqtt
+netifaces
+requests
+python-dotenv
+
+# System Utilities
+psutil
+pyserial
+APScheduler
+
+# Data Processing (lightweight)
+pandas
+numpy
+scipy
+
+# Authentication
+jwt
+
+# Notebook format (for data export)
+nbformat
+
+# Note: For ML features, install on a more powerful system or use pre-trained models
+# Heavy packages excluded: torch, torch-geometric, pytorch-tabnet, pytorch-tabular, 
+# lightgbm, matplotlib, seaborn, plotly, scikit-learn, skorch, PyWavelets
