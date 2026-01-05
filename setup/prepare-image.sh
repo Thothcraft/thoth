@@ -25,6 +25,15 @@ THOTH_DIR="$(dirname "$SCRIPT_DIR")"
 THOTH_USER="pi"
 
 echo "[1/11] Updating system packages..."
+# Fix any interrupted dpkg installations
+echo "Checking for interrupted package installations..."
+dpkg --configure -a
+
+# Clean up any stale apt locks
+rm -f /var/lib/apt/lists/lock
+rm -f /var/cache/apt/archives/lock
+rm -f /var/lib/dpkg/lock*
+
 apt-get update
 apt-get upgrade -y
 
