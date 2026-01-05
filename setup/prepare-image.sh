@@ -166,9 +166,13 @@ if [ -d "nodogsplash" ]; then
 fi
 
 echo "Copying nodogsplash from $THOTH_DIR/nodogsplash..."
-mkdir -p nodogsplash
-cd "$THOTH_DIR/nodogsplash"
-tar --exclude='.git' -cf - . | (cd /tmp/nodogsplash && tar -xf -)
+# Use rsync if available, otherwise cp with manual .git exclusion
+if command -v rsync &> /dev/null; then
+    rsync -a --exclude='.git' "$THOTH_DIR/nodogsplash/" /tmp/nodogsplash/
+else
+    cp -r "$THOTH_DIR/nodogsplash" /tmp/
+    rm -rf /tmp/nodogsplash/.git 2>/dev/null || true
+fi
 cd /tmp/nodogsplash
 
 echo "Current directory: $(pwd)"
