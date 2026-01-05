@@ -31,22 +31,48 @@ if [ -d "nodogsplash" ]; then
 fi
 
 echo "Copying nodogsplash from $SCRIPT_DIR/nodogsplash..."
-# Use rsync if available, otherwise cp with manual .git exclusion
-if command -v rsync &> /dev/null; then
-    rsync -a --exclude='.git' "$SCRIPT_DIR/nodogsplash/" /tmp/nodogsplash/
-else
-    cp -r "$SCRIPT_DIR/nodogsplash" /tmp/
-    rm -rf /tmp/nodogsplash/.git 2>/dev/null || true
-fi
-cd /tmp/nodogsplash
 
-echo "Current directory: $(pwd)"
-echo "Checking for Makefile..."
-if [ ! -f "Makefile" ]; then
-    echo "ERROR: Makefile not found in $(pwd)"
-    ls -la
+# Debug: Check source directory
+echo "DEBUG: SCRIPT_DIR = $SCRIPT_DIR"
+echo "DEBUG: Source path = $SCRIPT_DIR/nodogsplash"
+if [ ! -d "$SCRIPT_DIR/nodogsplash" ]; then
+    echo "ERROR: Source directory $SCRIPT_DIR/nodogsplash does not exist!"
+    echo "Contents of $SCRIPT_DIR:"
+    ls -la "$SCRIPT_DIR"
     exit 1
 fi
+
+echo "DEBUG: Source directory exists, checking for Makefile in source..."
+if [ ! -f "$SCRIPT_DIR/nodogsplash/Makefile" ]; then
+    echo "ERROR: Makefile not found in source directory $SCRIPT_DIR/nodogsplash"
+    echo "Contents of source directory:"
+    ls -la "$SCRIPT_DIR/nodogsplash"
+    exit 1
+fi
+echo "DEBUG: Makefile found in source directory"
+
+# Use rsync if available, otherwise cp with manual .git exclusion
+if command -v rsync &> /dev/null; then
+    echo "DEBUG: Using rsync to copy files..."
+    rsync -av --exclude='.git' "$SCRIPT_DIR/nodogsplash/" /tmp/nodogsplash/
+else
+    echo "DEBUG: Using cp to copy files..."
+    cp -rv "$SCRIPT_DIR/nodogsplash" /tmp/
+    rm -rf /tmp/nodogsplash/.git 2>/dev/null || true
+fi
+
+echo "DEBUG: Copy complete, checking destination..."
+cd /tmp/nodogsplash
+echo "Current directory: $(pwd)"
+echo "Contents of /tmp/nodogsplash:"
+ls -la
+
+echo "Checking for Makefile in destination..."
+if [ ! -f "Makefile" ]; then
+    echo "ERROR: Makefile not found in $(pwd) after copy"
+    exit 1
+fi
+echo "DEBUG: Makefile successfully copied to destination"
 
 # Fix line endings on Makefile and source files (Windows CRLF -> Unix LF)
 echo "Fixing line endings in nodogsplash files..."
