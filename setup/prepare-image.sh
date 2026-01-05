@@ -27,6 +27,11 @@ THOTH_USER="pi"
 echo "[1/11] Updating system packages..."
 # Fix any interrupted dpkg installations
 echo "Checking for interrupted package installations..."
+
+# Remove corrupted packages that can't be reinstalled
+echo "Removing any corrupted packages..."
+dpkg --remove --force-remove-reinstreq rpi-eeprom 2>/dev/null || true
+
 dpkg --configure -a
 
 # Clean up any stale apt locks
@@ -36,6 +41,10 @@ rm -f /var/lib/dpkg/lock*
 
 apt-get update
 apt-get upgrade -y
+
+# Reinstall rpi-eeprom if it was removed
+echo "Ensuring rpi-eeprom is installed..."
+apt-get install -y rpi-eeprom 2>/dev/null || echo "Note: rpi-eeprom installation skipped (not critical for image preparation)"
 
 echo "[2/11] Installing system dependencies..."
 apt-get install -y \
