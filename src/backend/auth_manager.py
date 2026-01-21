@@ -154,6 +154,7 @@ class AuthManager:
                 # Parse token to get expiry
                 token_data = jwt.decode(
                     result['access_token'],
+                    key=None,
                     options={"verify_signature": False},
                     algorithms=["HS256"]
                 )
@@ -223,6 +224,7 @@ class AuthManager:
                 # Parse new token
                 token_data = jwt.decode(
                     result['access_token'],
+                    key=None,
                     options={"verify_signature": False},
                     algorithms=["HS256"]
                 )
