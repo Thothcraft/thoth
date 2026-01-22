@@ -111,11 +111,15 @@ wifi_manager = None
 # Mock user for local authentication (in production, use a proper user database)
 USERS = {
     'admin': {
-        'password': generate_password_hash('admin123'),
+        'password': generate_password_hash('admin123', method='pbkdf2:sha256'),
         'role': 'admin'
     },
     'user': {
-        'password': generate_password_hash('password123'),
+        'password': generate_password_hash('password123', method='pbkdf2:sha256'),
+        'role': 'user'
+    },
+    'gad': {
+        'password': generate_password_hash('password', method='pbkdf2:sha256'),
         'role': 'user'
     }
 }
@@ -1618,7 +1622,7 @@ if __name__ == '__main__':
     socketio.run(
         app,
         host='0.0.0.0',
-        port=5000,
+        port=Config.PORT,
         debug=True,
         use_reloader=False,
         allow_unsafe_werkzeug=True
