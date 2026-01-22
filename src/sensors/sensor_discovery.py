@@ -19,7 +19,6 @@ import logging
 import time
 import threading
 import wave
-import struct
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
@@ -47,6 +46,13 @@ class SensorType(Enum):
     GPS = "gps"
     WIFI_CSI = "wifi_csi"  # WiFi Channel State Information
     RADAR = "radar"  # mmWave radar (MMW-HAT)
+
+
+class CaptureMode(Enum):
+    """Camera capture modes."""
+    VIDEO = "video"
+    IMAGE = "image"
+    TIMELAPSE = "timelapse"
 
 
 @dataclass
@@ -628,12 +634,14 @@ class SensorDiscovery:
         
         return self._device_info
     
-    def start_collection(self, sensor_type: str, duration_minutes: int = 1) -> Tuple[bool, str]:
+    def start_collection(self, sensor_type: str, duration_minutes: int = 1, 
+                          capture_mode: str = "video") -> Tuple[bool, str]:
         """Start data collection for a specific sensor.
         
         Args:
             sensor_type: Type of sensor to collect from
             duration_minutes: Duration in minutes (1, 5, or 10)
+            capture_mode: For camera - 'video', 'image', or 'timelapse'
             
         Returns:
             Tuple of (success, message or filename)
@@ -648,11 +656,24 @@ class SensorDiscovery:
         self._collection_stop_events[sensor_type] = stop_event
         
         if sensor_type == SensorType.CAMERA.value:
-            filename = f"cam_{timestamp}.mp4"
-            thread = threading.Thread(
-                target=self._collect_camera,
-                args=(filename, duration_seconds, stop_event)
-            )
+            if capture_mode == "image":
+                filename = f"img_{timestamp}.jpg"
+                thread = threading.Thread(
+                    target=self._capture_image,
+                    args=(filename,)
+                )
+            elif capture_mode == "timelapse":
+                filename = f"timelapse_{timestamp}"
+                thread = threading.Thread(
+                    target=self._collect_timelapse,
+                    args=(filename, duration_seconds, stop_event)
+                )
+            else:  # video
+                filename = f"cam_{timestamp}.mp4"
+                thread = threading.Thread(
+                    target=self._collect_camera,
+                    args=(filename, duration_seconds, stop_event)
+                )
         elif sensor_type == SensorType.MICROPHONE.value:
             filename = f"mic_{timestamp}.wav"
             thread = threading.Thread(
@@ -688,7 +709,7 @@ class SensorDiscovery:
         return False
     
     def _collect_camera(self, filename: str, duration: int, stop_event: threading.Event):
-        """Collect camera data."""
+        """Collect camera video data."""
         try:
             import cv2
             filepath = os.path.join(self.data_dir, filename)
@@ -715,10 +736,69 @@ class SensorDiscovery:
             
             cap.release()
             out.release()
-            logger.info(f"Camera data saved to {filepath}")
+            logger.info(f"Camera video saved to {filepath}")
             
         except Exception as e:
             logger.error(f"Error collecting camera data: {e}")
+    
+    def _capture_image(self, filename: str):
+        """Capture a single image from camera."""
+        try:
+            import cv2
+            filepath = os.path.join(self.data_dir, filename)
+            
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                logger.error("Failed to open camera")
+                return
+            
+            # Allow camera to warm up
+            time.sleep(0.5)
+            
+            ret, frame = cap.read()
+            if ret:
+                cv2.imwrite(filepath, frame)
+                logger.info(f"Image saved to {filepath}")
+            else:
+                logger.error("Failed to capture image")
+            
+            cap.release()
+            
+        except Exception as e:
+            logger.error(f"Error capturing image: {e}")
+    
+    def _collect_timelapse(self, folder_name: str, duration: int, stop_event: threading.Event):
+        """Collect timelapse images (one image every 5 seconds)."""
+        try:
+            import cv2
+            folder_path = os.path.join(self.data_dir, folder_name)
+            os.makedirs(folder_path, exist_ok=True)
+            
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                logger.error("Failed to open camera")
+                return
+            
+            start_time = time.time()
+            image_count = 0
+            interval = 5  # seconds between captures
+            
+            while time.time() - start_time < duration and not stop_event.is_set():
+                ret, frame = cap.read()
+                if ret:
+                    timestamp = datetime.now().strftime("%H-%M-%S")
+                    filepath = os.path.join(folder_path, f"frame_{image_count:04d}_{timestamp}.jpg")
+                    cv2.imwrite(filepath, frame)
+                    image_count += 1
+                
+                # Wait for next capture
+                time.sleep(interval)
+            
+            cap.release()
+            logger.info(f"Timelapse saved to {folder_path} ({image_count} images)")
+            
+        except Exception as e:
+            logger.error(f"Error collecting timelapse: {e}")
     
     def _collect_microphone(self, filename: str, duration: int, stop_event: threading.Event):
         """Collect microphone data."""
@@ -732,6 +812,10 @@ class SensorDiscovery:
             RATE = 44100
             
             p = pyaudio.PyAudio()
+            
+            # Get sample width before we start (needed for WAV file)
+            sample_width = p.get_sample_size(FORMAT)
+            
             stream = p.open(
                 format=FORMAT,
                 channels=CHANNELS,
@@ -754,13 +838,15 @@ class SensorDiscovery:
             # Save as WAV file
             wf = wave.open(filepath, 'wb')
             wf.setnchannels(CHANNELS)
-            wf.setsampwidth(p.get_sample_size(FORMAT))
+            wf.setsampwidth(sample_width)
             wf.setframerate(RATE)
             wf.writeframes(b''.join(frames))
             wf.close()
             
             logger.info(f"Microphone data saved to {filepath}")
             
+        except ImportError:
+            logger.error("PyAudio not installed. Run: python setup/install_dependencies.py")
         except Exception as e:
             logger.error(f"Error collecting microphone data: {e}")
     

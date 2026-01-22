@@ -50,7 +50,12 @@ from backend.config import Config, BUTTON_ACTIONS, SENSOR_CONFIG
 from backend.models import SensorReading, SystemStatus, ButtonConfig, UploadResult
 from backend.device_manager import DeviceManager
 from backend.auth_manager import AuthManager
+from backend.dependency_checker import check_and_install_dependencies, ensure_data_directory
 from sensors.sensor_discovery import SensorDiscovery, get_sensor_discovery, get_device_info as get_sensor_device_info
+
+# Auto-install missing dependencies and ensure data directory exists
+ensure_data_directory()
+check_and_install_dependencies()
 
 # Set up logging
 logging.basicConfig(
@@ -1523,10 +1528,16 @@ def start_sensor_collection():
     Request body:
     {
         "sensor_type": "camera" | "microphone" | "imu" | "sense_hat",
-        "duration_minutes": 1 | 5 | 10
+        "duration_minutes": 1 | 5 | 10,
+        "capture_mode": "video" | "image" | "timelapse" (for camera only)
     }
     
     Data is saved to: thoth/data/ directory
+    - Camera video: cam_*.mp4
+    - Camera image: img_*.jpg
+    - Camera timelapse: timelapse_*/ (folder with images)
+    - Microphone: mic_*.wav
+    - IMU: imu_*.json
     """
     if 'username' not in session:
         return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
@@ -1535,6 +1546,7 @@ def start_sensor_collection():
         data = request.get_json()
         sensor_type = data.get('sensor_type')
         duration_minutes = data.get('duration_minutes', 1)
+        capture_mode = data.get('capture_mode', 'video')  # For camera: video, image, timelapse
         
         if not sensor_type:
             return jsonify({'status': 'error', 'message': 'sensor_type is required'}), 400
@@ -1542,8 +1554,11 @@ def start_sensor_collection():
         if duration_minutes not in [1, 5, 10]:
             return jsonify({'status': 'error', 'message': 'duration_minutes must be 1, 5, or 10'}), 400
         
+        if capture_mode not in ['video', 'image', 'timelapse']:
+            return jsonify({'status': 'error', 'message': 'capture_mode must be video, image, or timelapse'}), 400
+        
         discovery = get_sensor_discovery(Config.DATA_DIR)
-        success, result = discovery.start_collection(sensor_type, duration_minutes)
+        success, result = discovery.start_collection(sensor_type, duration_minutes, capture_mode)
         
         if success:
             return jsonify({
@@ -1551,6 +1566,7 @@ def start_sensor_collection():
                 'message': f'Collection started for {sensor_type}',
                 'filename': result,
                 'duration_minutes': duration_minutes,
+                'capture_mode': capture_mode,
                 'data_directory': Config.DATA_DIR
             })
         else:

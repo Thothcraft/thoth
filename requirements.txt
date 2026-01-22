@@ -1,31 +1,54 @@
+# Core Flask dependencies
 flask
 flask-socketio
 flask-cors
-# sense-hat==2.5.0  # Raspberry Pi specific, install manually if needed
-# sugarpie==0.1.0
-paho-mqtt
-pandas
-requests
-python-dotenv
 eventlet
+
+# Device management
 netifaces
 APScheduler
-requests
 psutil
-jwt
-scikit-learn
+python-dotenv
+
+# Authentication
+pyjwt
+
+# Network/API
+requests
+paho-mqtt
+
+# Sensor data collection (install via setup/install_dependencies.py for platform-specific handling)
+opencv-python  # Camera capture
+# pyaudio  # Microphone - requires portaudio, use install_dependencies.py on macOS
+
+# Data processing
+pandas
 numpy
+scipy
+
+# Machine Learning (optional - for on-device inference)
+scikit-learn
 torch
+# torch-geometric  # Optional, heavy dependency
+# pytorch-tabnet  # Optional
+# pytorch-tabular  # Optional
+# lightgbm  # Optional
+
+# Visualization (optional)
 matplotlib
 seaborn
-tqdm
 plotly
+tqdm
+
+# Jupyter support (optional)
 nbformat
-skorch
-scipy
+
+# Signal processing
 PyWavelets
-pytorch-tabnet
-pytorch-tabular 
-torch-geometric 
-lightgbm
+
+# Serial communication (for ESP32 CSI, etc.)
 pyserial
+
+# Raspberry Pi specific (install manually if needed)
+# sense-hat==2.5.0
+# sugarpie==0.1.0

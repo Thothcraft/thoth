@@ -244,31 +244,78 @@ class DeviceManager:
     def _get_data_files_list(self) -> List[Dict[str, Any]]:
         """Get list of data files in the data directory.
         
+        Uses file extension to determine type, not just prefixes.
+        Recognizes: images, videos, audio, sensor data (JSON/CSV).
+        
         Returns:
-            List of file info dicts with name, size, created, modified, type
+            List of file info dicts with name, size, created, modified, type, data_type
         """
         files_list = []
+        
+        # Recognized file extensions by category
+        IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.heic'}
+        VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v'}
+        AUDIO_EXTENSIONS = {'.wav', '.mp3', '.m4a', '.flac', '.ogg', '.aac'}
+        SENSOR_EXTENSIONS = {'.json', '.csv'}
+        
         try:
             data_dir = self.config.DATA_DIR
             if not os.path.exists(data_dir):
                 return files_list
             
-            # Only include files with recognized data prefixes
-            prefixes = ['imu_', 'csi_', 'mfcw_', 'img_', 'vid_']
-            
             for item in os.listdir(data_dir):
                 item_path = os.path.join(data_dir, item)
+                
+                # Handle both files and directories (e.g., timelapse folders)
                 if os.path.isfile(item_path):
-                    # Check if it's a data file
-                    if any(item.lower().startswith(p) for p in prefixes):
-                        stat = os.stat(item_path)
-                        files_list.append({
-                            'name': item,
-                            'size': stat.st_size,
-                            'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
-                            'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                            'type': os.path.splitext(item)[1][1:].lower() if '.' in item else 'unknown'
-                        })
+                    ext = os.path.splitext(item)[1].lower()
+                    
+                    # Determine data type based on extension
+                    if ext in IMAGE_EXTENSIONS:
+                        data_type = 'image'
+                    elif ext in VIDEO_EXTENSIONS:
+                        data_type = 'video'
+                    elif ext in AUDIO_EXTENSIONS:
+                        data_type = 'audio'
+                    elif ext in SENSOR_EXTENSIONS:
+                        data_type = 'sensor'
+                    else:
+                        # Skip unrecognized file types
+                        continue
+                    
+                    stat = os.stat(item_path)
+                    files_list.append({
+                        'name': item,
+                        'size': stat.st_size,
+                        'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                        'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                        'type': ext[1:] if ext else 'unknown',  # Extension without dot
+                        'data_type': data_type
+                    })
+                    
+                elif os.path.isdir(item_path):
+                    # Check if it's a timelapse folder (contains images)
+                    if item.startswith('timelapse_'):
+                        # Count images in the folder
+                        image_count = 0
+                        total_size = 0
+                        for sub_item in os.listdir(item_path):
+                            sub_ext = os.path.splitext(sub_item)[1].lower()
+                            if sub_ext in IMAGE_EXTENSIONS:
+                                image_count += 1
+                                total_size += os.path.getsize(os.path.join(item_path, sub_item))
+                        
+                        if image_count > 0:
+                            stat = os.stat(item_path)
+                            files_list.append({
+                                'name': item,
+                                'size': total_size,
+                                'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                                'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                                'type': 'timelapse',
+                                'data_type': 'image',
+                                'image_count': image_count
+                            })
             
             logger.info(f"Found {len(files_list)} data files to report")
             

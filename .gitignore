@@ -27,15 +27,11 @@ env/
 ENV/
 
 # Environment Variables
-
 .env.local
 .env.production
 
-# Data and Logs (keep structure, ignore content)
-data/logs/*.json
-data/logs/*.log
-data/logs/*.csv
-!data/logs/.gitkeep
+# Data folder - device-specific, do not sync
+data/
 
 # Temporary files
 *.tmp
