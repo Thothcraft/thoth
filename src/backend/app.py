@@ -50,6 +50,7 @@ from backend.config import Config, BUTTON_ACTIONS, SENSOR_CONFIG
 from backend.models import SensorReading, SystemStatus, ButtonConfig, UploadResult
 from backend.device_manager import DeviceManager
 from backend.auth_manager import AuthManager
+from sensors.sensor_discovery import SensorDiscovery, get_sensor_discovery, get_device_info as get_sensor_device_info
 
 # Set up logging
 logging.basicConfig(
@@ -357,7 +358,7 @@ def tail_sensor_data():
             time.sleep(5)
 
 def get_device_info() -> Dict[str, Any]:
-    """Get detailed information about the device."""
+    """Get detailed information about the device including sensors."""
     try:
         # Get network interfaces and MAC addresses
         interfaces = {}
@@ -367,6 +368,20 @@ def get_device_info() -> Dict[str, Any]:
                 mac = addrs[netifaces.AF_LINK][0].get('addr')
                 if mac and mac != '00:00:00:00:00:00':
                     interfaces[iface] = mac
+        
+        # Get sensor discovery information
+        try:
+            sensor_info = get_sensor_device_info()
+            device_type = sensor_info.get('device_type', 'unknown')
+            sensors = sensor_info.get('sensors', [])
+            is_raspberry_pi = sensor_info.get('is_raspberry_pi', False)
+            raspberry_pi_model = sensor_info.get('raspberry_pi_model')
+        except Exception as e:
+            logger.warning(f"Could not get sensor info: {e}")
+            device_type = 'unknown'
+            sensors = []
+            is_raspberry_pi = False
+            raspberry_pi_model = None
         
         # Get system information
         system_info = {
@@ -383,7 +398,14 @@ def get_device_info() -> Dict[str, Any]:
             'hostname': socket.gethostname(),
             'ip_address': socket.gethostbyname(socket.gethostname()),
             'python_version': platform.python_version(),
-            'boot_time': datetime.fromtimestamp(psutil.boot_time()).isoformat()
+            'boot_time': datetime.fromtimestamp(psutil.boot_time()).isoformat(),
+            # Enhanced device type detection
+            'device_type': device_type,
+            'is_raspberry_pi': is_raspberry_pi,
+            'raspberry_pi_model': raspberry_pi_model,
+            # Sensor information
+            'sensors': sensors,
+            'available_sensors': [s for s in sensors if s.get('available', False)]
         }
         return system_info
     except Exception as e:
@@ -1452,6 +1474,140 @@ def sync_files_to_cloud():
     except Exception as e:
         logger.error(f'Error syncing files: {str(e)}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ============================================================================
+# SENSOR DISCOVERY AND DATA COLLECTION ENDPOINTS
+# ============================================================================
+
+@app.route('/api/sensors/discover', methods=['GET'])
+def discover_sensors():
+    """Discover all available sensors on this device."""
+    try:
+        discovery = get_sensor_discovery(Config.DATA_DIR)
+        device_info = discovery.get_device_info()
+        return jsonify({
+            'status': 'success',
+            'device_info': device_info.to_dict()
+        })
+    except Exception as e:
+        logger.error(f'Error discovering sensors: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/sensors/list', methods=['GET'])
+def list_sensors():
+    """List all detected sensors with their availability status."""
+    try:
+        discovery = get_sensor_discovery(Config.DATA_DIR)
+        device_info = discovery.get_device_info()
+        sensors = [s.to_dict() for s in device_info.sensors]
+        return jsonify({
+            'status': 'success',
+            'sensors': sensors,
+            'device_type': device_info.device_type
+        })
+    except Exception as e:
+        logger.error(f'Error listing sensors: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/sensors/collect', methods=['POST'])
+def start_sensor_collection():
+    """Start data collection for a specific sensor.
+    
+    Request body:
+    {
+        "sensor_type": "camera" | "microphone" | "imu" | "sense_hat",
+        "duration_minutes": 1 | 5 | 10
+    }
+    
+    Data is saved to: thoth/data/ directory
+    """
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+    
+    try:
+        data = request.get_json()
+        sensor_type = data.get('sensor_type')
+        duration_minutes = data.get('duration_minutes', 1)
+        
+        if not sensor_type:
+            return jsonify({'status': 'error', 'message': 'sensor_type is required'}), 400
+        
+        if duration_minutes not in [1, 5, 10]:
+            return jsonify({'status': 'error', 'message': 'duration_minutes must be 1, 5, or 10'}), 400
+        
+        discovery = get_sensor_discovery(Config.DATA_DIR)
+        success, result = discovery.start_collection(sensor_type, duration_minutes)
+        
+        if success:
+            return jsonify({
+                'status': 'success',
+                'message': f'Collection started for {sensor_type}',
+                'filename': result,
+                'duration_minutes': duration_minutes,
+                'data_directory': Config.DATA_DIR
+            })
+        else:
+            return jsonify({'status': 'error', 'message': result}), 400
+            
+    except Exception as e:
+        logger.error(f'Error starting collection: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/sensors/collect/stop', methods=['POST'])
+def stop_sensor_collection():
+    """Stop data collection for a specific sensor."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+    
+    try:
+        data = request.get_json()
+        sensor_type = data.get('sensor_type')
+        
+        if not sensor_type:
+            return jsonify({'status': 'error', 'message': 'sensor_type is required'}), 400
+        
+        discovery = get_sensor_discovery(Config.DATA_DIR)
+        success = discovery.stop_collection(sensor_type)
+        
+        if success:
+            return jsonify({
+                'status': 'success',
+                'message': f'Collection stopped for {sensor_type}'
+            })
+        else:
+            return jsonify({'status': 'error', 'message': 'No active collection found'}), 400
+            
+    except Exception as e:
+        logger.error(f'Error stopping collection: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/sensors/collect/status', methods=['GET'])
+def get_collection_status():
+    """Get the status of all sensor collections."""
+    try:
+        discovery = get_sensor_discovery(Config.DATA_DIR)
+        device_info = discovery.get_device_info()
+        
+        status = {}
+        for sensor in device_info.sensors:
+            status[sensor.sensor_type] = {
+                'available': sensor.available,
+                'collecting': discovery.is_collecting(sensor.sensor_type)
+            }
+        
+        return jsonify({
+            'status': 'success',
+            'collection_status': status
+        })
+    except Exception as e:
+        logger.error(f'Error getting collection status: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 if __name__ == '__main__':
     # Start the scheduler
