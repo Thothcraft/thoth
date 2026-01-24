@@ -134,7 +134,12 @@
             Actions
         </h2>
         
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <a href="{{ url_for('fl_page') }}" class="btn btn-primary flex items-center justify-center">
+                <i class="fas fa-network-wired mr-2"></i>
+                Federated Learning
+            </a>
+            
             <button onclick="toggleCollection()" class="btn collection-start">
                 <i class="fas fa-{{ 'play' if not system_status.collection_active else 'stop' }} mr-2"></i>
                 {{ 'Start' if not system_status.collection_active else 'Stop' }} Collection

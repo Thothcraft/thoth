@@ -1,0 +1,708 @@
+{% extends "base.html" %}
+
+{% block title %}Federated Learning - {{ super() }}{% endblock %}
+
+{% block extra_head %}
+<style>
+    /* FL Notification Modal */
+    .fl-modal-overlay {
+        position: fixed;
+        inset: 0;
+        background-color: rgba(0, 0, 0, 0.5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 50;
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.3s ease, visibility 0.3s ease;
+    }
+    
+    .fl-modal-overlay.active {
+        opacity: 1;
+        visibility: visible;
+    }
+    
+    .fl-modal {
+        background: white;
+        border-radius: 1rem;
+        box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+        max-width: 28rem;
+        width: 90%;
+        transform: scale(0.95);
+        transition: transform 0.3s ease;
+    }
+    
+    .fl-modal-overlay.active .fl-modal {
+        transform: scale(1);
+    }
+    
+    /* Progress Ring */
+    .progress-ring {
+        transform: rotate(-90deg);
+    }
+    
+    .progress-ring__circle {
+        transition: stroke-dashoffset 0.5s ease;
+    }
+    
+    /* Pulse animation for active training */
+    @keyframes pulse-ring {
+        0% { transform: scale(0.95); opacity: 1; }
+        50% { transform: scale(1); opacity: 0.7; }
+        100% { transform: scale(0.95); opacity: 1; }
+    }
+    
+    .pulse-active {
+        animation: pulse-ring 2s ease-in-out infinite;
+    }
+    
+    /* Status badge */
+    .status-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.25rem 0.75rem;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    
+    .status-badge.running {
+        background-color: #dbeafe;
+        color: #1d4ed8;
+    }
+    
+    .status-badge.completed {
+        background-color: #d1fae5;
+        color: #065f46;
+    }
+    
+    .status-badge.failed {
+        background-color: #fee2e2;
+        color: #991b1b;
+    }
+    
+    .status-badge.pending {
+        background-color: #fef3c7;
+        color: #92400e;
+    }
+    
+    /* Metric cards */
+    .metric-card {
+        background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+        border-radius: 0.75rem;
+        padding: 1rem;
+        text-align: center;
+    }
+    
+    .metric-value {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: #1e293b;
+    }
+    
+    .metric-label {
+        font-size: 0.75rem;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    
+    /* Notification bell animation */
+    @keyframes ring-bell {
+        0%, 100% { transform: rotate(0); }
+        10%, 30%, 50%, 70%, 90% { transform: rotate(-10deg); }
+        20%, 40%, 60%, 80% { transform: rotate(10deg); }
+    }
+    
+    .bell-ring {
+        animation: ring-bell 1s ease-in-out;
+    }
+    
+    /* Toast notification */
+    .toast {
+        position: fixed;
+        top: 1rem;
+        right: 1rem;
+        background: white;
+        border-radius: 0.5rem;
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+        padding: 1rem;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        transform: translateX(120%);
+        transition: transform 0.3s ease;
+        z-index: 100;
+    }
+    
+    .toast.show {
+        transform: translateX(0);
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <!-- FL Status Header -->
+    <div class="card">
+        <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <div class="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center">
+                    <i class="fas fa-network-wired text-white text-xl"></i>
+                </div>
+                <div>
+                    <h2 class="text-xl font-bold text-gray-900">Federated Learning</h2>
+                    <p class="text-sm text-gray-500">Participate in collaborative AI training</p>
+                </div>
+            </div>
+            <div id="fl-status-indicator" class="flex items-center space-x-2">
+                <span class="h-3 w-3 rounded-full bg-gray-300"></span>
+                <span class="text-sm text-gray-500">Idle</span>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Pending Requests Section -->
+    <div id="pending-requests-section" class="hidden">
+        <h3 class="text-lg font-semibold text-gray-900 mb-4">
+            <i class="fas fa-bell text-yellow-500 mr-2"></i>
+            Pending Requests
+        </h3>
+        <div id="pending-requests-container" class="space-y-4">
+            <!-- Requests will be inserted here -->
+        </div>
+    </div>
+    
+    <!-- Active Training Section -->
+    <div id="active-training-section" class="hidden">
+        <div class="card border-2 border-blue-200">
+            <div class="flex items-center justify-between mb-6">
+                <h3 class="text-lg font-semibold text-gray-900">
+                    <i class="fas fa-cog fa-spin text-blue-500 mr-2"></i>
+                    Active Training Session
+                </h3>
+                <span id="training-status-badge" class="status-badge running">Running</span>
+            </div>
+            
+            <!-- Session Info -->
+            <div class="mb-6">
+                <h4 id="session-name" class="text-xl font-bold text-gray-900">-</h4>
+                <p id="session-algorithm" class="text-sm text-gray-500">-</p>
+            </div>
+            
+            <!-- Progress Circle -->
+            <div class="flex justify-center mb-6">
+                <div class="relative">
+                    <svg class="progress-ring" width="160" height="160">
+                        <circle
+                            class="text-gray-200"
+                            stroke="currentColor"
+                            stroke-width="12"
+                            fill="transparent"
+                            r="68"
+                            cx="80"
+                            cy="80"
+                        />
+                        <circle
+                            id="progress-circle"
+                            class="progress-ring__circle text-blue-500"
+                            stroke="currentColor"
+                            stroke-width="12"
+                            fill="transparent"
+                            r="68"
+                            cx="80"
+                            cy="80"
+                            stroke-linecap="round"
+                            stroke-dasharray="427.26"
+                            stroke-dashoffset="427.26"
+                        />
+                    </svg>
+                    <div class="absolute inset-0 flex flex-col items-center justify-center">
+                        <span id="progress-percent" class="text-3xl font-bold text-gray-900">0%</span>
+                        <span id="progress-rounds" class="text-sm text-gray-500">Round 0/0</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Metrics Grid -->
+            <div class="grid grid-cols-2 gap-4 mb-6">
+                <div class="metric-card">
+                    <div id="metric-accuracy" class="metric-value">-</div>
+                    <div class="metric-label">Global Accuracy</div>
+                </div>
+                <div class="metric-card">
+                    <div id="metric-loss" class="metric-value">-</div>
+                    <div class="metric-label">Global Loss</div>
+                </div>
+                <div class="metric-card">
+                    <div id="metric-device-accuracy" class="metric-value">-</div>
+                    <div class="metric-label">Your Contribution</div>
+                </div>
+                <div class="metric-card">
+                    <div id="metric-eta" class="metric-value">-</div>
+                    <div class="metric-label">Est. Time Left</div>
+                </div>
+            </div>
+            
+            <!-- Status Message -->
+            <div id="status-message" class="text-center text-sm text-gray-600 bg-gray-50 rounded-lg p-3">
+                Waiting for updates...
+            </div>
+        </div>
+    </div>
+    
+    <!-- No Activity Section -->
+    <div id="no-activity-section">
+        <div class="card text-center py-12">
+            <div class="w-20 h-20 mx-auto bg-gray-100 rounded-full flex items-center justify-center mb-4">
+                <i class="fas fa-satellite-dish text-gray-400 text-3xl"></i>
+            </div>
+            <h3 class="text-lg font-medium text-gray-900 mb-2">No Active FL Sessions</h3>
+            <p class="text-sm text-gray-500 max-w-sm mx-auto">
+                Your device is ready to participate in federated learning. 
+                You'll receive a notification when a training session requests your participation.
+            </p>
+        </div>
+    </div>
+    
+    <!-- History Section -->
+    <div class="card">
+        <h3 class="text-lg font-semibold text-gray-900 mb-4">
+            <i class="fas fa-history text-gray-400 mr-2"></i>
+            Recent Sessions
+        </h3>
+        <div id="history-container" class="space-y-3">
+            <p class="text-sm text-gray-500 text-center py-4">No recent sessions</p>
+        </div>
+    </div>
+</div>
+
+<!-- FL Request Modal -->
+<div id="fl-request-modal" class="fl-modal-overlay">
+    <div class="fl-modal">
+        <div class="p-6">
+            <!-- Header -->
+            <div class="text-center mb-6">
+                <div class="w-16 h-16 mx-auto bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center mb-4">
+                    <i class="fas fa-brain text-white text-2xl"></i>
+                </div>
+                <h3 class="text-xl font-bold text-gray-900">FL Training Request</h3>
+                <p class="text-sm text-gray-500 mt-1">A research session wants your device to participate</p>
+            </div>
+            
+            <!-- Session Details -->
+            <div class="bg-gray-50 rounded-xl p-4 mb-6 space-y-3">
+                <div class="flex justify-between">
+                    <span class="text-sm text-gray-500">Session</span>
+                    <span id="modal-session-name" class="text-sm font-medium text-gray-900">-</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-sm text-gray-500">Algorithm</span>
+                    <span id="modal-algorithm" class="text-sm font-medium text-gray-900">-</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-sm text-gray-500">Dataset</span>
+                    <span id="modal-dataset" class="text-sm font-medium text-gray-900">-</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-sm text-gray-500">Rounds</span>
+                    <span id="modal-rounds" class="text-sm font-medium text-gray-900">-</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-sm text-gray-500">Est. Duration</span>
+                    <span id="modal-duration" class="text-sm font-medium text-gray-900">-</span>
+                </div>
+            </div>
+            
+            <!-- Privacy Notice -->
+            <div class="bg-blue-50 border border-blue-100 rounded-lg p-3 mb-6">
+                <div class="flex items-start space-x-2">
+                    <i class="fas fa-shield-alt text-blue-500 mt-0.5"></i>
+                    <div class="text-xs text-blue-700">
+                        <strong>Privacy Protected:</strong> Your data never leaves this device. 
+                        Only model updates are shared with the central server.
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Timer -->
+            <div class="text-center mb-6">
+                <span class="text-sm text-gray-500">Request expires in</span>
+                <div id="modal-timer" class="text-2xl font-bold text-orange-500">5:00</div>
+            </div>
+            
+            <!-- Actions -->
+            <div class="flex space-x-3">
+                <button id="btn-reject" onclick="respondToRequest(false)" 
+                    class="flex-1 py-3 px-4 bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium rounded-xl transition-colors">
+                    <i class="fas fa-times mr-2"></i>
+                    Decline
+                </button>
+                <button id="btn-approve" onclick="respondToRequest(true)"
+                    class="flex-1 py-3 px-4 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-medium rounded-xl transition-colors">
+                    <i class="fas fa-check mr-2"></i>
+                    Participate
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Toast Notification -->
+<div id="toast" class="toast">
+    <i id="toast-icon" class="fas fa-bell text-blue-500"></i>
+    <span id="toast-message">New FL request received</span>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Configuration
+const DEVICE_ID = '{{ device_id }}';
+const BRAIN_SERVER_URL = '{{ brain_server_url }}';
+const POLL_INTERVAL = 5000; // 5 seconds
+
+// State
+let currentRequest = null;
+let timerInterval = null;
+let pollInterval = null;
+let isTraining = false;
+
+// Initialize
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('[FL] Initializing FL notification system for device:', DEVICE_ID);
+    startPolling();
+});
+
+// Start polling for requests and progress
+function startPolling() {
+    // Initial check
+    checkPendingRequests();
+    checkProgress();
+    
+    // Set up polling
+    pollInterval = setInterval(() => {
+        if (!isTraining) {
+            checkPendingRequests();
+        }
+        checkProgress();
+    }, POLL_INTERVAL);
+}
+
+// Check for pending FL requests
+async function checkPendingRequests() {
+    try {
+        const response = await fetch(`${BRAIN_SERVER_URL}/fl/participation/pending/${DEVICE_ID}`);
+        const data = await response.json();
+        
+        if (data.success && data.pending_count > 0) {
+            // Show the first pending request
+            showRequest(data.requests[0]);
+        }
+    } catch (error) {
+        console.error('[FL] Error checking pending requests:', error);
+    }
+}
+
+// Check for training progress
+async function checkProgress() {
+    try {
+        const response = await fetch(`${BRAIN_SERVER_URL}/fl/participation/progress/${DEVICE_ID}`);
+        const data = await response.json();
+        
+        if (data.success && data.active) {
+            isTraining = true;
+            updateTrainingUI(data);
+        } else {
+            if (isTraining) {
+                // Training just ended
+                isTraining = false;
+                showNoActivity();
+            }
+        }
+    } catch (error) {
+        console.error('[FL] Error checking progress:', error);
+    }
+}
+
+// Show FL request modal
+function showRequest(request) {
+    currentRequest = request;
+    
+    // Update modal content
+    document.getElementById('modal-session-name').textContent = request.session_name;
+    document.getElementById('modal-algorithm').textContent = request.algorithm.toUpperCase();
+    document.getElementById('modal-dataset').textContent = request.dataset.toUpperCase();
+    document.getElementById('modal-rounds').textContent = request.num_rounds;
+    document.getElementById('modal-duration').textContent = `~${request.estimated_duration_minutes} min`;
+    
+    // Start countdown timer
+    startTimer(request.expires_at);
+    
+    // Show modal
+    document.getElementById('fl-request-modal').classList.add('active');
+    
+    // Show toast
+    showToast('New FL training request received!');
+    
+    // Update status indicator
+    updateStatusIndicator('pending', 'Request Pending');
+    
+    // Play notification sound (if available)
+    playNotificationSound();
+}
+
+// Start countdown timer
+function startTimer(expiresAt) {
+    if (timerInterval) clearInterval(timerInterval);
+    
+    const expiryTime = new Date(expiresAt).getTime();
+    
+    timerInterval = setInterval(() => {
+        const now = Date.now();
+        const remaining = Math.max(0, expiryTime - now);
+        
+        if (remaining === 0) {
+            clearInterval(timerInterval);
+            hideModal();
+            showToast('Request expired', 'warning');
+            return;
+        }
+        
+        const minutes = Math.floor(remaining / 60000);
+        const seconds = Math.floor((remaining % 60000) / 1000);
+        document.getElementById('modal-timer').textContent = 
+            `${minutes}:${seconds.toString().padStart(2, '0')}`;
+    }, 1000);
+}
+
+// Respond to FL request
+async function respondToRequest(approved) {
+    if (!currentRequest) return;
+    
+    const btn = approved ? document.getElementById('btn-approve') : document.getElementById('btn-reject');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Processing...';
+    
+    try {
+        const response = await fetch(`${BRAIN_SERVER_URL}/fl/participation/respond/${currentRequest.request_id}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                approved: approved,
+                rejection_reason: approved ? null : 'User declined'
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            hideModal();
+            
+            if (approved) {
+                showToast('Participation approved! Training will begin shortly.', 'success');
+                isTraining = true;
+                showTrainingUI();
+            } else {
+                showToast('Request declined', 'info');
+                showNoActivity();
+            }
+        } else {
+            showToast('Failed to respond: ' + (data.message || 'Unknown error'), 'error');
+        }
+    } catch (error) {
+        console.error('[FL] Error responding to request:', error);
+        showToast('Network error. Please try again.', 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = approved ? 
+            '<i class="fas fa-check mr-2"></i>Participate' : 
+            '<i class="fas fa-times mr-2"></i>Decline';
+    }
+}
+
+// Update training UI with progress
+function updateTrainingUI(data) {
+    // Show training section
+    document.getElementById('no-activity-section').classList.add('hidden');
+    document.getElementById('pending-requests-section').classList.add('hidden');
+    document.getElementById('active-training-section').classList.remove('hidden');
+    
+    // Update session info
+    if (data.session) {
+        document.getElementById('session-name').textContent = data.session.name;
+        document.getElementById('session-algorithm').textContent = `${data.session.status} • Best: ${(data.session.best_accuracy * 100).toFixed(1)}%`;
+        
+        // Update status badge
+        const badge = document.getElementById('training-status-badge');
+        badge.className = `status-badge ${data.session.status}`;
+        badge.textContent = data.session.status.charAt(0).toUpperCase() + data.session.status.slice(1);
+    }
+    
+    // Update progress
+    if (data.progress) {
+        const progress = data.progress;
+        const percent = progress.progress_percent;
+        
+        // Update progress circle
+        const circle = document.getElementById('progress-circle');
+        const circumference = 2 * Math.PI * 68;
+        const offset = circumference - (percent / 100) * circumference;
+        circle.style.strokeDashoffset = offset;
+        
+        // Update text
+        document.getElementById('progress-percent').textContent = `${percent}%`;
+        document.getElementById('progress-rounds').textContent = `Round ${progress.current_round}/${progress.total_rounds}`;
+        
+        // Update metrics
+        document.getElementById('metric-accuracy').textContent = 
+            progress.global_accuracy > 0 ? `${(progress.global_accuracy * 100).toFixed(1)}%` : '-';
+        document.getElementById('metric-loss').textContent = 
+            progress.global_loss > 0 ? progress.global_loss.toFixed(4) : '-';
+        document.getElementById('metric-device-accuracy').textContent = 
+            progress.device_accuracy > 0 ? `${(progress.device_accuracy * 100).toFixed(1)}%` : '-';
+        
+        // Estimate time remaining
+        if (progress.estimated_completion) {
+            const eta = new Date(progress.estimated_completion);
+            const now = new Date();
+            const diffMs = eta - now;
+            if (diffMs > 0) {
+                const diffMins = Math.ceil(diffMs / 60000);
+                document.getElementById('metric-eta').textContent = `~${diffMins} min`;
+            }
+        }
+        
+        // Update status message
+        document.getElementById('status-message').textContent = 
+            progress.message || `Training round ${progress.current_round} of ${progress.total_rounds}...`;
+    }
+    
+    // Update status indicator
+    updateStatusIndicator('running', 'Training Active');
+}
+
+// Show training UI (initial state)
+function showTrainingUI() {
+    document.getElementById('no-activity-section').classList.add('hidden');
+    document.getElementById('pending-requests-section').classList.add('hidden');
+    document.getElementById('active-training-section').classList.remove('hidden');
+    
+    // Reset progress
+    document.getElementById('progress-percent').textContent = '0%';
+    document.getElementById('progress-rounds').textContent = 'Starting...';
+    document.getElementById('status-message').textContent = 'Initializing training session...';
+}
+
+// Show no activity state
+function showNoActivity() {
+    document.getElementById('active-training-section').classList.add('hidden');
+    document.getElementById('pending-requests-section').classList.add('hidden');
+    document.getElementById('no-activity-section').classList.remove('hidden');
+    
+    updateStatusIndicator('idle', 'Idle');
+}
+
+// Hide modal
+function hideModal() {
+    document.getElementById('fl-request-modal').classList.remove('active');
+    if (timerInterval) clearInterval(timerInterval);
+    currentRequest = null;
+}
+
+// Update status indicator
+function updateStatusIndicator(status, text) {
+    const indicator = document.getElementById('fl-status-indicator');
+    const dot = indicator.querySelector('span:first-child');
+    const label = indicator.querySelector('span:last-child');
+    
+    dot.className = 'h-3 w-3 rounded-full';
+    
+    switch (status) {
+        case 'running':
+            dot.classList.add('bg-blue-500', 'pulse-active');
+            break;
+        case 'pending':
+            dot.classList.add('bg-yellow-500');
+            break;
+        case 'completed':
+            dot.classList.add('bg-green-500');
+            break;
+        case 'failed':
+            dot.classList.add('bg-red-500');
+            break;
+        default:
+            dot.classList.add('bg-gray-300');
+    }
+    
+    label.textContent = text;
+}
+
+// Show toast notification
+function showToast(message, type = 'info') {
+    const toast = document.getElementById('toast');
+    const icon = document.getElementById('toast-icon');
+    const msg = document.getElementById('toast-message');
+    
+    msg.textContent = message;
+    
+    // Update icon based on type
+    icon.className = 'fas';
+    switch (type) {
+        case 'success':
+            icon.classList.add('fa-check-circle', 'text-green-500');
+            break;
+        case 'error':
+            icon.classList.add('fa-exclamation-circle', 'text-red-500');
+            break;
+        case 'warning':
+            icon.classList.add('fa-exclamation-triangle', 'text-yellow-500');
+            break;
+        default:
+            icon.classList.add('fa-bell', 'text-blue-500');
+    }
+    
+    // Show toast
+    toast.classList.add('show');
+    
+    // Hide after 4 seconds
+    setTimeout(() => {
+        toast.classList.remove('show');
+    }, 4000);
+}
+
+// Play notification sound
+function playNotificationSound() {
+    try {
+        // Create a simple beep using Web Audio API
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const oscillator = audioContext.createOscillator();
+        const gainNode = audioContext.createGain();
+        
+        oscillator.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        
+        oscillator.frequency.value = 800;
+        oscillator.type = 'sine';
+        gainNode.gain.value = 0.1;
+        
+        oscillator.start();
+        setTimeout(() => oscillator.stop(), 200);
+    } catch (e) {
+        // Audio not supported or blocked
+        console.log('[FL] Could not play notification sound');
+    }
+}
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', () => {
+    if (pollInterval) clearInterval(pollInterval);
+    if (timerInterval) clearInterval(timerInterval);
+});
+</script>
+{% endblock %}

@@ -1268,6 +1268,28 @@ def login():
     
     return redirect(url_for('login'))
 
+@app.route('/fl')
+def fl_page():
+    """Display the Federated Learning participation page."""
+    # Check if user is logged in
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('fl_page')))
+    
+    try:
+        # Get device information
+        device_info = device_manager.get_device_info()
+        
+        return render_template('fl_notification.html',
+                            device_id=device_info.get('device_id', ''),
+                            brain_server_url=Config.BRAIN_SERVER_URL,
+                            username=session.get('username'))
+    
+    except Exception as e:
+        logger.error(f"Error in FL page route: {str(e)}", exc_info=True)
+        flash('An error occurred while loading the FL page.', 'error')
+        return redirect(url_for('status'))
+
+
 @app.route('/status')
 def status():
     """Display the device status page."""
