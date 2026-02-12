@@ -37,9 +37,6 @@ from .base import (
     SensorConfig,
     CollectionSession,
 )
-from .manager import SensorManager
-from .imu import IMUSensor
-from .csi import CSISensor
 
 __all__ = [
     "BaseSensor",
@@ -48,7 +45,17 @@ __all__ = [
     "SensorStatus",
     "SensorConfig",
     "CollectionSession",
-    "SensorManager",
-    "IMUSensor",
-    "CSISensor",
 ]
+
+# Lazy imports to avoid circular dependency issues
+def get_sensor_manager():
+    from .manager import SensorManager
+    return SensorManager
+
+def get_imu_sensor():
+    from .imu import IMUSensor
+    return IMUSensor
+
+def get_csi_sensor():
+    from .csi import CSISensor
+    return CSISensor

@@ -1651,6 +1651,301 @@ def get_collection_status():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+@app.route('/api/camera/capture', methods=['POST'])
+def quick_camera_capture():
+    """Quickly capture a photo or short video and optionally upload to Brain.
+    
+    Request body:
+    {
+        "type": "photo" | "video",
+        "duration": 5,  // seconds, for video only (default 5, max 30)
+        "upload": true  // whether to upload to Brain cloud
+    }
+    """
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+    
+    try:
+        import cv2
+        import base64
+        
+        data = request.get_json() or {}
+        capture_type = data.get('type', 'photo')
+        duration = min(data.get('duration', 5), 30)  # Max 30 seconds
+        should_upload = data.get('upload', True)
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            return jsonify({'status': 'error', 'message': 'Failed to open camera'}), 500
+        
+        # Allow camera to warm up
+        time.sleep(0.3)
+        
+        if capture_type == 'photo':
+            filename = f"photo_{timestamp}.jpg"
+            filepath = os.path.join(Config.DATA_DIR, filename)
+            
+            ret, frame = cap.read()
+            cap.release()
+            
+            if not ret:
+                return jsonify({'status': 'error', 'message': 'Failed to capture image'}), 500
+            
+            cv2.imwrite(filepath, frame)
+            content_type = 'image/jpeg'
+            
+            logger.info(f"Photo captured: {filename}")
+            
+        else:  # video
+            filename = f"video_{timestamp}.mp4"
+            filepath = os.path.join(Config.DATA_DIR, filename)
+            
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(filepath, fourcc, fps, (width, height))
+            
+            start_time = time.time()
+            frame_count = 0
+            while time.time() - start_time < duration:
+                ret, frame = cap.read()
+                if ret:
+                    out.write(frame)
+                    frame_count += 1
+                else:
+                    break
+            
+            cap.release()
+            out.release()
+            content_type = 'video/mp4'
+            
+            logger.info(f"Video captured: {filename} ({frame_count} frames, {duration}s)")
+        
+        result = {
+            'status': 'success',
+            'filename': filename,
+            'filepath': filepath,
+            'type': capture_type,
+            'timestamp': timestamp,
+            'uploaded': False
+        }
+        
+        # Upload to Brain if requested
+        if should_upload:
+            auth_token = getattr(Config, 'USER_AUTH_TOKEN', None)
+            if auth_token:
+                try:
+                    with open(filepath, 'rb') as f:
+                        content = f.read()
+                    
+                    content_b64 = base64.b64encode(content).decode('utf-8')
+                    device_id = getattr(Config, 'DEVICE_ID', None)
+                    
+                    brain_url = f"{Config.BRAIN_SERVER_URL}/file/upload"
+                    headers = {
+                        'Authorization': f'Bearer {auth_token}',
+                        'Content-Type': 'application/json'
+                    }
+                    
+                    payload = {
+                        'filename': filename,
+                        'content': content_b64,
+                        'is_base64': True,
+                        'device_id': device_id,
+                        'content_type': content_type
+                    }
+                    
+                    response = requests.post(brain_url, json=payload, headers=headers, timeout=120)
+                    
+                    if response.status_code in (200, 201):
+                        upload_result = response.json()
+                        result['uploaded'] = True
+                        result['cloud_file_id'] = upload_result.get('file_id')
+                        logger.info(f"Media uploaded to Brain: {filename}")
+                    else:
+                        logger.error(f"Upload failed: {response.status_code}")
+                        result['upload_error'] = f"Upload failed: {response.status_code}"
+                        
+                except Exception as e:
+                    logger.error(f"Error uploading to Brain: {e}")
+                    result['upload_error'] = str(e)
+            else:
+                result['upload_error'] = "Not authenticated with Brain server"
+        
+        return jsonify(result)
+        
+    except ImportError:
+        return jsonify({'status': 'error', 'message': 'OpenCV not installed'}), 500
+    except Exception as e:
+        logger.error(f'Error in quick capture: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/media/list', methods=['GET'])
+def list_media_files():
+    """List all captured media files (photos and videos)."""
+    try:
+        media_files = []
+        
+        if os.path.exists(Config.DATA_DIR):
+            for filename in os.listdir(Config.DATA_DIR):
+                filepath = os.path.join(Config.DATA_DIR, filename)
+                if os.path.isfile(filepath):
+                    ext = os.path.splitext(filename)[1].lower()
+                    if ext in ['.jpg', '.jpeg', '.png', '.mp4', '.avi', '.mov', '.wav', '.mp3']:
+                        stat = os.stat(filepath)
+                        media_type = 'image' if ext in ['.jpg', '.jpeg', '.png'] else 'video' if ext in ['.mp4', '.avi', '.mov'] else 'audio'
+                        media_files.append({
+                            'filename': filename,
+                            'type': media_type,
+                            'size': stat.st_size,
+                            'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                            'modified': datetime.fromtimestamp(stat.st_mtime).isoformat()
+                        })
+        
+        # Sort by modified time, newest first
+        media_files.sort(key=lambda x: x['modified'], reverse=True)
+        
+        return jsonify({
+            'status': 'success',
+            'files': media_files,
+            'count': len(media_files),
+            'data_directory': Config.DATA_DIR
+        })
+        
+    except Exception as e:
+        logger.error(f'Error listing media files: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/media/serve/<filename>', methods=['GET'])
+def serve_media_file(filename):
+    """Serve a media file for viewing/playback."""
+    try:
+        filepath = os.path.join(Config.DATA_DIR, filename)
+        
+        if not os.path.exists(filepath):
+            return jsonify({'status': 'error', 'message': 'File not found'}), 404
+        
+        # Determine content type
+        ext = os.path.splitext(filename)[1].lower()
+        content_types = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.mp4': 'video/mp4',
+            '.avi': 'video/x-msvideo',
+            '.mov': 'video/quicktime',
+            '.wav': 'audio/wav',
+            '.mp3': 'audio/mpeg'
+        }
+        content_type = content_types.get(ext, 'application/octet-stream')
+        
+        return send_from_directory(Config.DATA_DIR, filename, mimetype=content_type)
+        
+    except Exception as e:
+        logger.error(f'Error serving media file: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/media/upload/<filename>', methods=['POST'])
+def upload_media_to_cloud(filename):
+    """Upload a specific media file to Brain cloud."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+    
+    try:
+        import base64
+        
+        filepath = os.path.join(Config.DATA_DIR, filename)
+        
+        if not os.path.exists(filepath):
+            return jsonify({'status': 'error', 'message': 'File not found'}), 404
+        
+        auth_token = getattr(Config, 'USER_AUTH_TOKEN', None)
+        if not auth_token:
+            return jsonify({'status': 'error', 'message': 'Not authenticated with Brain server'}), 401
+        
+        with open(filepath, 'rb') as f:
+            content = f.read()
+        
+        content_b64 = base64.b64encode(content).decode('utf-8')
+        device_id = getattr(Config, 'DEVICE_ID', None)
+        
+        ext = os.path.splitext(filename)[1].lower()
+        content_types = {
+            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+            '.mp4': 'video/mp4', '.avi': 'video/x-msvideo', '.mov': 'video/quicktime',
+            '.wav': 'audio/wav', '.mp3': 'audio/mpeg'
+        }
+        content_type = content_types.get(ext, 'application/octet-stream')
+        
+        brain_url = f"{Config.BRAIN_SERVER_URL}/file/upload"
+        headers = {
+            'Authorization': f'Bearer {auth_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        payload = {
+            'filename': filename,
+            'content': content_b64,
+            'is_base64': True,
+            'device_id': device_id,
+            'content_type': content_type
+        }
+        
+        response = requests.post(brain_url, json=payload, headers=headers, timeout=120)
+        
+        if response.status_code in (200, 201):
+            result = response.json()
+            logger.info(f"Media uploaded to Brain: {filename}")
+            return jsonify({
+                'status': 'success',
+                'message': 'File uploaded to cloud',
+                'cloud_file_id': result.get('file_id'),
+                'filename': filename
+            })
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': f'Upload failed: {response.text}'
+            }), response.status_code
+            
+    except Exception as e:
+        logger.error(f'Error uploading media: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/media/delete/<filename>', methods=['DELETE'])
+def delete_media_file(filename):
+    """Delete a media file from local storage."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+    
+    try:
+        filepath = os.path.join(Config.DATA_DIR, filename)
+        
+        if not os.path.exists(filepath):
+            return jsonify({'status': 'error', 'message': 'File not found'}), 404
+        
+        os.remove(filepath)
+        logger.info(f"Media file deleted: {filename}")
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'File deleted',
+            'filename': filename
+        })
+        
+    except Exception as e:
+        logger.error(f'Error deleting media file: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 if __name__ == '__main__':
     # Start the scheduler
     if not device_scheduler.running:
