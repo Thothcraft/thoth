@@ -1,3 +1,14 @@
+
+
+# ================================================================================
+# BEST MODEL PER CONFIGURATION
+# ================================================================================
+#   Separate_lr0.001  : BN+CondCRL+FS10%       Acc=0.6598  F1=0.6411  Kappa=0.5493  MCC=0.5636  ECE=0.1993
+#   Separate_lr0.0001 : BN+Whiten+FS10         Acc=0.7674  F1=0.7713  Kappa=0.6915  MCC=0.697  ECE=0.0906
+#   Split_lr0.001     : AdaBN+CC+W+FS10%       Acc=0.9714  F1=0.9714  Kappa=0.9643  MCC=0.9645  ECE=0.023
+#   Split_lr0.0001    : BN+Whiten+FS10         Acc=0.9587  F1=0.9584  Kappa=0.9484  MCC=0.9494  ECE=0.0172
+
+
 """
 Deep Learning components for CSI-based activity recognition.
 
@@ -6,6 +17,7 @@ Contains:
 - FeatureExtractor: Shared feature extraction network with BatchNorm
 - LabelClassifier: Classification head
 - AdaptiveModel: Domain adaptation model using AdaBN + Deep CORAL + TTA
+- TransformerClassifier: Transformer-based sequential classifier using nn.TransformerEncoder
 
 Adaptive Methods:
 1. AdaBN (Adaptive Batch Normalization):
@@ -20,6 +32,8 @@ Adaptive Methods:
    At inference, minimizes prediction entropy on unlabeled target batches
    by updating BN parameters only. Pushes model toward confident predictions.
 """
+
+import math
 
 import torch
 import torch.nn as nn
@@ -58,6 +72,278 @@ class MLP(nn.Module):
     
     def forward(self, x):
         return self.net(x)
+
+
+# =============================================================================
+# Transformer Classifier (Sequential / Patch-based)
+# =============================================================================
+class TransformerClassifier(nn.Module):
+    """Transformer-based classifier for sequential CSI data.
+
+    Reshapes a flat input vector into a sequence of patches (sub-windows),
+    projects each patch into an embedding space, adds learnable positional
+    encodings, and processes the sequence with nn.TransformerEncoder.
+    Classification is performed on the [CLS] token output (prepended to
+    the sequence) or via mean-pooling, controlled by ``pool``.
+
+    This is compatible with the existing flat-tensor data pipeline:
+    input shape (batch_size, input_dim) is internally reshaped to
+    (batch_size, seq_len, patch_dim) where seq_len = input_dim // patch_dim.
+
+    Parameters
+    ----------
+    input_dim : int
+        Total number of input features (must be divisible by patch_dim).
+    num_classes : int
+        Number of output classes.
+    patch_dim : int
+        Size of each patch / sub-window. Default: 64
+    d_model : int
+        Transformer embedding dimension. Default: 128
+    nhead : int
+        Number of attention heads. Default: 4
+    num_layers : int
+        Number of TransformerEncoderLayers. Default: 2
+    dim_feedforward : int
+        Feed-forward dimension inside each encoder layer. Default: 256
+    dropout : float
+        Dropout probability. Default: 0.1
+    pool : str
+        Pooling strategy: 'cls' (learnable CLS token) or 'mean'. Default: 'cls'
+    use_whitening : bool
+        Whether to apply FeatureWhitening after the transformer pooling. Default: False
+    use_batch_norm : bool
+        Accepted for API compatibility with AdaptiveModel (unused). Default: True
+
+    Example
+    -------
+    >>> model = TransformerClassifier(input_dim=1024, num_classes=6)
+    >>> logits = model(torch.randn(32, 1024))
+    >>> logits.shape
+    torch.Size([32, 6])
+    """
+
+    def __init__(
+        self,
+        input_dim,
+        num_classes,
+        patch_dim=64,
+        d_model=128,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=256,
+        dropout=0.1,
+        pool='cls',
+        use_whitening=False,
+        use_batch_norm=True,
+    ):
+        super().__init__()
+        assert input_dim % patch_dim == 0, (
+            f"input_dim ({input_dim}) must be divisible by patch_dim ({patch_dim})"
+        )
+        self.input_dim = input_dim
+        self.patch_dim = patch_dim
+        self.seq_len = input_dim // patch_dim
+        self.d_model = d_model
+        self.pool = pool
+        self.num_classes = num_classes
+        self.use_whitening = use_whitening
+
+        # Linear projection from patch_dim -> d_model
+        self.patch_proj = nn.Linear(patch_dim, d_model)
+
+        # Learnable positional encoding (seq_len + 1 for CLS token)
+        max_len = self.seq_len + 1  # +1 for CLS token
+        self.pos_embedding = nn.Parameter(torch.randn(1, max_len, d_model) * 0.02)
+
+        # CLS token
+        if pool == 'cls':
+            self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+
+        # Layer norm before transformer (pre-norm stabilization)
+        self.input_norm = nn.LayerNorm(d_model)
+
+        # Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=num_layers,
+        )
+
+        # Optional feature whitening (matches AdaptiveModel API)
+        if use_whitening:
+            self.whitening = FeatureWhitening(d_model)
+
+        # Classification head
+        self.head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, num_classes),
+        )
+
+        # Alias for AdaptiveModel API compatibility (train_model uses model.label_classifier)
+        self.label_classifier = self.head
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """Xavier-uniform initialization for linear layers."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        """Forward pass.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Flat input of shape (batch_size, input_dim).
+
+        Returns
+        -------
+        torch.Tensor
+            Logits of shape (batch_size, num_classes).
+        """
+        B = x.size(0)
+
+        # Reshape flat vector into patch sequence: (B, seq_len, patch_dim)
+        x = x.view(B, self.seq_len, self.patch_dim)
+
+        # Project patches to d_model
+        x = self.patch_proj(x)  # (B, seq_len, d_model)
+
+        if self.pool == 'cls':
+            # Prepend CLS token
+            cls_tokens = self.cls_token.expand(B, -1, -1)  # (B, 1, d_model)
+            x = torch.cat([cls_tokens, x], dim=1)  # (B, seq_len+1, d_model)
+
+        # Add positional encoding
+        x = x + self.pos_embedding[:, :x.size(1), :]
+
+        # Pre-norm + transformer encoder
+        x = self.input_norm(x)
+        x = self.transformer_encoder(x)  # (B, seq_len(+1), d_model)
+
+        # Pool
+        if self.pool == 'cls':
+            x = x[:, 0]  # CLS token output: (B, d_model)
+        else:
+            x = x.mean(dim=1)  # Mean pool: (B, d_model)
+
+        if self.use_whitening:
+            x = self.whitening(x)
+
+        return self.head(x)
+
+    def extract_features(self, x):
+        """Extract features before the classification head.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Flat input of shape (batch_size, input_dim).
+
+        Returns
+        -------
+        torch.Tensor
+            Features of shape (batch_size, d_model).
+        """
+        B = x.size(0)
+        x = x.view(B, self.seq_len, self.patch_dim)
+        x = self.patch_proj(x)
+
+        if self.pool == 'cls':
+            cls_tokens = self.cls_token.expand(B, -1, -1)
+            x = torch.cat([cls_tokens, x], dim=1)
+
+        x = x + self.pos_embedding[:, :x.size(1), :]
+        x = self.input_norm(x)
+        x = self.transformer_encoder(x)
+
+        if self.pool == 'cls':
+            x = x[:, 0]
+        else:
+            x = x.mean(dim=1)
+
+        if self.use_whitening:
+            x = self.whitening(x)
+        return x
+
+    def predict(self, x, batch_size=64):
+        """Predict labels (for inference, matches AdaptiveModel API).
+
+        Uses batched forward passes to avoid OOM on large inputs.
+        """
+        if x.size(0) <= batch_size:
+            return self.forward(x)
+        outputs = []
+        for i in range(0, x.size(0), batch_size):
+            outputs.append(self.forward(x[i:i+batch_size]))
+        return torch.cat(outputs, dim=0)
+
+
+def make_transformer_model(n_features, n_classes, config='default',
+                          use_batch_norm=True, use_whitening=False):
+    """Factory function to create TransformerClassifier with preset configurations.
+
+    Parameters
+    ----------
+    n_features : int
+        Number of input features (must be divisible by patch_dim in the config).
+    n_classes : int
+        Number of activity classes.
+    config : str
+        Configuration preset: 'default', 'small', 'large'.
+
+    Returns
+    -------
+    TransformerClassifier
+    """
+    configs = {
+        'default': {
+            'patch_dim': 800,
+            'd_model': 128,
+            'nhead': 4,
+            'num_layers': 2,
+            'dim_feedforward': 256,
+            'dropout': 0.1,
+        },
+        'small': {
+            'patch_dim': 600,
+            'd_model': 64,
+            'nhead': 4,
+            'num_layers': 1,
+            'dim_feedforward': 128,
+            'dropout': 0.1,
+        },
+        'large': {
+            'patch_dim': 1200,
+            'd_model': 256,
+            'nhead': 8,
+            'num_layers': 4,
+            'dim_feedforward': 512,
+            'dropout': 0.15,
+        },
+    }
+
+    cfg = configs.get(config, configs['default'])
+    return TransformerClassifier(
+        input_dim=n_features,
+        num_classes=n_classes,
+        use_whitening=use_whitening,
+        use_batch_norm=use_batch_norm,
+        **cfg,
+    )
 
 
 # =============================================================================
@@ -1099,10 +1385,11 @@ if __name__ == '__main__':
     from utils import load_csi_datasets
 
     TRAIN_DIR = '../../../wifi_sensing_data/thoth_data/train'
-    TEST_DIR  = '../../../wifi_sensing_data/thoth_data/test'
-    WINDOW_LEN = 1500
+    TRAIN_DIR2 = '../../../wifi_sensing_data/thoth_data/train2'
+    TEST_DIR = '../../../wifi_sensing_data/thoth_data/test'
+    WINDOW_LEN = 600
     EPOCHS = 100
-    LRS = [1e-3, 1e-4]
+    LRS = [1e-4]
 
     print("=" * 80)
     print("DL EXPERIMENTS: Comprehensive Domain Adaptation Comparison")
@@ -1111,7 +1398,7 @@ if __name__ == '__main__':
     print("  + 3 adaptation variants on shared model = 9 results per combo")
     print("=" * 80)
 
-    combined_ds, test_ds = load_csi_datasets(TRAIN_DIR, TEST_DIR, WINDOW_LEN, verbose=False)
+    combined_ds, test_ds = load_csi_datasets([TRAIN_DIR, TRAIN_DIR2], [TEST_DIR], WINDOW_LEN, verbose=False)
     n_features = combined_ds.X.shape[1]
     n_classes  = combined_ds.num_classes
 
@@ -1181,18 +1468,17 @@ if __name__ == '__main__':
                 ('',       {}),
                 ('+FS10',  dict(X_target_labeled=X_fs10, y_target_labeled=y_fs10,
                                 fewshot_epochs=20, fewshot_lr=1e-4)),
-                ('+FS10%', dict(X_target_labeled=X_fs10pct, y_target_labeled=y_fs10pct,
-                                fewshot_epochs=20, fewshot_lr=1e-4)),
+                # ('+FS10%', dict(X_target_labeled=X_f54rt4wesssssssssssssfewshot_lr=1e-4)),
             ]
 
             # Define training configs: (label, model_kwargs, train_kwargs)
             train_configs = [
-                ('NoBN',       dict(use_batch_norm=False), {}),
+                # ('NoBN',       dict(use_batch_norm=False), {}),
                 ('BN',         {},                         {}),
-                ('BN+GlobCRL', {},                         dict(use_coral=True)),
+                # ('BN+GlobCRL', {},                         dict(use_coral=True)),
                 ('BN+CondCRL', {},                         dict(use_conditional_coral=True)),
                 ('BN+Whiten',  dict(use_whitening=True),   {}),
-                ('BN+CC+W',    dict(use_whitening=True),   dict(use_conditional_coral=True)),
+                # ('BN+CC+W',    dict(use_whitening=True),   dict(use_conditional_coral=True)),
             ]
 
             n_train = len(train_configs)
@@ -1203,7 +1489,7 @@ if __name__ == '__main__':
                 print(f"  Training {ti+1}/{n_train}: {tname}")
                 print(f"  {'='*60}")
 
-                mdl = make_adaptive_model(n_features, n_classes, config='small', **model_kw)
+                mdl = make_transformer_model(n_features, n_classes, config='small', **model_kw)
                 merged_kw = {**train_kw, **extra_train_kw}
                 trained_mdl, info = train_model(
                     mdl, X_tr, y_tr, X_target, X_te, y_te, **merged_kw)
@@ -1218,24 +1504,25 @@ if __name__ == '__main__':
                     run_results[key] = m
 
             # Additional AdaBN variants on BN+CC+W (shared trained model)
-            mdl_ccw, info_ccw = trained_models['BN+CC+W']
-            adabn_variants = [
-                ('AdaBN+CC+W',       dict(use_adabn=True, adabn_alpha=0.3)),
-                ('AdaBN+CC+W+FS10',  dict(use_adabn=True, adabn_alpha=0.3,
-                                           X_target_labeled=X_fs10, y_target_labeled=y_fs10,
-                                           fewshot_epochs=20, fewshot_lr=1e-4)),
-                ('AdaBN+CC+W+FS10%', dict(use_adabn=True, adabn_alpha=0.3,
-                                           X_target_labeled=X_fs10pct, y_target_labeled=y_fs10pct,
-                                           fewshot_epochs=20, fewshot_lr=1e-4)),
-            ]
-            print(f"\n  {'='*60}")
-            print(f"  AdaBN adaptation variants on BN+CC+W")
-            print(f"  {'='*60}")
-            for aname, akw in adabn_variants:
-                m = adapt_and_evaluate(mdl_ccw, X_target, X_te, y_te,
-                                       info_ccw, adapt_name=aname, **akw)
-                _print_dl_metrics(aname, m, label_map=idx2name)
-                run_results[aname] = m
+            if 'BN+CC+W' in trained_models:
+                mdl_ccw, info_ccw = trained_models['BN+CC+W']
+                adabn_variants = [
+                    ('AdaBN+CC+W',       dict(use_adabn=True, adabn_alpha=0.3)),
+                    ('AdaBN+CC+W+FS10',  dict(use_adabn=True, adabn_alpha=0.3,
+                                               X_target_labeled=X_fs10, y_target_labeled=y_fs10,
+                                               fewshot_epochs=20, fewshot_lr=1e-4)),
+                    # ('AdaBN+CC+W+FS10%', dict(use_adabn=True, adabn_alpha=0.3,
+                    #                            X_target_labeled=X_fs10pct, y_target_labeled=y_fs10pct,
+                    #                            fewshot_epochs=20, fewshot_lr=1e-4)),
+                ]
+                print(f"\n  {'='*60}")
+                print(f"  AdaBN adaptation variants on BN+CC+W")
+                print(f"  {'='*60}")
+                for aname, akw in adabn_variants:
+                    m = adapt_and_evaluate(mdl_ccw, X_target, X_te, y_te,
+                                           info_ccw, adapt_name=aname, **akw)
+                    _print_dl_metrics(aname, m, label_map=idx2name)
+                    run_results[aname] = m
 
             all_results[run_key] = run_results
 

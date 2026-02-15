@@ -1,9 +1,10 @@
 """
-Domain Drift Diagnostic Suite for CSI-based Activity Recognition.
+Publication-Grade Temporal Domain Drift & Dataset Characterization Suite
+for CSI-based Activity Recognition.
 
-Ten experiments to characterize the nature of distribution shift
-between source (train) and target (test) domains:
+22 experiments across three time-separated domains (D1=earliest, D2=middle, D3=latest):
 
+Pairwise Drift Analysis (run for each pair D1→D2, D2→D3, D1→D3):
  1. Domain Classifier Test        — Is there distribution shift at all?
  2. Per-Class Centroid Shift       — Is shift global or class-dependent?
  3. Covariance Structure Shift     — Is geometry distorted?
@@ -14,6 +15,24 @@ between source (train) and target (test) domains:
  8. Class-Conditional MMD          — Per-class distribution distance
  9. Subspace Angle Analysis        — PCA subspace rotation/scaling
 10. Feature Whitening Test         — Is drift mostly second-order?
+
+Temporal 3-Domain Analysis:
+11. Drift Velocity & Acceleration  — MMD-based drift speed and acceleration
+12. Feature Variance Evolution     — Per-feature variance heatmap over time
+13. Feature Distribution Shift     — KS-test heatmap per feature
+14. Class Boundary Deformation     — Fisher margin collapse detection
+15. Temporal Feature Collapse      — PCA explained variance evolution
+16. Cross-Domain Confusion Matrix  — Activity confusion heatmaps
+17. Representation Stability Score — Cosine feature consistency
+
+Dataset Characterization:
+18. Intrinsic Dimensionality       — PCA, participation ratio, MLE
+19. Feature Correlation Structure  — Correlation heatmap & redundancy
+20. Class Separability Score       — Fisher, Silhouette, Davies-Bouldin
+21. Cluster Structure Analysis     — k-means, t-SNE visualization
+22. Noise & Stability Analysis     — Within/between-class variance, SNR
+
+Outputs: results/ directory with CSV tables, PNG plots, and summary.
 """
 
 import sys
@@ -25,14 +44,65 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix
 from sklearn.model_selection import StratifiedKFold
 from sklearn.neural_network import MLPClassifier
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score, davies_bouldin_score
+from sklearn.manifold import TSNE
 from scipy.spatial.distance import cosine as cosine_dist
 from scipy.linalg import sqrtm
+from scipy.stats import ks_2samp
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+import csv
 
 from utils import load_csi_datasets
 from dl import make_adaptive_model
+
+# Publication-quality plot defaults
+plt.rcParams.update({
+    'figure.figsize': (10, 6),
+    'figure.dpi': 150,
+    'font.size': 11,
+    'axes.titlesize': 13,
+    'axes.labelsize': 12,
+    'xtick.labelsize': 10,
+    'ytick.labelsize': 10,
+    'legend.fontsize': 10,
+    'savefig.bbox': 'tight',
+    'savefig.pad_inches': 0.1,
+})
+
+RESULTS_DIR = os.path.join(os.path.dirname(__file__), 'results')
+PLOTS_DIR = os.path.join(RESULTS_DIR, 'plots')
+
+
+def _ensure_dirs():
+    """Create output directories if they don't exist."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    os.makedirs(PLOTS_DIR, exist_ok=True)
+
+
+def _save_csv(filename, rows, header):
+    """Save a list of dicts/lists to CSV."""
+    path = os.path.join(RESULTS_DIR, filename)
+    with open(path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        for row in rows:
+            writer.writerow(row)
+    print(f"  [CSV] Saved {path}")
+
+
+def _save_plot(fig, filename):
+    """Save figure to plots directory."""
+    path = os.path.join(PLOTS_DIR, filename)
+    fig.savefig(path)
+    plt.close(fig)
+    print(f"  [PLOT] Saved {path}")
 
 
 # =============================================================================
@@ -1056,199 +1126,1181 @@ def exp10_whitening_test(feat_source, y_source, feat_target, y_target, label_map
 
 
 # =============================================================================
+# Helper: Full MMD Suite (global + class-conditional)
+# =============================================================================
+def compute_full_mmd_suite(feat_source, y_source, feat_target, y_target):
+    """Compute global MMD and class-conditional MMD in one call."""
+    max_n = min(500, len(feat_source), len(feat_target))
+    fs = feat_source[np.random.choice(len(feat_source), max_n, replace=False)] if len(feat_source) > max_n else feat_source
+    ft = feat_target[np.random.choice(len(feat_target), max_n, replace=False)] if len(feat_target) > max_n else feat_target
+    mmd_global, sigma = _compute_mmd(fs, ft)
+    classes = sorted(np.unique(np.concatenate([y_source, y_target])))
+    per_class = {}
+    for c in classes:
+        s_mask, t_mask = y_source == c, y_target == c
+        if s_mask.sum() < 5 or t_mask.sum() < 5:
+            continue
+        fs_c = feat_source[s_mask]
+        ft_c = feat_target[t_mask]
+        if len(fs_c) > 300:
+            fs_c = fs_c[np.random.choice(len(fs_c), 300, replace=False)]
+        if len(ft_c) > 300:
+            ft_c = ft_c[np.random.choice(len(ft_c), 300, replace=False)]
+        mmd2, _ = _compute_mmd(fs_c, ft_c)
+        per_class[int(c)] = round(float(mmd2), 6)
+    return {'mmd_global': round(float(mmd_global), 6), 'sigma': round(float(sigma), 4),
+            'per_class_mmd': per_class}
+
+
+# =============================================================================
+# Experiment 11: Drift Velocity & Acceleration (MMD-based)
+# =============================================================================
+def exp11_drift_velocity(F1, F2, F3):
+    """MMD-based drift velocity and acceleration across 3 temporal domains.
+
+    velocity = MMD(D1,D2), acceleration = MMD(D1,D3) - MMD(D1,D2)
+    Also computes centroid-based velocity vectors and direction similarity.
+
+    Returns
+    -------
+    dict
+        MMD velocities, centroid velocities, acceleration, direction cosine.
+    """
+    print("\n" + "=" * 70)
+    print("EXPERIMENT 11: Drift Velocity & Acceleration")
+    print("=" * 70)
+
+    # MMD-based velocity
+    max_n = min(300, len(F1), len(F2), len(F3))
+    f1s = F1[np.random.choice(len(F1), max_n, replace=False)] if len(F1) > max_n else F1
+    f2s = F2[np.random.choice(len(F2), max_n, replace=False)] if len(F2) > max_n else F2
+    f3s = F3[np.random.choice(len(F3), max_n, replace=False)] if len(F3) > max_n else F3
+
+    mmd12, _ = _compute_mmd(f1s, f2s)
+    mmd23, _ = _compute_mmd(f2s, f3s)
+    mmd13, _ = _compute_mmd(f1s, f3s)
+
+    mmd_velocity = float(mmd12)
+    mmd_accel = float(mmd13) - float(mmd12)
+
+    # Centroid-based velocity
+    mu1, mu2, mu3 = F1.mean(0), F2.mean(0), F3.mean(0)
+    v12 = mu2 - mu1
+    v23 = mu3 - mu2
+    speed12 = float(np.linalg.norm(v12))
+    speed23 = float(np.linalg.norm(v23))
+    accel_mag = float(np.linalg.norm(v23 - v12))
+    denom = np.linalg.norm(v12) * np.linalg.norm(v23)
+    dir_cos = float(np.dot(v12, v23) / (denom + 1e-8))
+
+    print(f"\n  MMD-based drift:")
+    print(f"    MMD^2(D1,D2): {mmd12:.6f}")
+    print(f"    MMD^2(D2,D3): {mmd23:.6f}")
+    print(f"    MMD^2(D1,D3): {mmd13:.6f}")
+    print(f"    Acceleration: {mmd_accel:+.6f}")
+
+    print(f"\n  Centroid-based drift:")
+    print(f"    Speed D1->D2: {speed12:.4f}")
+    print(f"    Speed D2->D3: {speed23:.4f}")
+    print(f"    Acceleration: {accel_mag:.4f}")
+    print(f"    Direction cosine: {dir_cos:.4f}")
+
+    if mmd_accel > 0.01:
+        interp = "Drift is accelerating"
+    elif mmd_accel < -0.01:
+        interp = "Drift is decelerating"
+    else:
+        interp = "Drift speed is roughly constant"
+    print(f"  Interpretation: {interp}")
+
+    # Plot: drift magnitude vs time gap
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    gaps = ['D1-D2', 'D2-D3', 'D1-D3']
+    mmds = [float(mmd12), float(mmd23), float(mmd13)]
+    axes[0].bar(gaps, mmds, color=['#2196F3', '#FF9800', '#F44336'], edgecolor='black')
+    axes[0].set_ylabel('MMD^2')
+    axes[0].set_title('MMD^2 vs Domain Pair')
+    speeds = [speed12, speed23]
+    axes[1].plot(['D1->D2', 'D2->D3'], speeds, 'o-', color='#2196F3', linewidth=2, markersize=8)
+    axes[1].set_ylabel('Centroid Speed')
+    axes[1].set_title('Drift Velocity Over Time')
+    fig.suptitle('Experiment 11: Drift Velocity & Acceleration', fontsize=14)
+    fig.tight_layout()
+    _save_plot(fig, 'exp11_drift_velocity.png')
+
+    return {
+        'mmd12': round(float(mmd12), 6), 'mmd23': round(float(mmd23), 6),
+        'mmd13': round(float(mmd13), 6), 'mmd_acceleration': round(mmd_accel, 6),
+        'speed12': round(speed12, 4), 'speed23': round(speed23, 4),
+        'centroid_acceleration': round(accel_mag, 4),
+        'direction_cosine': round(dir_cos, 4), 'interpretation': interp,
+    }
+
+
+# =============================================================================
+# Experiment 12: Feature Variance Evolution
+# =============================================================================
+def exp12_feature_variance_evolution(F1, F2, F3):
+    """Track per-feature variance across D1, D2, D3. Generates variance heatmap.
+
+    Returns
+    -------
+    dict
+        Per-domain variance stats and unstable feature indices.
+    """
+    print("\n" + "=" * 70)
+    print("EXPERIMENT 12: Feature Variance Evolution")
+    print("=" * 70)
+
+    var1 = np.var(F1, axis=0)
+    var2 = np.var(F2, axis=0)
+    var3 = np.var(F3, axis=0)
+
+    # Stack for heatmap: (3, n_features)
+    var_matrix = np.stack([var1, var2, var3])
+
+    print(f"  Feature dim: {F1.shape[1]}")
+    print(f"  Mean variance — D1: {var1.mean():.4f}, D2: {var2.mean():.4f}, D3: {var3.mean():.4f}")
+    print(f"  Max variance  — D1: {var1.max():.4f}, D2: {var2.max():.4f}, D3: {var3.max():.4f}")
+
+    # Identify unstable features (variance changes > 2x)
+    ratio_12 = var2 / (var1 + 1e-8)
+    ratio_23 = var3 / (var2 + 1e-8)
+    unstable = np.where((ratio_12 > 2) | (ratio_12 < 0.5) | (ratio_23 > 2) | (ratio_23 < 0.5))[0]
+    print(f"  Unstable features (>2x variance change): {len(unstable)} / {F1.shape[1]}")
+
+    # Heatmap — show top 50 features by max variance
+    n_show = min(50, F1.shape[1])
+    top_idx = np.argsort(var_matrix.max(axis=0))[::-1][:n_show]
+    fig, ax = plt.subplots(figsize=(14, 4))
+    sns.heatmap(var_matrix[:, top_idx], ax=ax, yticklabels=['D1', 'D2', 'D3'],
+                xticklabels=[str(i) for i in top_idx], cmap='YlOrRd', cbar_kws={'label': 'Variance'})
+    ax.set_xlabel('Feature Index')
+    ax.set_title(f'Feature Variance Heatmap (top {n_show} features)')
+    fig.tight_layout()
+    _save_plot(fig, 'exp12_variance_heatmap.png')
+
+    return {
+        'mean_var': {'D1': round(float(var1.mean()), 4), 'D2': round(float(var2.mean()), 4),
+                     'D3': round(float(var3.mean()), 4)},
+        'n_unstable': int(len(unstable)),
+        'unstable_features': unstable.tolist()[:20],
+    }
+
+
+# =============================================================================
+# Experiment 13: Feature Distribution Shift Heatmap (KS test)
+# =============================================================================
+def exp13_feature_ks_heatmap(F1, F2, F3):
+    """Per-feature KS test across domain pairs. Generates shift heatmap.
+
+    Returns
+    -------
+    dict
+        KS statistic matrices and significantly shifted feature counts.
+    """
+    print("\n" + "=" * 70)
+    print("EXPERIMENT 13: Feature Distribution Shift (KS Test)")
+    print("=" * 70)
+
+    d = F1.shape[1]
+    pairs = [('D1-D2', F1, F2), ('D2-D3', F2, F3), ('D1-D3', F1, F3)]
+    ks_matrix = np.zeros((3, d))
+    pval_matrix = np.zeros((3, d))
+
+    for pi, (pname, Fa, Fb) in enumerate(pairs):
+        for j in range(d):
+            stat, pval = ks_2samp(Fa[:, j], Fb[:, j])
+            ks_matrix[pi, j] = stat
+            pval_matrix[pi, j] = pval
+
+    sig_counts = {}
+    for pi, (pname, _, _) in enumerate(pairs):
+        n_sig = int((pval_matrix[pi] < 0.05).sum())
+        sig_counts[pname] = n_sig
+        print(f"  {pname}: {n_sig}/{d} features significantly shifted (p<0.05)")
+
+    # Heatmap — top 50 features by max KS statistic
+    n_show = min(50, d)
+    top_idx = np.argsort(ks_matrix.max(axis=0))[::-1][:n_show]
+    fig, ax = plt.subplots(figsize=(14, 4))
+    sns.heatmap(ks_matrix[:, top_idx], ax=ax, yticklabels=['D1-D2', 'D2-D3', 'D1-D3'],
+                xticklabels=[str(i) for i in top_idx], cmap='Reds', vmin=0, vmax=1,
+                cbar_kws={'label': 'KS Statistic'})
+    ax.set_xlabel('Feature Index')
+    ax.set_title(f'Feature Distribution Shift Heatmap (top {n_show})')
+    fig.tight_layout()
+    _save_plot(fig, 'exp13_ks_heatmap.png')
+
+    return {'sig_counts': sig_counts, 'mean_ks': {
+        'D1-D2': round(float(ks_matrix[0].mean()), 4),
+        'D2-D3': round(float(ks_matrix[1].mean()), 4),
+        'D1-D3': round(float(ks_matrix[2].mean()), 4)}}
+
+
+# =============================================================================
+# Experiment 14: Class Boundary Deformation (Fisher Margin)
+# =============================================================================
+def exp14_class_boundary_deformation(F1, Y1, F2, Y2, F3, Y3, label_map):
+    """Measure Fisher discriminant ratio per domain to detect margin collapse.
+
+    Fisher ratio = between-class variance / within-class variance.
+
+    Returns
+    -------
+    dict
+        Per-domain Fisher ratios and pairwise margin distances.
+    """
+    print("\n" + "=" * 70)
+    print("EXPERIMENT 14: Class Boundary Deformation")
+    print("=" * 70)
+
+    inv_map = {v: k for k, v in label_map.items()}
+
+    def _fisher_ratio(F, Y):
+        classes = sorted(np.unique(Y))
+        grand_mean = F.mean(0)
+        Sw = np.zeros((F.shape[1], F.shape[1]))
+        Sb = np.zeros((F.shape[1], F.shape[1]))
+        for c in classes:
+            Fc = F[Y == c]
+            mu_c = Fc.mean(0)
+            diff = Fc - mu_c
+            Sw += diff.T @ diff
+            d = (mu_c - grand_mean).reshape(-1, 1)
+            Sb += len(Fc) * (d @ d.T)
+        trace_sw = np.trace(Sw) + 1e-8
+        trace_sb = np.trace(Sb)
+        return float(trace_sb / trace_sw)
+
+    def _pairwise_margin(F, Y):
+        classes = sorted(np.unique(Y))
+        margins = []
+        for i, c1 in enumerate(classes):
+            for c2 in classes[i+1:]:
+                mu1 = F[Y == c1].mean(0)
+                mu2 = F[Y == c2].mean(0)
+                var1 = np.var(F[Y == c1], axis=0).mean()
+                var2 = np.var(F[Y == c2], axis=0).mean()
+                dist = float(np.linalg.norm(mu1 - mu2))
+                margin = dist / (np.sqrt(var1 + var2) + 1e-8)
+                margins.append(margin)
+        return float(np.mean(margins))
+
+    domains = {'D1': (F1, Y1), 'D2': (F2, Y2), 'D3': (F3, Y3)}
+    fisher_scores = {}
+    margin_scores = {}
+    for name, (F, Y) in domains.items():
+        fisher_scores[name] = round(_fisher_ratio(F, Y), 4)
+        margin_scores[name] = round(_pairwise_margin(F, Y), 4)
+
+    print(f"\n  {'Domain':<8} | {'Fisher Ratio':>14} {'Mean Margin':>14}")
+    print("  " + "-" * 40)
+    for name in ['D1', 'D2', 'D3']:
+        print(f"  {name:<8} | {fisher_scores[name]:>14.4f} {margin_scores[name]:>14.4f}")
+
+    if margin_scores['D3'] < margin_scores['D1'] * 0.7:
+        print("  Interpretation: Class boundaries collapsing over time")
+    elif margin_scores['D3'] > margin_scores['D1'] * 1.3:
+        print("  Interpretation: Class boundaries expanding over time")
+    else:
+        print("  Interpretation: Class boundaries relatively stable")
+
+    return {'fisher': fisher_scores, 'margins': margin_scores}
+
+
+# =============================================================================
+# Experiment 15: Temporal Feature Collapse Detection
+# =============================================================================
+def exp15_feature_collapse(F1, F2, F3):
+    """Track PCA explained variance curves per domain to detect collapse.
+
+    Returns
+    -------
+    dict
+        Per-domain explained variance ratios and effective dimensionality.
+    """
+    print("\n" + "=" * 70)
+    print("EXPERIMENT 15: Temporal Feature Collapse Detection")
+    print("=" * 70)
+
+    domains = {'D1': F1, 'D2': F2, 'D3': F3}
+    results = {}
+    k = min(50, F1.shape[1])
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    colors = {'D1': '#2196F3', 'D2': '#FF9800', 'D3': '#F44336'}
+
+    for name, F in domains.items():
+        centered = F - F.mean(0)
+        _, S, _ = np.linalg.svd(centered, full_matrices=False)
+        var_explained = (S ** 2) / (S ** 2).sum()
+        cum_var = np.cumsum(var_explained[:k])
+
+        # Participation ratio = (sum eigenvalues)^2 / sum(eigenvalues^2)
+        eigs = S[:k] ** 2
+        pr = float((eigs.sum()) ** 2 / (eigs ** 2).sum())
+
+        # Effective dim at 95% variance
+        eff_dim_95 = int(np.searchsorted(cum_var, 0.95) + 1)
+
+        results[name] = {
+            'participation_ratio': round(pr, 2),
+            'effective_dim_95': eff_dim_95,
+            'cum_var_10': round(float(cum_var[min(9, k-1)]), 4),
+            'cum_var_20': round(float(cum_var[min(19, k-1)]), 4),
+        }
+        print(f"  {name}: PR={pr:.1f}, EffDim95={eff_dim_95}, CumVar@10={cum_var[min(9,k-1)]:.4f}")
+
+        ax.plot(range(1, k+1), cum_var, label=f'{name} (PR={pr:.1f})', color=colors[name], linewidth=2)
+
+    ax.axhline(y=0.95, color='gray', linestyle='--', alpha=0.7, label='95% threshold')
+    ax.set_xlabel('Number of Components')
+    ax.set_ylabel('Cumulative Explained Variance')
+    ax.set_title('PCA Explained Variance Curves')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    _save_plot(fig, 'exp15_explained_variance.png')
+
+    return results
+
+
+# =============================================================================
+# Experiment 16: Cross-Domain Confusion Matrices
+# =============================================================================
+def exp16_cross_domain_confusion(F1, Y1, F2, Y2, F3, Y3, label_map):
+    """Train on D1, test on D2 and D3. Generate confusion matrix heatmaps.
+
+    Returns
+    -------
+    dict
+        Accuracy and confusion matrices for each cross-domain test.
+    """
+    print("\n" + "=" * 70)
+    print("EXPERIMENT 16: Cross-Domain Confusion Matrices")
+    print("=" * 70)
+
+    inv_map = {v: k for k, v in label_map.items()}
+    classes = sorted(np.unique(np.concatenate([Y1, Y2, Y3])))
+    class_names = [inv_map.get(c, str(c)) for c in classes]
+
+    clf = LogisticRegression(max_iter=1000, solver='lbfgs')
+    clf.fit(F1, Y1)
+
+    test_pairs = [('D1->D2', F2, Y2), ('D1->D3', F3, Y3)]
+    results = {}
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    for idx, (pname, Ft, Yt) in enumerate(test_pairs):
+        pred = clf.predict(Ft)
+        acc = float(accuracy_score(Yt, pred))
+        cm = confusion_matrix(Yt, pred, labels=classes)
+        cm_norm = cm.astype(float) / (cm.sum(axis=1, keepdims=True) + 1e-8)
+
+        results[pname] = {'accuracy': round(acc, 4)}
+        print(f"  {pname}: Accuracy = {acc:.4f}")
+
+        sns.heatmap(cm_norm, ax=axes[idx], annot=True, fmt='.2f', cmap='Blues',
+                    xticklabels=class_names, yticklabels=class_names, vmin=0, vmax=1)
+        axes[idx].set_title(f'{pname} (Acc={acc:.3f})')
+        axes[idx].set_xlabel('Predicted')
+        axes[idx].set_ylabel('True')
+
+    fig.suptitle('Cross-Domain Confusion Matrices (trained on D1)', fontsize=14)
+    fig.tight_layout()
+    _save_plot(fig, 'exp16_confusion_matrices.png')
+
+    return results
+
+
+# =============================================================================
+# Experiment 17: Representation Stability Score
+# =============================================================================
+def exp17_representation_stability(F1, Y1, F2, Y2, F3, Y3, label_map):
+    """Compute per-class cosine similarity of mean representations across domains.
+
+    Returns
+    -------
+    dict
+        Per-class and global stability scores.
+    """
+    print("\n" + "=" * 70)
+    print("EXPERIMENT 17: Representation Stability Score")
+    print("=" * 70)
+
+    inv_map = {v: k for k, v in label_map.items()}
+    classes = sorted(np.unique(np.concatenate([Y1, Y2, Y3])))
+
+    rows = []
+    for c in classes:
+        m1, m2, m3 = Y1 == c, Y2 == c, Y3 == c
+        if m1.sum() == 0 or m2.sum() == 0 or m3.sum() == 0:
+            continue
+        mu1, mu2, mu3 = F1[m1].mean(0), F2[m2].mean(0), F3[m3].mean(0)
+        cos12 = float(1.0 - cosine_dist(mu1, mu2))
+        cos23 = float(1.0 - cosine_dist(mu2, mu3))
+        cos13 = float(1.0 - cosine_dist(mu1, mu3))
+        name = inv_map.get(c, str(c))
+        rows.append({'name': name, 'cos12': cos12, 'cos23': cos23, 'cos13': cos13})
+
+    print(f"\n  {'Class':<12} | {'D1-D2':>8} {'D2-D3':>8} {'D1-D3':>8}")
+    print("  " + "-" * 42)
+    for r in rows:
+        print(f"  {r['name']:<12} | {r['cos12']:>8.4f} {r['cos23']:>8.4f} {r['cos13']:>8.4f}")
+
+    global_cos12 = float(1.0 - cosine_dist(F1.mean(0), F2.mean(0)))
+    global_cos23 = float(1.0 - cosine_dist(F2.mean(0), F3.mean(0)))
+    global_cos13 = float(1.0 - cosine_dist(F1.mean(0), F3.mean(0)))
+    print(f"\n  Global:      | {global_cos12:>8.4f} {global_cos23:>8.4f} {global_cos13:>8.4f}")
+
+    mean_stability = float(np.mean([r['cos13'] for r in rows]))
+    print(f"  Mean class stability (D1-D3): {mean_stability:.4f}")
+
+    return {
+        'per_class': {r['name']: {'cos12': round(r['cos12'], 4), 'cos23': round(r['cos23'], 4),
+                                   'cos13': round(r['cos13'], 4)} for r in rows},
+        'global': {'cos12': round(global_cos12, 4), 'cos23': round(global_cos23, 4),
+                   'cos13': round(global_cos13, 4)},
+        'mean_stability': round(mean_stability, 4),
+    }
+
+
+# =============================================================================
+# Experiment 18: Intrinsic Dimensionality Estimation
+# =============================================================================
+def exp18_intrinsic_dimensionality(F1, F2, F3):
+    """Estimate intrinsic dimensionality via PCA, participation ratio, and MLE.
+
+    Returns
+    -------
+    dict
+        Per-domain intrinsic dimension estimates.
+    """
+    print("\n" + "=" * 70)
+    print("EXPERIMENT 18: Intrinsic Dimensionality Estimation")
+    print("=" * 70)
+
+    def _mle_id(X, k=10):
+        """MLE intrinsic dimension estimator (Levina-Bickel)."""
+        from sklearn.neighbors import NearestNeighbors
+        nn = NearestNeighbors(n_neighbors=k+1).fit(X)
+        dists, _ = nn.kneighbors(X)
+        dists = dists[:, 1:]  # exclude self
+        dists = np.clip(dists, 1e-10, None)
+        log_ratios = np.log(dists[:, -1:] / dists[:, :-1])
+        m_hat = (k - 1) / log_ratios.sum(axis=1)
+        return float(np.mean(m_hat))
+
+    domains = {'D1': F1, 'D2': F2, 'D3': F3}
+    results = {}
+    k = min(50, F1.shape[1])
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    colors = {'D1': '#2196F3', 'D2': '#FF9800', 'D3': '#F44336'}
+
+    for name, F in domains.items():
+        centered = F - F.mean(0)
+        _, S, _ = np.linalg.svd(centered, full_matrices=False)
+        eigs = S[:k] ** 2
+        var_ratio = eigs / eigs.sum()
+        cum_var = np.cumsum(var_ratio)
+
+        pr = float(eigs.sum() ** 2 / (eigs ** 2).sum())
+        eff_95 = int(np.searchsorted(cum_var, 0.95) + 1)
+
+        # MLE on subsample for speed
+        max_n = min(500, len(F))
+        Fsub = F[np.random.choice(len(F), max_n, replace=False)] if len(F) > max_n else F
+        mle_dim = _mle_id(Fsub, k=min(10, max_n - 1))
+
+        results[name] = {
+            'participation_ratio': round(pr, 2),
+            'pca_95': eff_95,
+            'mle_dimension': round(mle_dim, 2),
+        }
+        print(f"  {name}: PR={pr:.1f}, PCA@95%={eff_95}, MLE={mle_dim:.1f}")
+        ax.plot(range(1, k+1), cum_var, label=f'{name}', color=colors[name], linewidth=2)
+
+    ax.axhline(y=0.95, color='gray', linestyle='--', alpha=0.7)
+    ax.set_xlabel('Number of Components')
+    ax.set_ylabel('Cumulative Explained Variance')
+    ax.set_title('Intrinsic Dimensionality (PCA)')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    _save_plot(fig, 'exp18_intrinsic_dim.png')
+
+    return results
+
+
+# =============================================================================
+# Experiment 19: Feature Correlation Structure
+# =============================================================================
+def exp19_feature_correlation(F1, F2, F3):
+    """Compute and visualize feature correlation matrices per domain.
+
+    Returns
+    -------
+    dict
+        Mean absolute correlation and number of highly correlated pairs.
+    """
+    print("\n" + "=" * 70)
+    print("EXPERIMENT 19: Feature Correlation Structure")
+    print("=" * 70)
+
+    domains = {'D1': F1, 'D2': F2, 'D3': F3}
+    results = {}
+    n_show = min(50, F1.shape[1])
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    for idx, (name, F) in enumerate(domains.items()):
+        corr = np.corrcoef(F.T)
+        mean_abs = float(np.mean(np.abs(corr[np.triu_indices_from(corr, k=1)])))
+        n_high = int((np.abs(corr[np.triu_indices_from(corr, k=1)]) > 0.8).sum())
+        results[name] = {'mean_abs_corr': round(mean_abs, 4), 'n_high_corr_pairs': n_high}
+        print(f"  {name}: Mean|corr|={mean_abs:.4f}, High-corr pairs(>0.8)={n_high}")
+
+        sns.heatmap(corr[:n_show, :n_show], ax=axes[idx], cmap='RdBu_r', vmin=-1, vmax=1,
+                    square=True, cbar_kws={'shrink': 0.8})
+        axes[idx].set_title(f'{name} Correlation (top {n_show})')
+
+    fig.suptitle('Feature Correlation Heatmaps', fontsize=14)
+    fig.tight_layout()
+    _save_plot(fig, 'exp19_correlation_heatmap.png')
+
+    return results
+
+
+# =============================================================================
+# Experiment 20: Class Separability Score
+# =============================================================================
+def exp20_class_separability(F1, Y1, F2, Y2, F3, Y3):
+    """Compute Fisher discriminant ratio, Silhouette score, Davies-Bouldin index.
+
+    Returns
+    -------
+    dict
+        Per-domain separability metrics.
+    """
+    print("\n" + "=" * 70)
+    print("EXPERIMENT 20: Class Separability Score")
+    print("=" * 70)
+
+    def _fisher(F, Y):
+        classes = sorted(np.unique(Y))
+        grand_mean = F.mean(0)
+        Sw_trace, Sb_trace = 0.0, 0.0
+        for c in classes:
+            Fc = F[Y == c]
+            mu_c = Fc.mean(0)
+            Sw_trace += np.sum((Fc - mu_c) ** 2)
+            Sb_trace += len(Fc) * np.sum((mu_c - grand_mean) ** 2)
+        return float(Sb_trace / (Sw_trace + 1e-8))
+
+    domains = {'D1': (F1, Y1), 'D2': (F2, Y2), 'D3': (F3, Y3)}
+    results = {}
+
+    print(f"\n  {'Domain':<8} | {'Fisher':>10} {'Silhouette':>12} {'DB Index':>10}")
+    print("  " + "-" * 46)
+
+    for name, (F, Y) in domains.items():
+        fisher = _fisher(F, Y)
+        # Subsample for silhouette/DB (expensive)
+        max_n = min(1000, len(F))
+        idx = np.random.choice(len(F), max_n, replace=False) if len(F) > max_n else np.arange(len(F))
+        sil = float(silhouette_score(F[idx], Y[idx]))
+        db = float(davies_bouldin_score(F[idx], Y[idx]))
+        results[name] = {'fisher': round(fisher, 4), 'silhouette': round(sil, 4),
+                         'davies_bouldin': round(db, 4)}
+        print(f"  {name:<8} | {fisher:>10.4f} {sil:>12.4f} {db:>10.4f}")
+
+    return results
+
+
+# =============================================================================
+# Experiment 21: Cluster Structure Analysis (k-means + t-SNE)
+# =============================================================================
+def exp21_cluster_structure(F1, Y1, F2, Y2, F3, Y3, label_map):
+    """Run k-means and generate t-SNE visualizations per domain.
+
+    Returns
+    -------
+    dict
+        k-means accuracy (via majority vote) and cluster purity.
+    """
+    print("\n" + "=" * 70)
+    print("EXPERIMENT 21: Cluster Structure Analysis")
+    print("=" * 70)
+
+    inv_map = {v: k for k, v in label_map.items()}
+    n_classes = len(np.unique(Y1))
+    domains = {'D1': (F1, Y1), 'D2': (F2, Y2), 'D3': (F3, Y3)}
+    results = {}
+
+    # t-SNE on combined data (subsample for speed)
+    max_per_domain = min(300, len(F1), len(F2), len(F3))
+    combined_F, combined_Y, combined_D = [], [], []
+    for name, (F, Y) in domains.items():
+        idx = np.random.choice(len(F), max_per_domain, replace=False) if len(F) > max_per_domain else np.arange(len(F))
+        combined_F.append(F[idx])
+        combined_Y.append(Y[idx])
+        combined_D.extend([name] * len(idx))
+    combined_F = np.concatenate(combined_F)
+    combined_Y = np.concatenate(combined_Y)
+
+    print("  Computing t-SNE...")
+    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(combined_F) - 1))
+    emb = tsne.fit_transform(combined_F)
+
+    # Figure 1: colored by class
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    class_labels = sorted(np.unique(combined_Y))
+    cmap = plt.cm.get_cmap('tab10', len(class_labels))
+    for i, c in enumerate(class_labels):
+        mask = combined_Y == c
+        name = inv_map.get(c, str(c))
+        axes[0].scatter(emb[mask, 0], emb[mask, 1], c=[cmap(i)], label=name, s=10, alpha=0.6)
+    axes[0].set_title('t-SNE colored by Activity')
+    axes[0].legend(markerscale=3, fontsize=8)
+
+    # Figure 2: colored by domain
+    domain_colors = {'D1': '#2196F3', 'D2': '#FF9800', 'D3': '#F44336'}
+    for dname in ['D1', 'D2', 'D3']:
+        mask = np.array([d == dname for d in combined_D])
+        axes[1].scatter(emb[mask, 0], emb[mask, 1], c=domain_colors[dname], label=dname, s=10, alpha=0.6)
+    axes[1].set_title('t-SNE colored by Domain')
+    axes[1].legend(markerscale=3)
+
+    fig.suptitle('Cluster Structure (t-SNE)', fontsize=14)
+    fig.tight_layout()
+    _save_plot(fig, 'exp21_tsne.png')
+
+    # k-means per domain
+    for name, (F, Y) in domains.items():
+        km = KMeans(n_clusters=n_classes, random_state=42, n_init=10)
+        pred = km.fit_predict(F)
+        # Cluster purity
+        purity = 0
+        for cl in range(n_classes):
+            mask = pred == cl
+            if mask.sum() > 0:
+                counts = np.bincount(Y[mask].astype(int), minlength=n_classes)
+                purity += counts.max()
+        purity = float(purity / len(Y))
+        results[name] = {'cluster_purity': round(purity, 4)}
+        print(f"  {name}: k-means purity = {purity:.4f}")
+
+    return results
+
+
+# =============================================================================
+# Experiment 22: Noise & Stability Analysis
+# =============================================================================
+def exp22_noise_stability(F1, Y1, F2, Y2, F3, Y3, label_map):
+    """Compute within-class variance, between-class variance, and SNR.
+
+    Returns
+    -------
+    dict
+        Per-domain noise metrics.
+    """
+    print("\n" + "=" * 70)
+    print("EXPERIMENT 22: Noise & Stability Analysis")
+    print("=" * 70)
+
+    inv_map = {v: k for k, v in label_map.items()}
+
+    def _snr_metrics(F, Y):
+        classes = sorted(np.unique(Y))
+        grand_mean = F.mean(0)
+        within_var, between_var = 0.0, 0.0
+        n_total = len(F)
+        for c in classes:
+            Fc = F[Y == c]
+            mu_c = Fc.mean(0)
+            within_var += np.sum(np.var(Fc, axis=0))
+            between_var += len(Fc) * np.sum((mu_c - grand_mean) ** 2)
+        within_var /= n_total
+        between_var /= n_total
+        snr = float(between_var / (within_var + 1e-8))
+        return float(within_var), float(between_var), snr
+
+    domains = {'D1': (F1, Y1), 'D2': (F2, Y2), 'D3': (F3, Y3)}
+    results = {}
+
+    print(f"\n  {'Domain':<8} | {'Within-Var':>12} {'Between-Var':>13} {'SNR':>8}")
+    print("  " + "-" * 48)
+    for name, (F, Y) in domains.items():
+        wv, bv, snr = _snr_metrics(F, Y)
+        results[name] = {'within_var': round(wv, 4), 'between_var': round(bv, 4), 'snr': round(snr, 4)}
+        print(f"  {name:<8} | {wv:>12.4f} {bv:>13.4f} {snr:>8.4f}")
+
+    if results['D3']['snr'] < results['D1']['snr'] * 0.7:
+        print("  Interpretation: SNR degrading over time — signal quality declining")
+    else:
+        print("  Interpretation: SNR relatively stable")
+
+    return results
+
+
+# =============================================================================
+# Publication Tables & Figures
+# =============================================================================
+def generate_publication_tables(F1, Y1, F2, Y2, F3, Y3, label_map, all_results):
+    """Generate publication-quality CSV tables."""
+    _ensure_dirs()
+    inv_map = {v: k for k, v in label_map.items()}
+
+    # Table A: Dataset Summary
+    rows = []
+    for name, F, Y in [('D1', F1, Y1), ('D2', F2, Y2), ('D3', F3, Y3)]:
+        idim = all_results.get('exp18', {}).get(name, {})
+        rows.append([name, len(F), F.shape[1], len(np.unique(Y)),
+                     idim.get('participation_ratio', ''), idim.get('mle_dimension', '')])
+    _save_csv('table_a_dataset_summary.csv', rows,
+              ['Dataset', 'Samples', 'Features', 'Classes', 'Intrinsic Dim (PR)', 'Intrinsic Dim (MLE)'])
+
+    # Table B: Drift Summary
+    rows = []
+    for pair in ['D1->D2', 'D2->D3', 'D1->D3']:
+        pr = all_results.get(pair, {})
+        dc = pr.get('domain_classifier', {})
+        cs = pr.get('covariance_shift', {})
+        mmd = pr.get('mmd', {})
+        rows.append([pair, mmd.get('mmd_global', ''), dc.get('linear_acc', ''),
+                     cs.get('mean_principal_angle_deg', ''),
+                     pr.get('centroid_shift', {}).get('mean_l2', '')])
+    _save_csv('table_b_drift_summary.csv', rows,
+              ['Comparison', 'MMD^2', 'Domain Acc', 'Principal Angle', 'Centroid Shift'])
+
+    # Table C: Class Drift Summary
+    rows = []
+    classes = sorted(np.unique(np.concatenate([Y1, Y2, Y3])))
+    for c in classes:
+        name = inv_map.get(c, str(c))
+        # Get centroid shift from D1->D3
+        cs = all_results.get('D1->D3', {}).get('centroid_shift', {}).get('per_class', {})
+        mmd_pc = all_results.get('D1->D3', {}).get('mmd', {}).get('per_class_mmd', {})
+        l2 = cs.get(name, {}).get('l2', '') if isinstance(cs.get(name), dict) else ''
+        mmd_v = mmd_pc.get(int(c), '')
+        rows.append([name, l2, mmd_v])
+    _save_csv('table_c_class_drift.csv', rows, ['Class', 'Centroid Shift (L2)', 'MMD^2'])
+
+    # Table D: Separability
+    rows = []
+    sep = all_results.get('exp20', {})
+    for name in ['D1', 'D2', 'D3']:
+        s = sep.get(name, {})
+        rows.append([name, s.get('silhouette', ''), s.get('fisher', ''), s.get('davies_bouldin', '')])
+    _save_csv('table_d_separability.csv', rows, ['Dataset', 'Silhouette', 'Fisher Score', 'DB Index'])
+
+    print("  Publication tables generated.")
+
+
+def generate_publication_figures(F1, Y1, F2, Y2, F3, Y3, label_map, all_results):
+    """Generate publication-quality figures."""
+    _ensure_dirs()
+    inv_map = {v: k for k, v in label_map.items()}
+
+    # Figure 1 & 2: PCA projection per dataset
+    print("  Generating PCA projections...")
+    max_n = min(500, len(F1), len(F2), len(F3))
+    combined = np.concatenate([
+        F1[np.random.choice(len(F1), max_n, replace=False)] if len(F1) > max_n else F1,
+        F2[np.random.choice(len(F2), max_n, replace=False)] if len(F2) > max_n else F2,
+        F3[np.random.choice(len(F3), max_n, replace=False)] if len(F3) > max_n else F3,
+    ])
+    combined_labels = np.concatenate([
+        Y1[np.random.choice(len(Y1), max_n, replace=False)] if len(Y1) > max_n else Y1,
+        Y2[np.random.choice(len(Y2), max_n, replace=False)] if len(Y2) > max_n else Y2,
+        Y3[np.random.choice(len(Y3), max_n, replace=False)] if len(Y3) > max_n else Y3,
+    ])
+    domain_ids = np.concatenate([np.full(min(max_n, len(F1)), 0),
+                                  np.full(min(max_n, len(F2)), 1),
+                                  np.full(min(max_n, len(F3)), 2)])
+
+    # PCA
+    centered = combined - combined.mean(0)
+    U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+    pca2d = centered @ Vt[:2].T
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    domain_colors = ['#2196F3', '#FF9800', '#F44336']
+    domain_names = ['D1', 'D2', 'D3']
+    for d in range(3):
+        mask = domain_ids == d
+        axes[0].scatter(pca2d[mask, 0], pca2d[mask, 1], c=domain_colors[d],
+                       label=domain_names[d], s=10, alpha=0.5)
+    axes[0].set_title('PCA Projection (by Domain)')
+    axes[0].legend(markerscale=3)
+    axes[0].set_xlabel('PC1')
+    axes[0].set_ylabel('PC2')
+
+    class_labels = sorted(np.unique(combined_labels))
+    cmap = plt.cm.get_cmap('tab10', len(class_labels))
+    for i, c in enumerate(class_labels):
+        mask = combined_labels == c
+        name = inv_map.get(c, str(c))
+        axes[1].scatter(pca2d[mask, 0], pca2d[mask, 1], c=[cmap(i)], label=name, s=10, alpha=0.5)
+    axes[1].set_title('PCA Projection (by Class)')
+    axes[1].legend(markerscale=3, fontsize=8)
+    axes[1].set_xlabel('PC1')
+    axes[1].set_ylabel('PC2')
+
+    fig.suptitle('Figure 1: PCA Projections', fontsize=14)
+    fig.tight_layout()
+    _save_plot(fig, 'fig1_pca_projection.png')
+
+    # Figure 3: Drift magnitude vs time
+    print("  Generating drift magnitude plot...")
+    exp11 = all_results.get('exp11', {})
+    fig, ax = plt.subplots(figsize=(8, 5))
+    pairs_labels = ['D1-D2', 'D2-D3', 'D1-D3']
+    mmds = [exp11.get('mmd12', 0), exp11.get('mmd23', 0), exp11.get('mmd13', 0)]
+    bars = ax.bar(pairs_labels, mmds, color=['#2196F3', '#FF9800', '#F44336'], edgecolor='black')
+    ax.set_ylabel('MMD^2')
+    ax.set_title('Figure 3: Drift Magnitude vs Domain Pair')
+    ax.grid(True, alpha=0.3, axis='y')
+    for bar, val in zip(bars, mmds):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(), f'{val:.4f}',
+                ha='center', va='bottom', fontsize=10)
+    fig.tight_layout()
+    _save_plot(fig, 'fig3_drift_magnitude.png')
+
+    # Figure 7: Domain classifier ROC curves (from pairwise results)
+    print("  Generating domain classifier bar chart...")
+    fig, ax = plt.subplots(figsize=(8, 5))
+    pair_names = ['D1->D2', 'D2->D3', 'D1->D3']
+    lin_accs = [all_results.get(p, {}).get('domain_classifier', {}).get('linear_acc', 0) for p in pair_names]
+    mlp_accs = [all_results.get(p, {}).get('domain_classifier', {}).get('mlp_acc', 0) for p in pair_names]
+    x = np.arange(len(pair_names))
+    w = 0.35
+    ax.bar(x - w/2, lin_accs, w, label='Linear', color='#2196F3', edgecolor='black')
+    ax.bar(x + w/2, mlp_accs, w, label='MLP', color='#FF9800', edgecolor='black')
+    ax.set_xticks(x)
+    ax.set_xticklabels(pair_names)
+    ax.set_ylabel('Accuracy')
+    ax.set_title('Figure 7: Domain Classifier Accuracy')
+    ax.legend()
+    ax.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
+    ax.grid(True, alpha=0.3, axis='y')
+    fig.tight_layout()
+    _save_plot(fig, 'fig7_domain_classifier.png')
+
+    # Figure 8: Class centroid trajectories
+    print("  Generating centroid trajectory plot...")
+    classes = sorted(np.unique(Y1))
+    fig, ax = plt.subplots(figsize=(10, 6))
+    cmap_cls = plt.cm.get_cmap('tab10', len(classes))
+    for i, c in enumerate(classes):
+        m1, m2, m3 = Y1 == c, Y2 == c, Y3 == c
+        if m1.sum() == 0 or m2.sum() == 0 or m3.sum() == 0:
+            continue
+        d12 = float(np.linalg.norm(F1[m1].mean(0) - F2[m2].mean(0)))
+        d13 = float(np.linalg.norm(F1[m1].mean(0) - F3[m3].mean(0)))
+        name = inv_map.get(c, str(c))
+        ax.plot([0, 1, 2], [0, d12, d13], 'o-', color=cmap_cls(i), label=name, linewidth=2, markersize=8)
+    ax.set_xticks([0, 1, 2])
+    ax.set_xticklabels(['D1 (origin)', 'D2', 'D3'])
+    ax.set_ylabel('Centroid Distance from D1')
+    ax.set_title('Figure 8: Class Centroid Drift Trajectories')
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    _save_plot(fig, 'fig8_centroid_trajectories.png')
+
+    print("  Publication figures generated.")
+
+
+# =============================================================================
+# Drift Severity Score
+# =============================================================================
+def compute_drift_severity_score(all_results):
+    """Compute unified Drift Severity Score (0-1 scale).
+
+    DriftScore = 0.25*norm_MMD + 0.25*domain_acc + 0.25*norm_angle + 0.25*norm_centroid
+    """
+    print("\n" + "=" * 70)
+    print("DRIFT SEVERITY SCORE")
+    print("=" * 70)
+
+    # Use D1->D3 (max temporal gap) for scoring
+    r = all_results.get('D1->D3', {})
+    mmd = r.get('mmd', {}).get('mmd_global', 0)
+    domain_acc = r.get('domain_classifier', {}).get('linear_acc', 0.5)
+    angle = r.get('covariance_shift', {}).get('mean_principal_angle_deg', 0)
+    centroid = r.get('centroid_shift', {}).get('mean_l2', 0)
+
+    # Normalize each to [0, 1]
+    norm_mmd = min(float(mmd) / 0.5, 1.0)  # 0.5 is "extreme" MMD
+    norm_acc = min(max((float(domain_acc) - 0.5) * 2, 0), 1.0)  # 0.5=no shift, 1.0=perfect separation
+    norm_angle = min(float(angle) / 90.0, 1.0)
+    norm_centroid = min(float(centroid) / 10.0, 1.0)  # 10.0 is "extreme" shift
+
+    score = 0.25 * norm_mmd + 0.25 * norm_acc + 0.25 * norm_angle + 0.25 * norm_centroid
+
+    print(f"  Components (D1->D3):")
+    print(f"    MMD^2:           {mmd:.6f} -> norm={norm_mmd:.4f}")
+    print(f"    Domain Acc:      {domain_acc:.4f} -> norm={norm_acc:.4f}")
+    print(f"    Principal Angle: {angle:.2f} deg -> norm={norm_angle:.4f}")
+    print(f"    Centroid Shift:  {centroid:.4f} -> norm={norm_centroid:.4f}")
+    print(f"\n  DRIFT SEVERITY SCORE: {score:.4f}")
+
+    if score < 0.2:
+        print("  Level: LOW — minimal adaptation needed")
+    elif score < 0.5:
+        print("  Level: MODERATE — standard adaptation (CORAL/AdaBN) recommended")
+    elif score < 0.8:
+        print("  Level: HIGH — aggressive adaptation required")
+    else:
+        print("  Level: CRITICAL — re-training likely necessary")
+
+    return {'score': round(score, 4), 'norm_mmd': round(norm_mmd, 4),
+            'norm_domain_acc': round(norm_acc, 4), 'norm_angle': round(norm_angle, 4),
+            'norm_centroid': round(norm_centroid, 4)}
+
+
+# =============================================================================
+# Bootstrap Confidence Intervals
+# =============================================================================
+def bootstrap_mmd_ci(F_src, F_tgt, n_bootstrap=100, alpha=0.05):
+    """Bootstrap confidence interval for MMD^2."""
+    mmds = []
+    n_s, n_t = len(F_src), len(F_tgt)
+    for _ in range(n_bootstrap):
+        idx_s = np.random.choice(n_s, n_s, replace=True)
+        idx_t = np.random.choice(n_t, n_t, replace=True)
+        max_n = min(200, n_s, n_t)
+        mmd2, _ = _compute_mmd(F_src[idx_s[:max_n]], F_tgt[idx_t[:max_n]])
+        mmds.append(float(mmd2))
+    lo = float(np.percentile(mmds, 100 * alpha / 2))
+    hi = float(np.percentile(mmds, 100 * (1 - alpha / 2)))
+    return {'mean': round(float(np.mean(mmds)), 6), 'ci_low': round(lo, 6),
+            'ci_high': round(hi, 6), 'std': round(float(np.std(mmds)), 6)}
+
+
+def exp_statistical_significance(F1, F2, F3, n_bootstrap=100):
+    """Bootstrap CIs for all pairwise MMD values."""
+    print("\n" + "=" * 70)
+    print("STATISTICAL SIGNIFICANCE (Bootstrap CIs)")
+    print("=" * 70)
+
+    pairs = [('D1-D2', F1, F2), ('D2-D3', F2, F3), ('D1-D3', F1, F3)]
+    results = {}
+    for pname, Fa, Fb in pairs:
+        ci = bootstrap_mmd_ci(Fa, Fb, n_bootstrap=n_bootstrap)
+        results[pname] = ci
+        print(f"  {pname}: MMD^2 = {ci['mean']:.6f} [{ci['ci_low']:.6f}, {ci['ci_high']:.6f}]")
+
+    return results
+
+
+# =============================================================================
+# Master Wrapper: Full 22-Experiment Suite
+# =============================================================================
+def run_full_drift_suite(F1, Y1, F2, Y2, F3, Y3, label_map, n_bootstrap=50):
+    """Run all 22 experiments plus publication outputs.
+
+    Parameters
+    ----------
+    F1, Y1 : features/labels for D1 (earliest)
+    F2, Y2 : features/labels for D2 (middle)
+    F3, Y3 : features/labels for D3 (latest)
+    label_map : dict mapping label name to int
+    n_bootstrap : int, number of bootstrap samples for CIs
+
+    Returns
+    -------
+    dict : all results
+    """
+    _ensure_dirs()
+
+    domains = {"D1": (F1, Y1), "D2": (F2, Y2), "D3": (F3, Y3)}
+    pairs = [("D1", "D2"), ("D2", "D3"), ("D1", "D3")]
+    results = {}
+
+    # ---- Pairwise experiments 1-4 + MMD ----
+    for src, tgt in pairs:
+        print("\n\n" + "#" * 80)
+        print(f"TEMPORAL DRIFT: {src} -> {tgt}")
+        print("#" * 80)
+        Fs, Ys = domains[src]
+        Ft, Yt = domains[tgt]
+        pair_key = f"{src}->{tgt}"
+        results[pair_key] = {
+            "domain_classifier": exp1_domain_classifier(Fs, Ft),
+            "centroid_shift": exp2_centroid_shift(Fs, Ys, Ft, Yt, label_map),
+            "covariance_shift": exp3_covariance_shift(Fs, Ft),
+            "prior_shift": exp4_label_prior_shift(Ys, Yt, label_map),
+            "mmd": compute_full_mmd_suite(Fs, Ys, Ft, Yt),
+        }
+
+    # ---- Temporal 3-domain experiments 11-17 ----
+    print("\n\n" + "#" * 80)
+    print("TEMPORAL 3-DOMAIN ANALYSIS (Experiments 11-17)")
+    print("#" * 80)
+
+    results["exp11"] = exp11_drift_velocity(F1, F2, F3)
+    results["exp12"] = exp12_feature_variance_evolution(F1, F2, F3)
+    results["exp13"] = exp13_feature_ks_heatmap(F1, F2, F3)
+    results["exp14"] = exp14_class_boundary_deformation(F1, Y1, F2, Y2, F3, Y3, label_map)
+    results["exp15"] = exp15_feature_collapse(F1, F2, F3)
+    results["exp16"] = exp16_cross_domain_confusion(F1, Y1, F2, Y2, F3, Y3, label_map)
+    results["exp17"] = exp17_representation_stability(F1, Y1, F2, Y2, F3, Y3, label_map)
+
+    # ---- Dataset characterization 18-22 ----
+    print("\n\n" + "#" * 80)
+    print("DATASET CHARACTERIZATION (Experiments 18-22)")
+    print("#" * 80)
+
+    results["exp18"] = exp18_intrinsic_dimensionality(F1, F2, F3)
+    results["exp19"] = exp19_feature_correlation(F1, F2, F3)
+    results["exp20"] = exp20_class_separability(F1, Y1, F2, Y2, F3, Y3)
+    results["exp21"] = exp21_cluster_structure(F1, Y1, F2, Y2, F3, Y3, label_map)
+    results["exp22"] = exp22_noise_stability(F1, Y1, F2, Y2, F3, Y3, label_map)
+
+    # ---- Statistical significance ----
+    results["bootstrap_ci"] = exp_statistical_significance(F1, F2, F3, n_bootstrap=n_bootstrap)
+
+    # ---- Drift severity score ----
+    results["drift_score"] = compute_drift_severity_score(results)
+
+    # ---- Publication outputs ----
+    print("\n\n" + "#" * 80)
+    print("GENERATING PUBLICATION OUTPUTS")
+    print("#" * 80)
+
+    generate_publication_tables(F1, Y1, F2, Y2, F3, Y3, label_map, results)
+    generate_publication_figures(F1, Y1, F2, Y2, F3, Y3, label_map, results)
+
+    return results
+
+
+# =============================================================================
+# Final Summary
+# =============================================================================
+def print_full_summary(results):
+    """Print comprehensive summary of all 22 experiments."""
+    print(f"\n{'='*80}")
+    print("FULL DRIFT & DATASET CHARACTERIZATION SUMMARY (22 Experiments)")
+    print(f"{'='*80}")
+
+    # Pairwise drift
+    for pair in ['D1->D2', 'D2->D3', 'D1->D3']:
+        r = results.get(pair, {})
+        dc = r.get('domain_classifier', {})
+        cs = r.get('centroid_shift', {})
+        mmd = r.get('mmd', {})
+        cov = r.get('covariance_shift', {})
+        print(f"\n  {pair}:")
+        print(f"    Domain Acc (Lin/MLP): {dc.get('linear_acc','?')}/{dc.get('mlp_acc','?')}")
+        print(f"    Centroid L2/Cosine:   {cs.get('mean_l2','?')}/{cs.get('mean_cosine','?')}")
+        print(f"    MMD^2:               {mmd.get('mmd_global','?')}")
+        print(f"    Principal Angle:     {cov.get('mean_principal_angle_deg','?')} deg")
+
+    # Temporal dynamics
+    e11 = results.get('exp11', {})
+    e12 = results.get('exp12', {})
+    e13 = results.get('exp13', {})
+    e14 = results.get('exp14', {})
+    e15 = results.get('exp15', {})
+    e17 = results.get('exp17', {})
+    print(f"\n  --- Temporal Dynamics ---")
+    print(f"  11. Velocity: {e11.get('interpretation','?')}")
+    print(f"  12. Unstable features: {e12.get('n_unstable','?')}")
+    print(f"  13. KS-shifted features: {e13.get('sig_counts',{})}")
+    print(f"  14. Fisher ratios: {e14.get('fisher',{})}")
+    eff_dims = ', '.join(f'{k}={v.get("effective_dim_95", "?")}' for k, v in e15.items())
+    print(f"  15. Effective dim@95%: {eff_dims}")
+    print(f"  17. Mean stability: {e17.get('mean_stability','?')}")
+
+    # Dataset characterization
+    e18 = results.get('exp18', {})
+    e20 = results.get('exp20', {})
+    e22 = results.get('exp22', {})
+    print(f"\n  --- Dataset Characterization ---")
+    idims = ', '.join(f'{k}=PR{v.get("participation_ratio", "?")}' for k, v in e18.items())
+    print(f"  18. Intrinsic dim: {idims}")
+    sils = ', '.join(f'{k}=Sil{v.get("silhouette", "?")}' for k, v in e20.items())
+    print(f"  20. Separability: {sils}")
+    snrs = ', '.join(f'{k}={v.get("snr", "?")}' for k, v in e22.items())
+    print(f"  22. SNR: {snrs}")
+
+    # Drift score
+    ds = results.get('drift_score', {})
+    print(f"\n  DRIFT SEVERITY SCORE: {ds.get('score','?')}")
+
+    # Bootstrap CIs
+    ci = results.get('bootstrap_ci', {})
+    for p, v in ci.items():
+        if isinstance(v, dict):
+            print(f"  {p} MMD^2: {v.get('mean','?')} [{v.get('ci_low','?')}, {v.get('ci_high','?')}]")
+
+    print(f"\n{'='*80}")
+    print("Analysis complete! Results saved to results/ directory.")
+    print(f"{'='*80}")
+
+
+# =============================================================================
 # Main
 # =============================================================================
 if __name__ == '__main__':
-    TRAIN_DIR = '../../../wifi_sensing_data/thoth_data/train'
-    TEST_DIR  = '../../../wifi_sensing_data/thoth_data/test'
+    TRAIN_DIR  = '../../../wifi_sensing_data/thoth_data/train'
+    TEST_DIR   = '../../../wifi_sensing_data/thoth_data/test'
+    TRAIN_DIR2 = '../../../wifi_sensing_data/thoth_data/train2'
     WINDOW_LEN = 1500
     EPOCHS = 50
 
     np.random.seed(42)
     torch.manual_seed(42)
 
-    print("=" * 70)
-    print("DOMAIN DRIFT DIAGNOSTIC SUITE (10 Experiments)")
-    print("=" * 70)
+    print("=" * 80)
+    print("PUBLICATION-GRADE TEMPORAL DRIFT & DATASET CHARACTERIZATION SUITE")
+    print("  22 Experiments | 3 Temporal Domains | CSV + Plots")
+    print("  D1 = train (earliest)")
+    print("  D2 = test  (middle)")
+    print("  D3 = train2 (latest)")
+    print("=" * 80)
 
-    # ---- Load data ----
-    print("\nLoading datasets...")
-    train_ds, test_ds = load_csi_datasets(TRAIN_DIR, TEST_DIR, WINDOW_LEN, verbose=False)
+    # ---- Load 3 datasets ----
+    print("\nLoading D1 (train) and D2 (test)...")
+    d1_ds, d2_ds = load_csi_datasets([TRAIN_DIR], [TEST_DIR], WINDOW_LEN, verbose=False)
 
-    X_source, y_source = train_ds.X, train_ds.y
-    X_target, y_target = test_ds.X, test_ds.y
-    n_features = X_source.shape[1]
-    n_classes = train_ds.num_classes
-    label_map = train_ds.label_map
+    print("Loading D3 (train2)...")
+    d3_ds, _ = load_csi_datasets([TRAIN_DIR2], [TEST_DIR], WINDOW_LEN, verbose=False)
 
-    print(f"  Source: {X_source.shape}, Target: {X_target.shape}")
+    X1, Y1 = d1_ds.X, d1_ds.y
+    X2, Y2 = d2_ds.X, d2_ds.y
+    X3, Y3 = d3_ds.X, d3_ds.y
+    n_features = X1.shape[1]
+    n_classes = d1_ds.num_classes
+    label_map = d1_ds.label_map
+
+    print(f"\n  D1 (train):  {X1.shape}")
+    print(f"  D2 (test):   {X2.shape}")
+    print(f"  D3 (train2): {X3.shape}")
     print(f"  Features: {n_features}, Classes: {n_classes}")
     print(f"  Label map: {label_map}")
 
-    # ---- Train source model ----
-    print("\n" + "=" * 70)
-    print("Training source model...")
-    print("=" * 70)
-    model = train_source_model(X_source, y_source, n_features, n_classes,
+    # ---- Train source model on D1 ----
+    print("\n" + "=" * 80)
+    print("Training source model on D1 (earliest)...")
+    print("=" * 80)
+    model = train_source_model(X1, Y1, n_features, n_classes,
                                epochs=EPOCHS, verbose=True)
 
-    # ---- Extract features ----
+    # ---- Extract features for all 3 domains ----
     print("\nExtracting features...")
-    feat_source = extract_features(model, X_source)
-    feat_target = extract_features(model, X_target)
-    print(f"  Source features: {feat_source.shape}")
-    print(f"  Target features: {feat_target.shape}")
+    F1 = extract_features(model, X1)
+    F2 = extract_features(model, X2)
+    F3 = extract_features(model, X3)
+    print(f"  D1 features: {F1.shape}")
+    print(f"  D2 features: {F2.shape}")
+    print(f"  D3 features: {F3.shape}")
 
-    # ---- Run all 10 experiments ----
-    results = {}
+    # ---- Run full 22-experiment suite ----
+    results = run_full_drift_suite(F1, Y1, F2, Y2, F3, Y3, label_map, n_bootstrap=50)
 
-    results['exp1'] = exp1_domain_classifier(feat_source, feat_target)
-
-    results['exp2'] = exp2_centroid_shift(feat_source, y_source,
-                                          feat_target, y_target, label_map)
-
-    results['exp3'] = exp3_covariance_shift(feat_source, feat_target)
-
-    results['exp4'] = exp4_label_prior_shift(y_source, y_target, label_map)
-
-    results['exp5'] = exp5_logit_shift(model, X_source, y_source,
-                                       X_target, y_target, label_map)
-
-    results['exp6'] = exp6_linear_separability(feat_source, y_source,
-                                               feat_target, y_target, label_map)
-
-    results['exp7'] = exp7_mmd(feat_source, feat_target, X_source, X_target)
-
-    results['exp8'] = exp8_class_conditional_mmd(feat_source, y_source,
-                                                  feat_target, y_target, label_map)
-
-    results['exp9'] = exp9_subspace_angles(feat_source, feat_target)
-
-    results['exp10'] = exp10_whitening_test(feat_source, y_source,
-                                             feat_target, y_target, label_map)
-
-    # ---- Summary ----
-    print("\n" + "=" * 70)
-    print("DRIFT DIAGNOSTIC SUMMARY (10 Experiments)")
-    print("=" * 70)
-
-    # Exp1
-    lin_acc = results['exp1']['linear_acc']
-    mlp_acc = results['exp1']['mlp_acc']
-    gap = results['exp1']['mlp_linear_gap']
-    print(f"\n  1. Domain classifier (linear): {lin_acc:.4f}  ", end="")
-    print("(strong shift)" if lin_acc > 0.75 else "(moderate)" if lin_acc > 0.55 else "(no shift)")
-    print(f"     Domain classifier (MLP):    {mlp_acc:.4f}  gap={gap:+.4f}  ", end="")
-    print("(nonlinear shift)" if gap > 0.05 else "(linear shift)")
-
-    # Exp2
-    cv = results['exp2']['cv_l2']
-    cos = results['exp2']['mean_cosine']
-    print(f"  2. Centroid CV(L2):            {cv:.4f}  ", end="")
-    print("(class-conditional)" if cv > 0.7 else "(mixed)" if cv > 0.3 else "(global)")
-    print(f"     Mean cosine similarity:     {cos:.4f}  ", end="")
-    print("(scaling)" if cos > 0.9 else "(mixed)" if cos > 0.7 else "(directional)")
-
-    # Exp3
-    frob_rel = results['exp3']['frobenius_relative']
-    mean_angle = results['exp3']['mean_principal_angle_deg']
-    grassmann = results['exp3']['grassmann_distance']
-    print(f"  3. Relative Frobenius:         {frob_rel:.4f}")
-    print(f"     Mean principal angle:       {mean_angle:.2f} deg")
-    print(f"     Grassmann distance:         {grassmann:.4f}")
-
-    # Exp4
-    kl = results['exp4']['kl_divergence']
-    print(f"  4. Label prior KL:             {kl:.6f}  ", end="")
-    print("(significant)" if kl > 0.1 else "(mild)" if kl > 0.01 else "(negligible)")
-
-    # Exp5
-    ece_t = results['exp5']['ece_target']
-    ent_t = results['exp5']['mean_entropy_target']
-    conf_t = results['exp5']['mean_conf_target']
-    print(f"  5. Target ECE:                 {ece_t:.4f}")
-    print(f"     Target mean confidence:     {conf_t:.4f}")
-    print(f"     Target mean entropy:        {ent_t:.4f}")
-
-    # Exp6
-    src_acc = results['exp6']['source_only']['mean']
-    adapted_acc = results['exp6'].get('source+10%target', {}).get('mean', src_acc)
-    print(f"  6. Source-only linear acc:     {src_acc:.4f}")
-    print(f"     +10% target linear acc:     {adapted_acc:.4f}  ", end="")
-    gain = adapted_acc - src_acc
-    print(f"(+{gain:.4f})" if gain > 0.05 else "(minimal)")
-
-    # Exp7
-    mmd_raw = results['exp7']['mmd_raw']
-    mmd_feat = results['exp7']['mmd_features']
-    amp = results['exp7']['amplification_ratio']
-    print(f"  7. MMD raw:                    {mmd_raw:.6f}")
-    print(f"     MMD features:               {mmd_feat:.6f}  ratio={amp:.2f}x  ", end="")
-    print("(amplified)" if amp > 1.5 else "(reduced)" if amp < 0.5 else "(stable)")
-
-    # Exp8
-    cv_mmd = results['exp8']['cv']
-    print(f"  8. Class-conditional MMD CV:   {cv_mmd:.4f}  ", end="")
-    print("(class-dependent)" if cv_mmd > 0.7 else "(mixed)" if cv_mmd > 0.3 else "(uniform)")
-
-    # Exp9
-    rot = results['exp9']['rotation_drift']
-    scl = results['exp9']['scaling_drift']
-    print(f"  9. Subspace: rotation={rot}, scaling={scl}  ", end="")
-    if rot and scl:
-        print("(both)")
-    elif rot:
-        print("(rotation only)")
-    elif scl:
-        print("(scaling only)")
-    else:
-        print("(minimal)")
-
-    # Exp10
-    acc_raw = results['exp10']['acc_raw']
-    gain_oracle = results['exp10']['gain_oracle_whitening']
-    print(f" 10. Whitening raw acc:          {acc_raw:.4f}")
-    print(f"     Oracle whitening gain:      {gain_oracle:+.4f}  ", end="")
-    print("(second-order)" if gain_oracle > 0.1 else "(partial)" if gain_oracle > 0.03 else "(nonlinear)")
-
-    # ---- Final diagnosis ----
-    print(f"\n{'='*70}")
-    print("FINAL DIAGNOSIS")
-    print(f"{'='*70}")
-
-    shift_types = []
-    if lin_acc > 0.75:
-        shift_types.append("Strong covariate shift")
-    if gap > 0.05:
-        shift_types.append("Nonlinear component in shift")
-    if cv > 0.7:
-        shift_types.append("Class-conditional shift")
-    elif cv < 0.3:
-        shift_types.append("Global (class-uniform) shift")
-    if mean_angle > 30:
-        shift_types.append("Subspace rotation")
-    if results['exp9']['scaling_drift']:
-        shift_types.append("Eigenvalue scaling drift")
-    if gain_oracle > 0.1:
-        shift_types.append("Drift is mostly second-order")
-    elif gain_oracle < 0.03:
-        shift_types.append("Drift has strong nonlinear component")
-    if gain > 0.05:
-        shift_types.append("Decision boundary shifted (features usable)")
-
-    for i, s in enumerate(shift_types):
-        print(f"  {i+1}. {s}")
-
-    print(f"\n  Recommended adaptation strategy:")
-    if gain_oracle > 0.1 and cv < 0.5:
-        print("  → CORAL + AdaBN should be effective (second-order, global shift)")
-    elif gain > 0.05 and gain_oracle < 0.05:
-        print("  → Fine-tune classifier head with small labeled target data")
-    elif gap > 0.05:
-        print("  → Need nonlinear adaptation (adversarial or deeper methods)")
-    else:
-        print("  → Try CORAL + AdaBN + TTA; consider few-shot target fine-tuning")
-
-    print(f"\n{'='*70}")
-    print("Drift diagnostics completed!")
-    print(f"{'='*70}")
+    # ---- Print summary ----
+    print_full_summary(results)

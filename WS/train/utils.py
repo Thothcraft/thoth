@@ -1,9 +1,11 @@
 import os
+import glob
 import copy
 import time
 from abc import ABC, abstractmethod
 import pandas as pd
 import numpy as np
+from sklearn.linear_model import Lasso
 
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, ExtraTreesClassifier, VotingClassifier
 from sklearn.svm import SVC
@@ -22,10 +24,10 @@ def make_ml_models():
     )
     return [
         ('RandomForest', RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1)),
-        ('ExtraTrees', ExtraTreesClassifier(n_estimators=200, random_state=42, n_jobs=-1)),
+        # ('ExtraTrees', ExtraTreesClassifier(n_estimators=200, random_state=42, n_jobs=-1)),
         ('XGBoost', XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.1, random_state=42, n_jobs=-1, verbosity=0)),
-        ('SVM_RBF', SVC(kernel='rbf', C=10, gamma='scale', random_state=42)),
-        ('Ensemble', ensemble),
+        # ('SVM_RBF', SVC(kernel='rbf', C=10, gamma='scale', random_state=42)),
+        # ('Ensemble', ensemble),
     ]
 
 
@@ -284,6 +286,148 @@ class FeatureSelector(ProcessingBlock):
         return data[:, self.mask]
 
 
+class CsiSanitizer(ProcessingBlock):
+    """Phase sanitization via sparse delay-domain reconstruction (SHARP).
+
+    Derives OFDM subcarrier indices from ``CSI_SUBCARRIER_MASK``, builds a
+    frequency vector f_k = idx_k * Δf, constructs the delay dictionary
+    T(f_k, t_p) = exp(-j 2π f_k t_p)  [Eq. (6)], and for every packet solves
+    a Lasso inverse problem [Eq. (8)] to obtain sparse path coefficients r.
+    The dominant path is used as phase reference to cancel hardware offsets
+    [Eq. (14)-(15)], producing sanitized CFR Ĥ.
+
+    This block expects **complex** CSI that has already been filtered by
+    ``FeatureSelector`` (i.e. 52 kept subcarriers matching the True positions
+    in ``CSI_SUBCARRIER_MASK``).
+
+    Parameters
+    ----------
+    key : str
+        Data-dict key holding the complex CSI array. Default ``'csi'``.
+    delta_f : float
+        OFDM subcarrier spacing in Hz. Default 312 500 (HT20).
+    delta_t : float
+        Delay-grid step in seconds. Default 1e-7.
+    t_min : float
+        Minimum delay bound in seconds. Default -3e-7.
+    t_max : float
+        Maximum delay bound in seconds. Default 5e-7.
+    subcarrier_stride : int
+        Use every *n*-th subcarrier in the Lasso solver for speed. Default 2.
+    lasso_alpha : float
+        L1 regularisation strength passed to ``sklearn.linear_model.Lasso``.
+        Default 1e-4.
+    mask : np.ndarray or None
+        Boolean mask used to derive subcarrier indices.  Default
+        ``CSI_SUBCARRIER_MASK``.
+    verbose : bool
+        If True, log shapes and timing. Default False.
+    """
+
+    def __init__(self, key='csi', delta_f=312_500.0, delta_t=1e-7,
+                 t_min=-3e-7, t_max=5e-7, subcarrier_stride=2,
+                 lasso_alpha=1e-4, mask=None, verbose=False):
+        super().__init__(verbose)
+        self.key = key
+        self.delta_f = float(delta_f)
+        self.delta_t = float(delta_t)
+        self.t_min = float(t_min)
+        self.t_max = float(t_max)
+        self.subcarrier_stride = int(subcarrier_stride)
+        self.lasso_alpha = float(lasso_alpha)
+
+        _mask = mask if mask is not None else CSI_SUBCARRIER_MASK
+        # Derive OFDM subcarrier indices: position p in the 64-pt buffer maps
+        # to subcarrier index (p - 32).  Kept positions are where mask is True.
+        positions = np.where(_mask)[0]                       # e.g. [6..31, 33..58]
+        self._sc_indices = (positions - 32).astype(np.int64)  # [-26..-1, +1..+26]
+        self._freq_vec = self._sc_indices.astype(np.float64) * self.delta_f
+
+    # ------------------------------------------------------------------
+    # Internal helpers (inlined so the class has no external dependencies
+    # beyond numpy / scipy / sklearn which are already in requirements)
+    # ------------------------------------------------------------------
+    def _build_T_matrix(self, freq_vec_hz):
+        """Delay dictionary T  [Eq. (6)]:  T_{k,p} = exp(-j 2π f_k t_p)."""
+        delay_grid = np.arange(self.t_min, self.t_max + self.delta_t * 0.5,
+                               self.delta_t)
+        # T shape: (K, P) where K = len(freq_vec_hz), P = len(delay_grid)
+        T = np.exp(-1j * 2 * np.pi
+                   * freq_vec_hz[:, None] * delay_grid[None, :])
+        return T, delay_grid
+
+    def _solve_lasso(self, h, T, select_sc):
+        """Solve  min ||h - T r||_2^2 + α||r||_1  via real-valued expansion.
+
+        Uses ``sklearn.linear_model.Lasso`` (Eqs. 9-11).
+        """
+        T_sel = T[select_sc, :]          # (K_sel, P)
+        h_sel = h[select_sc]             # (K_sel,)
+
+        # Real-valued expansion for complex Lasso (Eqs. 9-11):
+        #   h = T r  with r = r_re + j*r_im
+        #   [Re(T), -Im(T)] [r_re]   [Re(h)]
+        #   [Im(T),  Re(T)] [r_im] = [Im(h)]
+        K_sel, P = T_sel.shape
+        A_re = np.vstack([T_sel.real, T_sel.imag])     # (2K_sel, P)
+        A_im = np.vstack([-T_sel.imag, T_sel.real])    # (2K_sel, P)
+        A_full = np.hstack([A_re, A_im])               # (2K_sel, 2P)
+        b_full = np.concatenate([h_sel.real, h_sel.imag])  # (2K_sel,)
+
+        model = Lasso(alpha=self.lasso_alpha, fit_intercept=False,
+                      max_iter=5000, tol=1e-6)
+        model.fit(A_full, b_full)
+        x = model.coef_                                # (2P,)
+        r = x[:P] + 1j * x[P:]                         # (P,) complex
+        return r
+
+    def _sanitize(self, H):
+        """Run full phase sanitization on H (N_pkts, K) complex."""
+        T_matrix, _ = self._build_T_matrix(self._freq_vec)
+        select_sc = np.arange(0, len(self._freq_vec), self.subcarrier_stride)
+
+        H_sanitized = np.zeros_like(H, dtype=np.complex128)
+
+        for n_idx in range(H.shape[0]):
+            h = H[n_idx, :]
+            r = self._solve_lasso(h, T_matrix, select_sc)
+
+            p_star = int(np.argmax(np.abs(r)))
+            Tr = T_matrix * r                                    # (K, P)
+            ref_col = (T_matrix[:, p_star] * r[p_star]).reshape(-1, 1)
+            Trr = Tr * np.conj(ref_col)
+            H_sanitized[n_idx, :] = np.sum(Trr, axis=1)
+
+        return H_sanitized
+
+    # ------------------------------------------------------------------
+    def process(self, data):
+        if isinstance(data, dict):
+            arr = data[self.key]
+            if not isinstance(arr, np.ndarray) or not np.iscomplexobj(arr):
+                raise TypeError(
+                    f"data['{self.key}'] must be complex np.ndarray, "
+                    f"got dtype {getattr(arr, 'dtype', type(arr))}")
+            K = arr.shape[1]
+            if K != len(self._sc_indices):
+                raise ValueError(
+                    f"Expected {len(self._sc_indices)} subcarriers after "
+                    f"FeatureSelector, got {K}")
+            self._log(f"Input: {arr.shape}, dtype={arr.dtype}")
+            self._log(f"Subcarrier indices: {self._sc_indices[[0, -1]]} "
+                      f"({len(self._sc_indices)} tones)")
+            self._log(f"Delay grid: [{self.t_min:.1e}, {self.t_max:.1e}] "
+                      f"step {self.delta_t:.1e}")
+            H_san = self._sanitize(arr)
+            self._log(f"Output: {H_san.shape}, dtype={H_san.dtype}")
+            data[self.key] = H_san
+            return data
+
+        if not isinstance(data, np.ndarray) or not np.iscomplexobj(data):
+            raise TypeError("expected complex np.ndarray")
+        return self._sanitize(data)
+
+
 class AmplitudeExtractor(ProcessingBlock):
     """Extracts amplitude |z| from complex CSI. Input: complex, Output: float64.
 
@@ -426,12 +570,15 @@ class FFTTransformer(ProcessingBlock):
         If True, use rfft (real FFT) for efficiency. Default True.
     axis : int
         Axis along which to compute FFT. Default -2 (time axis).
+    flatten : bool
+        If True and output is 3D, flatten to 2D (n_windows, freq_bins*features).
+        Default False.
     verbose : bool
         If True, print input/output shapes, frequency bin count, mode used,
         and output value range. Default False.
     """
 
-    def __init__(self, key='amplitude', mode='magnitude', real_only=True, axis=-2, verbose=False):
+    def __init__(self, key='amplitude', mode='magnitude', real_only=True, axis=-2, flatten=False, verbose=False):
         super().__init__(verbose)
         if mode not in ('complex', 'magnitude', 'db'):
             raise ValueError(f"mode must be 'complex', 'magnitude', or 'db', got '{mode}'")
@@ -439,6 +586,7 @@ class FFTTransformer(ProcessingBlock):
         self.mode = mode
         self.real_only = real_only
         self.axis = axis
+        self.flatten = flatten
 
     def process(self, data):
         if isinstance(data, dict):
@@ -468,45 +616,85 @@ class FFTTransformer(ProcessingBlock):
             result = 20 * np.log10(np.abs(fft_out) + 1e-9)
         if squeezed:
             result = result.squeeze(axis=0)
+        if self.flatten and result.ndim == 3:
+            n = result.shape[0]
+            result = result.reshape(n, -1)
         self._log(f"FFT: {arr.shape} -> {result.shape}")
         return result
 
 
-class WindowFlattener(ProcessingBlock):
-    """Flattens 3D windowed data to 2D for classification.
+class STFTTransformer(ProcessingBlock):
+    """Applies Short-Time Fourier Transform along the time axis.
 
-    Converts (n_windows, dim1, dim2) -> (n_windows, dim1 * dim2).
+    Converts a 2D array (n_samples, n_features) into a 3D spectrogram
+    (n_frames, n_freq_bins, n_features) or flattened 2D output.
 
     Parameters
     ----------
     key : str
-        Data dict key to flatten. Default 'features'.
+        Data dict key to transform. Default 'amplitude'.
+    nperseg : int
+        Length of each STFT segment (window size). Default 64.
+    noverlap : int or None
+        Number of overlapping samples between segments. Default nperseg // 2.
+    window : str
+        Window function name (passed to scipy.signal.stft). Default 'hann'.
+    mode : str
+        Output mode: 'magnitude', 'power', 'complex', or 'db'. Default 'magnitude'.
+    output_key : str or None
+        If set, store result under this key instead of overwriting input key.
     verbose : bool
-        If True, print input/output shapes. Default False.
+        If True, print input shape, output shape, and STFT parameters. Default False.
     """
 
-    def __init__(self, key='features', verbose=False):
+    def __init__(self, key='amplitude', nperseg=64, noverlap=None,
+                 window='hann', mode='magnitude', output_key=None, verbose=False):
         super().__init__(verbose)
+        if mode not in ('complex', 'magnitude', 'power', 'db'):
+            raise ValueError(f"mode must be 'complex', 'magnitude', 'power', or 'db', got '{mode}'")
         self.key = key
+        self.nperseg = nperseg
+        self.noverlap = noverlap if noverlap is not None else nperseg // 2
+        self.window = window
+        self.mode = mode
+        self.output_key = output_key if output_key is not None else key
 
     def process(self, data):
         if isinstance(data, dict):
             arr = data[self.key]
-            if not isinstance(arr, np.ndarray):
-                raise TypeError(f"data['{self.key}'] must be np.ndarray, got {type(arr)}")
-            if arr.ndim == 3:
-                n_windows = arr.shape[0]
-                flattened = arr.reshape(n_windows, -1)
-                self._log(f"Flatten: {arr.shape} -> {flattened.shape}")
-                data[self.key] = flattened
-            elif arr.ndim == 2:
-                self._log(f"Already 2D: {arr.shape}")
-            else:
-                raise ValueError(f"Expected 2D or 3D array, got {arr.ndim}D")
+            if not isinstance(arr, np.ndarray) or arr.ndim != 2:
+                raise ValueError(f"data['{self.key}'] must be 2D np.ndarray, got {getattr(arr, 'shape', type(arr))}")
+            result = self._stft(arr)
+            self._log(f"Input: {arr.shape} -> Output: {result.shape}")
+            self._log(f"STFT params: nperseg={self.nperseg}, noverlap={self.noverlap}, window='{self.window}', mode='{self.mode}'")
+            self._log(f"Output: (n_frames, n_freq_bins, n_features) = {result.shape}")
+            data[self.output_key] = result
             return data
-        if isinstance(data, np.ndarray) and data.ndim == 3:
-            return data.reshape(data.shape[0], -1)
-        return data
+        if not isinstance(data, np.ndarray) or data.ndim != 2:
+            raise ValueError(f"expected 2D np.ndarray, got {getattr(data, 'shape', type(data))}")
+        return self._stft(data)
+
+    def _stft(self, arr):
+        from scipy.signal import stft
+        n_samples, n_features = arr.shape
+        spectrograms = []
+        for col in range(n_features):
+            f, t, Zxx = stft(arr[:, col], fs=1.0, window=self.window,
+                             nperseg=self.nperseg, noverlap=self.noverlap)
+            if self.mode == 'complex':
+                spectrograms.append(Zxx)
+            elif self.mode == 'magnitude':
+                spectrograms.append(np.abs(Zxx))
+            elif self.mode == 'power':
+                spectrograms.append(np.abs(Zxx) ** 2)
+            elif self.mode == 'db':
+                spectrograms.append(20 * np.log10(np.abs(Zxx) + 1e-9))
+        # Stack: (n_freq_bins, n_time_frames, n_features)
+        result = np.stack(spectrograms, axis=-1)
+        # Transpose to (n_time_frames, n_freq_bins, n_features)
+        result = result.transpose(1, 0, 2)
+        return result
+
 
 
 class Augmentor(ProcessingBlock):
@@ -630,79 +818,6 @@ class Augmentor(ProcessingBlock):
                 warped.append(f_back(x_orig))
             return np.array(warped)
         return arr
-
-
-class STFTTransformer(ProcessingBlock):
-    """Applies Short-Time Fourier Transform along the time axis.
-
-    Converts a 2D array (n_samples, n_features) into a 3D spectrogram
-    (n_frames, n_freq_bins, n_features) or flattened 2D output.
-
-    Parameters
-    ----------
-    key : str
-        Data dict key to transform. Default 'amplitude'.
-    nperseg : int
-        Length of each STFT segment (window size). Default 64.
-    noverlap : int or None
-        Number of overlapping samples between segments. Default nperseg // 2.
-    window : str
-        Window function name (passed to scipy.signal.stft). Default 'hann'.
-    mode : str
-        Output mode: 'magnitude', 'power', 'complex', or 'db'. Default 'magnitude'.
-    output_key : str or None
-        If set, store result under this key instead of overwriting input key.
-    verbose : bool
-        If True, print input shape, output shape, and STFT parameters. Default False.
-    """
-
-    def __init__(self, key='amplitude', nperseg=64, noverlap=None,
-                 window='hann', mode='magnitude', output_key=None, verbose=False):
-        super().__init__(verbose)
-        if mode not in ('complex', 'magnitude', 'power', 'db'):
-            raise ValueError(f"mode must be 'complex', 'magnitude', 'power', or 'db', got '{mode}'")
-        self.key = key
-        self.nperseg = nperseg
-        self.noverlap = noverlap if noverlap is not None else nperseg // 2
-        self.window = window
-        self.mode = mode
-        self.output_key = output_key if output_key is not None else key
-
-    def process(self, data):
-        if isinstance(data, dict):
-            arr = data[self.key]
-            if not isinstance(arr, np.ndarray) or arr.ndim != 2:
-                raise ValueError(f"data['{self.key}'] must be 2D np.ndarray, got {getattr(arr, 'shape', type(arr))}")
-            result = self._stft(arr)
-            self._log(f"Input: {arr.shape} -> Output: {result.shape}")
-            self._log(f"STFT params: nperseg={self.nperseg}, noverlap={self.noverlap}, window='{self.window}', mode='{self.mode}'")
-            self._log(f"Output: (n_frames, n_freq_bins, n_features) = {result.shape}")
-            data[self.output_key] = result
-            return data
-        if not isinstance(data, np.ndarray) or data.ndim != 2:
-            raise ValueError(f"expected 2D np.ndarray, got {getattr(data, 'shape', type(data))}")
-        return self._stft(data)
-
-    def _stft(self, arr):
-        from scipy.signal import stft
-        n_samples, n_features = arr.shape
-        spectrograms = []
-        for col in range(n_features):
-            f, t, Zxx = stft(arr[:, col], fs=1.0, window=self.window,
-                             nperseg=self.nperseg, noverlap=self.noverlap)
-            if self.mode == 'complex':
-                spectrograms.append(Zxx)
-            elif self.mode == 'magnitude':
-                spectrograms.append(np.abs(Zxx))
-            elif self.mode == 'power':
-                spectrograms.append(np.abs(Zxx) ** 2)
-            elif self.mode == 'db':
-                spectrograms.append(20 * np.log10(np.abs(Zxx) + 1e-9))
-        # Stack: (n_freq_bins, n_time_frames, n_features)
-        result = np.stack(spectrograms, axis=-1)
-        # Transpose to (n_time_frames, n_freq_bins, n_features)
-        result = result.transpose(1, 0, 2)
-        return result
 
 
 class Normalizer(ProcessingBlock):
@@ -1368,48 +1483,62 @@ class TrainingJob:
             print(f"    {row}")
 
 
-# =============================================================================
 # Testing
 # =============================================================================
-def load_csi_datasets(train_dir, test_dir, window_len, verbose=False):
+def load_csi_datasets(train_dirs, test_dirs, window_len, verbose=False):
     """Load and return train/test TrainingDatasets from CSI CSV files."""
     pipeline = Pipeline([
         CSI_Loader(verbose=verbose),
         FeatureSelector(verbose=verbose),
+        # CsiSanitizer(verbose=verbose),
         AmplitudeExtractor(verbose=verbose),
-        Normalizer(key='amplitude', output_key='norm', verbose=verbose),
-        ConcatBlock(keys=['norm', 'rssi'], output_key='features', verbose=verbose),
+        PhaseExtractor(verbose=verbose),
+        ConcatBlock(keys=['amplitude', 'phase'], output_key='features', axis=-1, verbose=verbose),
+        Normalizer(key='features', output_key='features', verbose=verbose),
         Augmentor(key='features', output_key='aug', gaussian_noise=True, noise_std=(0.1, 0.3),
                   amplitude_scaling=True, scale_range=(0.85, 1.15), time_warp=False, seed=42, verbose=verbose),
         ConcatBlock(keys=['features', 'aug'], output_key='features', axis=0, verbose=verbose),
-        WindowTransformer(window_length=window_len, key='features', mode='sequential', verbose=verbose),
-        FFTTransformer(key='features', mode='magnitude', real_only=True, axis=-2, verbose=verbose),
-        WindowFlattener(key='features', verbose=verbose),
+        WindowTransformer(window_length=window_len, key='features', mode='flattened', verbose=verbose),
+        FFTTransformer(key='features', mode='magnitude', real_only=True, axis=-2, flatten=False, verbose=verbose),
     ])
 
     test_pipeline = Pipeline([
         CSI_Loader(verbose=verbose),
         FeatureSelector(verbose=verbose),
+        # CsiSanitizer(verbose=verbose),
         AmplitudeExtractor(verbose=verbose),
-        Normalizer(key='amplitude', verbose=verbose),
-        ConcatBlock(keys=['amplitude', 'rssi'], output_key='features', verbose=verbose),
-        WindowTransformer(window_length=window_len, key='features', mode='sequential', verbose=verbose),
-        FFTTransformer(key='features', mode='magnitude', real_only=True, axis=-2, verbose=verbose),
-        WindowFlattener(key='features', verbose=verbose),
+        PhaseExtractor(verbose=verbose),
+        ConcatBlock(keys=['amplitude', 'phase'], output_key='features', axis=-1, verbose=verbose),
+        Normalizer(key='features', output_key='features', verbose=verbose),
+        WindowTransformer(window_length=window_len, key='features', mode='flattened', verbose=verbose),
+        FFTTransformer(key='features', mode='magnitude', real_only=True, axis=-2, flatten=False, verbose=verbose),
     ])
 
-    labels = ['drink', 'eat', 'empty', 'smoke', 'watch', 'work']
-    train_files = {l: f'{train_dir}/{l}.csv' for l in labels}
-    test_files  = {l: f'{test_dir}/{l}2.csv' for l in labels}
-
-    ds_files = [DatasetFile(p, pipeline, [l]) for l, p in train_files.items()]
+    labels = ['empty', 'smoke', 'watch', 'work', 'sleep']
+    # labels = ['drink', 'eat', 'empty', 'smoke', 'watch', 'work', 'sleep']
+    
+    # Collect train files: for each dir × label, glob for CSVs starting with that label
+    train_files = []  # list of (label, filepath)
+    for train_dir in train_dirs:
+        for label in labels:
+            for f in sorted(glob.glob(f'{train_dir}/{label}*.csv')):
+                train_files.append((label, f))
+    
+    # Collect test files: same flexible search
+    test_files = []  # list of (label, filepath)
+    for test_dir in test_dirs:
+        for label in labels:
+            for f in sorted(glob.glob(f'{test_dir}/{label}*.csv')):
+                test_files.append((label, f))
+    
+    ds_files = [DatasetFile(p, pipeline, [l]) for l, p in train_files]
     train_ds = TrainingDataset(ds_files, feature_key='features', balance=True)
     train_ds.build()
-
-    test_ds_files = [DatasetFile(p, test_pipeline, [l]) for l, p in test_files.items()]
+    
+    test_ds_files = [DatasetFile(p, test_pipeline, [l]) for l, p in test_files]
     test_ds = TrainingDataset(test_ds_files, feature_key='features', label_map=train_ds.label_map, balance=True)
     test_ds.build()
-
+    
     return train_ds, test_ds
 
 
@@ -1418,14 +1547,15 @@ def load_csi_datasets(train_dir, test_dir, window_len, verbose=False):
 # =============================================================================
 if __name__ == '__main__':
     TRAIN_DIR = '../../../wifi_sensing_data/thoth_data/train'
+    TRAIN_DIR2 = '../../../wifi_sensing_data/thoth_data/train2'
     TEST_DIR = '../../../wifi_sensing_data/thoth_data/test'
-    WINDOW_LEN = 1500
+    WINDOW_LEN = 600
 
     print("=" * 70)
     print("ML EXPERIMENTS (5 sklearn models)")
     print("=" * 70)
 
-    combined_ds, test_ds = load_csi_datasets(TRAIN_DIR, TEST_DIR, WINDOW_LEN, verbose=True)
+    combined_ds, test_ds = load_csi_datasets([TRAIN_DIR, TRAIN_DIR2], [TEST_DIR], WINDOW_LEN, verbose=True)
     n_features, n_classes = combined_ds.X.shape[1], combined_ds.num_classes
 
     print(f"\n{'='*70}")
