@@ -31,8 +31,19 @@ def make_ml_models():
     ]
 
 
-def run_ml_experiment(name, train_ds, test_ds=None):
-    """Run all 5 ML models on a dataset."""
+def run_ml_experiment(name, train_ds, test_ds=None, adapt=False):
+    """Run all 5 ML models on a dataset.
+
+    Parameters
+    ----------
+    name : str
+        Experiment name for display.
+    train_ds : TrainingDataset
+    test_ds : TrainingDataset, optional
+    adapt : bool
+        If True and test_ds is provided, run CM-based adaptation after each
+        model and store before/after comparison in results.
+    """
     results = {}
     for model_name, model in make_ml_models():
         print(f"\n--- {model_name} ---")
@@ -40,7 +51,24 @@ def run_ml_experiment(name, train_ds, test_ds=None):
             model=model, train_dataset=train_ds, test_dataset=test_ds,
             test_size=0.2, batch_size=64, epochs=50, lr=1e-3
         )
-        results[model_name] = job.run()
+        metrics = job.run()
+
+        if adapt and test_ds is not None:
+            print(f"\n  >> Running CM adaptation for {model_name}...")
+            X_train, X_test = train_ds.X, test_ds.X
+            y_train, y_test = train_ds.y, test_ds.y
+            adaptation = evaluate_with_adaptation(
+                model=job.model,
+                X_train=X_train, y_train=y_train,
+                X_test=X_test, y_test=y_test,
+                label_map=train_ds.label_map,
+                is_torch=job._is_torch,
+                device=getattr(job, 'device', 'cpu'),
+                batch_size=64,
+            )
+            metrics['adaptation'] = adaptation
+
+        results[model_name] = metrics
     return results
 
 
@@ -166,22 +194,35 @@ class ProcessingBlock(ABC):
 # CSI Loader
 # =============================================================================
 class CSI_Loader(ProcessingBlock):
-    """Loads CSI data from CSV, converts 128 I/Q values to 64 complex numbers.
+    """Loads CSI data from CSV, converts 128 I/Q bytes to mag, phase, real, imag.
+
+    The raw 128-byte CSI payload is split into 64 (imag, real) pairs.
+    From those, magnitude and phase are computed directly (no complex
+    intermediate).  All four representations are resampled to equal
+    time intervals at ``guaranteed_sr`` Hz and returned in the output
+    dictionary.
 
     As a ProcessingBlock, it can be the first block in a pipeline.
     Accepts either a filepath string or a data dict with 'filepath' key.
 
+    Output keys
+    -----------
+    mag : np.ndarray, float64, (N, 64)
+    phase : np.ndarray, float64, (N, 64)
+    real : np.ndarray, float64, (N, 64)
+    imag : np.ndarray, float64, (N, 64)
+    rssi, timestamp, total_lines, read_lines, errors, resampling_stats
+
     Parameters
     ----------
     verbose : bool
-        If True, print loading progress: file path, total lines read,
-        valid lines parsed, skipped lines, and CSI array shape/dtype.
-        Shows parsing errors if any. Default False.
+        If True, print loading progress. Default False.
     """
 
     def __init__(self, verbose=False):
         super().__init__(verbose)
         self.filepath = None
+        self.guaranteed_sr = 150
 
     def is_valid(self):
         return (self.filepath is not None
@@ -204,48 +245,201 @@ class CSI_Loader(ProcessingBlock):
         if not self.is_valid():
             raise ValueError(f"Invalid CSI file: {filepath}")
 
-        df = pd.read_csv(filepath, header=0, on_bad_lines='skip')
+        df = pd.read_csv(filepath, header=0, on_bad_lines='skip', low_memory=False)
+        total_lines = len(df)
+
+        # Filter out rows that don't start with 'CSI_DATA' (these are log messages)
+        valid_mask = df['type'].str.startswith('CSI_DATA', na=False)
+        df = df[valid_mask]
         total_lines = len(df)
 
         all_rssi = df['rssi'].values
         raw_csi = df['data'].values
+        timestamp = df['local_timestamp'].values
 
-        csi_complex = []
-        valid_rssi = []
+        # Convert timestamps to numeric, filtering out any non-numeric values
+        timestamp_series = pd.to_numeric(pd.Series(timestamp), errors='coerce')
+        timestamp = timestamp_series.fillna(0).values.astype(np.int64)
+
+        # Parse each row into separate real / imag arrays (no complex)
+        real_list, imag_list, valid_rssi = [], [], []
         for numline, line in enumerate(raw_csi):
             try:
                 csi_row = [int(x) for x in line[1:-1].split(",")]
                 if len(csi_row) != 128:
                     errors.append(f"Line {numline}: expected 128 values, got {len(csi_row)}")
                     continue
-                imag = np.array(csi_row[0::2])
-                real = np.array(csi_row[1::2])
-                csi_complex.append(real + 1j * imag)
+                imag_list.append(csi_row[0::2])  # even indices
+                real_list.append(csi_row[1::2])  # odd indices
                 valid_rssi.append(all_rssi[numline])
                 read_lines += 1
             except Exception as e:
                 errors.append(f"Line {numline}: {e}")
 
-        csi_complex = np.array(csi_complex)
+        real = np.array(real_list, dtype=np.float64)  # (N, 64)
+        imag = np.array(imag_list, dtype=np.float64)  # (N, 64)
+        mag = np.sqrt(real ** 2 + imag ** 2)           # (N, 64)
+        phase = np.arctan2(imag, real)                 # (N, 64)
         rssi = np.array(valid_rssi, dtype=np.float64)
+        ts = timestamp[np.arange(len(real))]           # align timestamps
+
+        # Resample to equal intervals at guaranteed_sr Hz
+        resampling_stats = {}
+        samples_per_bin = np.array([], dtype=np.int64)
+        if len(real) > 0:
+            mag, phase, real, imag, rssi, ts, samples_per_bin, resampling_stats = (
+                self._resample_equal_intervals(mag, phase, real, imag, rssi, ts)
+            )
 
         self._log(f"Loaded {filepath}")
         self._log(f"Total lines: {total_lines}, Valid: {read_lines}, Skipped: {total_lines - read_lines}")
-        self._log(f"CSI shape: {csi_complex.shape}, dtype: {csi_complex.dtype}")
+        self._log(f"Shape: {mag.shape}, dtype: {mag.dtype}")
         self._log(f"RSSI shape: {rssi.shape}, range: [{rssi.min():.1f}, {rssi.max():.1f}]")
         if errors:
             self._log(f"Errors ({len(errors)}): {errors[:3]}{'...' if len(errors) > 3 else ''}")
 
         return {
-            'csi': csi_complex,
+            'mag': mag,
+            'phase': phase,
+            'real': real,
+            'imag': imag,
             'rssi': rssi,
+            'timestamp': ts,
             'total_lines': total_lines,
             'read_lines': read_lines,
             'errors': errors,
+            'resampling_stats': resampling_stats,
+            'samples_per_bin': samples_per_bin,
         }
 
+    def _resample_equal_intervals(self, mag, phase, real, imag, rssi, timestamps):
+        """Resample all channels to equal intervals at guaranteed_sr Hz.
 
-# =============================================================================
+        Uses vectorized bin assignment (np.searchsorted) instead of a
+        per-bin Python loop, so it scales to 200k+ samples without stalling.
+
+        Samples falling in the same time-bin are averaged.
+        Empty bins are filled via linear interpolation.
+
+        Returns
+        -------
+        tuple
+            (mag, phase, real, imag, rssi, timestamps, samples_per_bin, stats)
+            samples_per_bin is an int array of length n_out.
+        """
+        n_orig = len(timestamps)
+        zero_spb = np.array([], dtype=np.int64)
+        empty_stats = {
+            'original_samples': 0, 'resampled_samples': 0,
+            'empty_slots': 0, 'empty_slots_pct': 0.0,
+            'overlapping_samples': 0, 'actual_sampling_rate': 0.0,
+            'target_sampling_rate': self.guaranteed_sr,
+            'duration_sec': 0.0,
+            'samples_per_bin_stats': {'mean': 0.0, 'std': 0.0, 'min': 0, 'max': 0},
+        }
+        if n_orig == 0:
+            return mag, phase, real, imag, rssi, timestamps, zero_spb, empty_stats
+
+        # Convert ESP32 microsecond timestamps to seconds
+        ts_sec = timestamps.astype(np.float64) / 1_000_000
+        start, end = ts_sec[0], ts_sec[-1]
+        duration = end - start
+
+        n_out = int(np.ceil(duration * self.guaranteed_sr))
+        if n_out < 2:
+            self._log(f"Warning: Too short duration ({duration:.3f}s) for resampling")
+            trivial = empty_stats.copy()
+            trivial.update(original_samples=n_orig, resampled_samples=n_orig,
+                           actual_sampling_rate=n_orig / max(duration, 1e-8),
+                           duration_sec=duration,
+                           samples_per_bin_stats={'mean': 1.0, 'std': 0.0, 'min': 1, 'max': 1})
+            spb = np.ones(n_orig, dtype=np.int64)
+            return mag, phase, real, imag, rssi, timestamps, spb, trivial
+
+        target_t = start + np.arange(n_out) / self.guaranteed_sr
+        dt = 1.0 / self.guaranteed_sr
+        n_sc = mag.shape[1]
+
+        # --- Vectorized bin assignment ---
+        # Bin edges: each bin i covers [target_t[i] - dt/2, target_t[i] + dt/2)
+        bin_edges = target_t - dt / 2
+        # np.searchsorted gives the bin index for each sample
+        bin_idx = np.searchsorted(bin_edges, ts_sec, side='right') - 1
+        bin_idx = np.clip(bin_idx, 0, n_out - 1)
+
+        # Count samples per bin
+        samples_per_bin = np.bincount(bin_idx, minlength=n_out).astype(np.int64)
+
+        # Accumulate sums per bin for each channel, then divide by count
+        channels = {'mag': mag, 'phase': phase, 'real': real, 'imag': imag}
+        resampled = {}
+        for k, src in channels.items():
+            acc = np.zeros((n_out, n_sc), dtype=np.float64)
+            np.add.at(acc, bin_idx, src)
+            resampled[k] = acc
+
+        rssi_acc = np.zeros(n_out, dtype=np.float64)
+        np.add.at(rssi_acc, bin_idx, rssi)
+
+        # Divide by count where non-zero
+        populated = samples_per_bin > 0
+        for k in channels:
+            resampled[k][populated] /= samples_per_bin[populated, None]
+        rssi_acc[populated] /= samples_per_bin[populated]
+
+        # Identify empty / overpopulated bins
+        empty_mask = samples_per_bin == 0
+        empty_slots = np.where(empty_mask)[0]
+
+        # Interpolate empty bins
+        if len(empty_slots) > 0:
+            valid_idx = np.where(populated)[0]
+            if len(valid_idx) >= 2:
+                for k in channels:
+                    for sc in range(n_sc):
+                        resampled[k][empty_slots, sc] = np.interp(
+                            target_t[empty_slots], target_t[valid_idx],
+                            resampled[k][valid_idx, sc])
+                rssi_acc[empty_slots] = np.interp(
+                    target_t[empty_slots], target_t[valid_idx], rssi_acc[valid_idx])
+            elif len(valid_idx) == 1:
+                for k in channels:
+                    resampled[k][empty_slots] = resampled[k][valid_idx[0]]
+                rssi_acc[empty_slots] = rssi_acc[valid_idx[0]]
+            else:
+                self._log("Warning: No valid samples for interpolation")
+
+        n_empty = int(empty_mask.sum())
+        overlapping = int((samples_per_bin[samples_per_bin > 1] - 1).sum())
+        empty_pct = 100 * n_empty / n_out if n_out > 0 else 0.0
+
+        if n_empty and self.verbose:
+            self._log(f"Empty slots: {n_empty}/{n_out} ({empty_pct:.1f}%)")
+
+        resampled_ts = (target_t * 1_000_000).astype(np.int64)
+
+        stats = {
+            'original_samples': n_orig,
+            'resampled_samples': n_out,
+            'empty_slots': n_empty,
+            'empty_slots_pct': empty_pct,
+            'overlapping_samples': overlapping,
+            'actual_sampling_rate': n_orig / max(duration, 1e-8),
+            'target_sampling_rate': self.guaranteed_sr,
+            'duration_sec': duration,
+            'samples_per_bin_stats': {
+                'mean': float(samples_per_bin.mean()),
+                'std': float(samples_per_bin.std()),
+                'min': int(samples_per_bin.min()),
+                'max': int(samples_per_bin.max()),
+            },
+        }
+
+        self._log(f"Resampled: {n_orig} -> {n_out} samples @ {self.guaranteed_sr} Hz")
+        self._log(f"Empty slots: {n_empty} ({empty_pct:.1f}%), Overlapping: {overlapping}")
+
+        return (resampled['mag'], resampled['phase'], resampled['real'],
+                resampled['imag'], rssi_acc, resampled_ts, samples_per_bin, stats)
 # Processing Blocks
 # =============================================================================
 class FeatureSelector(ProcessingBlock):
@@ -255,31 +449,31 @@ class FeatureSelector(ProcessingBlock):
     ----------
     mask : np.ndarray or None
         Boolean mask array. True = keep, False = exclude. Default CSI_SUBCARRIER_MASK.
-    key : str
-        Data dict key to filter. Default 'csi'.
+    keys : list[str]
+        Data dict keys to filter. Default ['mag', 'phase', 'real', 'imag'].
     verbose : bool
         If True, print mask statistics (total features, kept features, excluded),
         input/output shapes, and which subcarrier indices are kept. Default False.
     """
 
-    def __init__(self, mask=None, key='csi', verbose=False):
+    def __init__(self, mask=None, keys=None, verbose=False):
         super().__init__(verbose)
         self.mask = mask if mask is not None else CSI_SUBCARRIER_MASK
-        self.key = key
+        self.keys = keys if keys is not None else ['mag', 'phase', 'real', 'imag']
         if not isinstance(self.mask, np.ndarray) or self.mask.dtype != bool:
             raise TypeError(f"mask must be boolean np.ndarray, got {type(self.mask)}")
 
     def process(self, data):
         if isinstance(data, dict):
-            arr = data[self.key]
-            if not isinstance(arr, np.ndarray):
-                raise TypeError(f"data['{self.key}'] must be np.ndarray, got {type(arr)}")
-            if arr.ndim != 2 or arr.shape[1] != len(self.mask):
-                raise ValueError(f"expected 2D array with {len(self.mask)} cols, got shape {arr.shape}")
-            out = arr[:, self.mask]
-            self._log(f"Input: {arr.shape} -> Output: {out.shape}")
+            for key in self.keys:
+                arr = data[key]
+                if not isinstance(arr, np.ndarray):
+                    raise TypeError(f"data['{key}'] must be np.ndarray, got {type(arr)}")
+                if arr.ndim != 2 or arr.shape[1] != len(self.mask):
+                    raise ValueError(f"expected 2D array with {len(self.mask)} cols, got shape {arr.shape}")
+                data[key] = arr[:, self.mask]
             self._log(f"Mask: {len(self.mask)} total, {self.mask.sum()} kept, {(~self.mask).sum()} excluded")
-            data[self.key] = out
+            self._log(f"Applied to keys: {self.keys}")
             return data
         if not isinstance(data, np.ndarray):
             raise TypeError(f"expected np.ndarray, got {type(data)}")
@@ -552,8 +746,14 @@ class WindowTransformer(ProcessingBlock):
         if n_windows <= 0:
             raise ValueError(f"Not enough samples ({n_samples}) for window_length={self.window_length}")
         windows = np.array([arr[i * self.stride : i * self.stride + self.window_length] for i in range(n_windows)])
+        samples_used = (n_windows - 1) * self.stride + self.window_length
+        samples_discarded = n_samples - samples_used
+        overlap_pct = (1 - self.stride / self.window_length) * 100 if self.window_length > 0 else 0
+        self._log(f"Input: ({n_samples}, {n_features}), window_length={self.window_length}, stride={self.stride}")
+        self._log(f"Windows: {n_windows}, overlap: {overlap_pct:.1f}%, discarded: {samples_discarded} samples")
         if self.mode == 'flattened':
             windows = windows.reshape(n_windows, -1)
+        self._log(f"Output shape: {windows.shape}, mode='{self.mode}'")
         return windows
 
 
@@ -950,6 +1150,9 @@ class ConcatBlock(ProcessingBlock):
             result = data[0].copy() if isinstance(data[0], dict) else {}
             result[self.output_key] = np.concatenate(flat, axis=self.axis)
             result['errors'] = errors
+            self._log(f"Keys: {self.keys}, axis={self.axis}")
+            self._log(f"Input shapes: {[a.shape for a in flat]}")
+            self._log(f"Output: '{self.output_key}' shape={result[self.output_key].shape}")
             return result
 
         # Case 2: single dict — concat multiple keys from it
@@ -974,6 +1177,9 @@ class ConcatBlock(ProcessingBlock):
                     raise ValueError(f"row mismatch: '{self.keys[0]}' has {n_rows} rows, '{self.keys[i]}' has {a.shape[0]}")
 
             data[self.output_key] = np.concatenate(arrays, axis=self.axis)
+            self._log(f"Keys: {self.keys}, axis={self.axis}")
+            self._log(f"Input shapes: {[a.shape for a in arrays]}")
+            self._log(f"Output: '{self.output_key}' shape={data[self.output_key].shape}")
             return data
 
         raise TypeError(f"expected dict or list of dicts, got {type(data)}")
@@ -1083,8 +1289,9 @@ class TrainingDataset:
             if self.feature_key not in data:
                 raise KeyError(f"feature_key '{self.feature_key}' not found in data for {df.filepath}")
             X = data[self.feature_key]
-            if X.ndim == 3:
-                X = X.reshape(X.shape[0], -1)
+            # Keep 3D sequential data as-is for transformer models
+            # if X.ndim == 3:
+            #     X = X.reshape(X.shape[0], -1)
             y_val = self.label_map[df.primary_label]
             y = np.full(X.shape[0], y_val, dtype=np.int64)
             all_X.append(X)
@@ -1483,7 +1690,183 @@ class TrainingJob:
             print(f"    {row}")
 
 
-# Testing
+# =============================================================================
+# Confusion Matrix Adaptation (domain drift correction)
+# =============================================================================
+class ConfusionMatrixAdapter:
+    """Corrects model predictions using the inverse of the train-set confusion matrix.
+
+    When a model is trained on domain A and tested on domain B, systematic
+    misclassifications appear as off-diagonal mass in the confusion matrix.
+    This adapter:
+      1. Row-normalises the train CM to get P(predicted | true).
+      2. Computes the pseudo-inverse of that matrix.
+      3. Row-normalises the inverse so each row sums to 1.
+    At inference the model's probability vector is left-multiplied by this
+    correction matrix, shifting mass back toward the true class.
+
+    Parameters
+    ----------
+    cm : array-like, shape (n_classes, n_classes)
+        Confusion matrix from the *training* evaluation (rows = true, cols = predicted).
+    eps : float
+        Small constant to avoid division by zero. Default 1e-8.
+    """
+
+    def __init__(self, cm, eps=1e-8):
+        cm = np.array(cm, dtype=np.float64)
+        if cm.ndim != 2 or cm.shape[0] != cm.shape[1]:
+            raise ValueError(f"cm must be square, got shape {cm.shape}")
+        self.n_classes = cm.shape[0]
+        self.raw_cm = cm.copy()
+        self.eps = eps
+        self.correction = self._build_correction(cm)
+
+    def _build_correction(self, cm):
+        row_sums = cm.sum(axis=1, keepdims=True)
+        cm_norm = cm / (row_sums + self.eps)
+        cm_inv = np.linalg.pinv(cm_norm)
+        cm_inv = np.clip(cm_inv, 0, None)
+        inv_row_sums = cm_inv.sum(axis=1, keepdims=True)
+        correction = cm_inv / (inv_row_sums + self.eps)
+        return correction
+
+    def adapt_probs(self, probs):
+        """Apply correction to probability matrix (n_samples, n_classes)."""
+        probs = np.asarray(probs, dtype=np.float64)
+        if probs.ndim == 1:
+            probs = probs.reshape(1, -1)
+        adapted = probs @ self.correction.T
+        adapted = np.clip(adapted, 0, None)
+        row_sums = adapted.sum(axis=1, keepdims=True)
+        adapted = adapted / (row_sums + self.eps)
+        return adapted
+
+    def adapt_predictions(self, probs):
+        """Return hard class predictions after adaptation."""
+        adapted = self.adapt_probs(probs)
+        return np.argmax(adapted, axis=1)
+
+    def summary(self):
+        """Print the correction matrix."""
+        print(f"\n  [CMAdapter] Raw CM:\n{self.raw_cm}")
+        print(f"  [CMAdapter] Correction matrix:\n{np.round(self.correction, 4)}")
+
+
+def evaluate_with_adaptation(model, X_train, y_train, X_test, y_test,
+                             label_map=None, is_torch=False, device='cpu',
+                             batch_size=64):
+    """Evaluate a trained model before and after CM-based adaptation.
+
+    1. Predict on train set -> build confusion matrix -> build adapter.
+    2. Predict on test set (probabilities).
+    3. Compute metrics from raw predictions (before).
+    4. Apply adapter to test probabilities -> compute metrics (after).
+    5. Print side-by-side comparison.
+
+    Parameters
+    ----------
+    model : sklearn estimator or torch.nn.Module
+        Already-trained model.
+    X_train, y_train : np.ndarray
+        Training data (used to build the CM).
+    X_test, y_test : np.ndarray
+        Test data to evaluate.
+    label_map : dict, optional
+        {label_str: int} mapping for display.
+    is_torch : bool
+        True if model is a PyTorch nn.Module.
+    device : str
+        PyTorch device. Ignored for sklearn.
+    batch_size : int
+        Batch size for PyTorch inference.
+
+    Returns
+    -------
+    dict with keys 'before', 'after', 'adapter'.
+    """
+    from sklearn.metrics import (accuracy_score, precision_score,
+                                 recall_score, f1_score, confusion_matrix)
+
+    def _get_probs_and_preds(model, X, is_torch, device, batch_size):
+        if is_torch:
+            import torch
+            from torch.utils.data import DataLoader, TensorDataset
+            model.eval()
+            ds = TensorDataset(torch.FloatTensor(X))
+            loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
+            all_probs = []
+            with torch.no_grad():
+                for (X_batch,) in loader:
+                    X_batch = X_batch.to(device)
+                    logits = model(X_batch)
+                    probs = torch.softmax(logits, dim=1)
+                    all_probs.append(probs.cpu().numpy())
+            probs = np.concatenate(all_probs, axis=0)
+        else:
+            if hasattr(model, 'predict_proba'):
+                probs = model.predict_proba(X)
+            else:
+                preds = model.predict(X)
+                n_classes = len(np.unique(y_train))
+                probs = np.zeros((len(preds), n_classes))
+                probs[np.arange(len(preds)), preds] = 1.0
+        preds = np.argmax(probs, axis=1)
+        return probs, preds
+
+    def _compute_metrics(y_true, y_pred, n_classes):
+        avg = 'weighted' if n_classes > 2 else 'binary'
+        return {
+            'accuracy':  round(accuracy_score(y_true, y_pred), 4),
+            'precision': round(precision_score(y_true, y_pred, average=avg, zero_division=0), 4),
+            'recall':    round(recall_score(y_true, y_pred, average=avg, zero_division=0), 4),
+            'f1':        round(f1_score(y_true, y_pred, average=avg, zero_division=0), 4),
+            'confusion_matrix': confusion_matrix(y_true, y_pred).tolist(),
+        }
+
+    n_classes = len(np.unique(np.concatenate([y_train, y_test])))
+
+    # --- Step 1: train-set predictions -> CM -> adapter ---
+    train_probs, train_preds = _get_probs_and_preds(model, X_train, is_torch, device, batch_size)
+    train_cm = confusion_matrix(y_train, train_preds)
+    adapter = ConfusionMatrixAdapter(train_cm)
+    adapter.summary()
+
+    # --- Step 2: test-set predictions (raw) ---
+    test_probs, test_preds_raw = _get_probs_and_preds(model, X_test, is_torch, device, batch_size)
+    before = _compute_metrics(y_test, test_preds_raw, n_classes)
+
+    # --- Step 3: adapted test predictions ---
+    test_preds_adapted = adapter.adapt_predictions(test_probs)
+    after = _compute_metrics(y_test, test_preds_adapted, n_classes)
+
+    # --- Step 4: print comparison ---
+    print(f"\n{'='*60}")
+    print(f"  CM-ADAPTATION COMPARISON")
+    print(f"{'='*60}")
+    print(f"  {'Metric':<15} {'Before':>10} {'After':>10} {'Delta':>10}")
+    print(f"  {'-'*45}")
+    for key in ['accuracy', 'precision', 'recall', 'f1']:
+        b, a = before[key], after[key]
+        delta = a - b
+        sign = '+' if delta >= 0 else ''
+        print(f"  {key:<15} {b:>10.4f} {a:>10.4f} {sign}{delta:>9.4f}")
+
+    if label_map:
+        inv_map = {v: k for k, v in label_map.items()}
+    else:
+        inv_map = {i: str(i) for i in range(n_classes)}
+
+    print(f"\n  Confusion Matrix BEFORE adaptation:")
+    for row in before['confusion_matrix']:
+        print(f"    {row}")
+    print(f"\n  Confusion Matrix AFTER adaptation:")
+    for row in after['confusion_matrix']:
+        print(f"    {row}")
+    print(f"{'='*60}")
+
+    return {'before': before, 'after': after, 'adapter': adapter}
+
 # =============================================================================
 def load_csi_datasets(train_dirs, test_dirs, window_len, verbose=False):
     """Load and return train/test TrainingDatasets from CSI CSV files."""
@@ -1491,32 +1874,30 @@ def load_csi_datasets(train_dirs, test_dirs, window_len, verbose=False):
         CSI_Loader(verbose=verbose),
         FeatureSelector(verbose=verbose),
         # CsiSanitizer(verbose=verbose),
-        AmplitudeExtractor(verbose=verbose),
-        PhaseExtractor(verbose=verbose),
-        ConcatBlock(keys=['amplitude', 'phase'], output_key='features', axis=-1, verbose=verbose),
-        Normalizer(key='features', output_key='features', verbose=verbose),
-        Augmentor(key='features', output_key='aug', gaussian_noise=True, noise_std=(0.1, 0.3),
-                  amplitude_scaling=True, scale_range=(0.85, 1.15), time_warp=False, seed=42, verbose=verbose),
-        ConcatBlock(keys=['features', 'aug'], output_key='features', axis=0, verbose=verbose),
-        WindowTransformer(window_length=window_len, key='features', mode='flattened', verbose=verbose),
-        FFTTransformer(key='features', mode='magnitude', real_only=True, axis=-2, flatten=False, verbose=verbose),
+        # ConcatBlock(keys=['mag', 'rssi'], output_key='features', axis=-1, verbose=verbose),
+        # Normalizer(key='features', output_key='features', verbose=verbose),
+        # Augmentor(key='features', output_key='aug', gaussian_noise=True, noise_std=(0.1, 0.3),
+        #           amplitude_scaling=True, scale_range=(0.85, 1.15), time_warp=False, seed=42, verbose=verbose),
+        # ConcatBlock(keys=['features', 'aug'], output_key='concat', axis=0, verbose=verbose),
+        WindowTransformer(window_length=window_len, key='mag', mode='sequential', verbose=verbose, stride=window_len//3),
+        # FFTTransformer(key='features', mode='magnitude', real_only=True, axis=-2, flatten=True, verbose=verbose),
     ])
 
     test_pipeline = Pipeline([
         CSI_Loader(verbose=verbose),
         FeatureSelector(verbose=verbose),
         # CsiSanitizer(verbose=verbose),
-        AmplitudeExtractor(verbose=verbose),
-        PhaseExtractor(verbose=verbose),
-        ConcatBlock(keys=['amplitude', 'phase'], output_key='features', axis=-1, verbose=verbose),
-        Normalizer(key='features', output_key='features', verbose=verbose),
-        WindowTransformer(window_length=window_len, key='features', mode='flattened', verbose=verbose),
-        FFTTransformer(key='features', mode='magnitude', real_only=True, axis=-2, flatten=False, verbose=verbose),
+        # ConcatBlock(keys=['mag', 'rssi'], output_key='features', axis=-1, verbose=verbose),
+        # Normalizer(key='features', output_key='features', verbose=verbose),
+        # ConcatBlock(keys=['features', 'mag'], output_key='concat', axis=-1, verbose=verbose),
+        WindowTransformer(window_length=window_len, key='mag', mode='sequential', verbose=verbose, stride=window_len//3),
+        # FFTTransformer(key='features', mode='magnitude', real_only=True, axis=-2, flatten=True, verbose=verbose),
     ])
 
-    labels = ['empty', 'smoke', 'watch', 'work', 'sleep']
-    # labels = ['drink', 'eat', 'empty', 'smoke', 'watch', 'work', 'sleep']
-    
+    # labels = ['empty', 'smoke', 'watch', 'work', 'sleep']
+    labels = ['drink', 'eat', 'empty', 'smoke', 'watch', 'work', 'sleep']
+    # labels = ['drink', 'eat', 'empty', 'smoke', 'watch', 'work']
+
     # Collect train files: for each dir × label, glob for CSVs starting with that label
     train_files = []  # list of (label, filepath)
     for train_dir in train_dirs:
@@ -1532,11 +1913,11 @@ def load_csi_datasets(train_dirs, test_dirs, window_len, verbose=False):
                 test_files.append((label, f))
     
     ds_files = [DatasetFile(p, pipeline, [l]) for l, p in train_files]
-    train_ds = TrainingDataset(ds_files, feature_key='features', balance=True)
+    train_ds = TrainingDataset(ds_files, feature_key='mag', balance=True)
     train_ds.build()
     
     test_ds_files = [DatasetFile(p, test_pipeline, [l]) for l, p in test_files]
-    test_ds = TrainingDataset(test_ds_files, feature_key='features', label_map=train_ds.label_map, balance=True)
+    test_ds = TrainingDataset(test_ds_files, feature_key='mag', label_map=train_ds.label_map, balance=True)
     test_ds.build()
     
     return train_ds, test_ds
@@ -1546,10 +1927,10 @@ def load_csi_datasets(train_dirs, test_dirs, window_len, verbose=False):
 # ML Experiments (sklearn only)
 # =============================================================================
 if __name__ == '__main__':
-    TRAIN_DIR = '../../../wifi_sensing_data/thoth_data/train'
-    TRAIN_DIR2 = '../../../wifi_sensing_data/thoth_data/train2'
-    TEST_DIR = '../../../wifi_sensing_data/thoth_data/test'
-    WINDOW_LEN = 600
+    TRAIN_DIR = '../../../wifi_sensing_data/har_data/train'
+    TRAIN_DIR2 = '../../../wifi_sensing_data/har_data/train_2'
+    TEST_DIR = '../../../wifi_sensing_data/har_data/test'
+    WINDOW_LEN = 2000
 
     print("=" * 70)
     print("ML EXPERIMENTS (5 sklearn models)")
@@ -1582,16 +1963,20 @@ if __name__ == '__main__':
     print(f"\n{'='*70}")
     print("EXPERIMENT B: Separate test dataset")
     print(f"{'='*70}")
-    separate_results = run_ml_experiment("separate", combined_ds, test_ds)
+    separate_results = run_ml_experiment("separate", combined_ds, test_ds, adapt=True)
 
     # ---- Summary ----
     print(f"\n{'='*80}")
-    print(f"{'Model':<20} | {'Split Acc':>9} {'Split F1':>9} | {'Sep Acc':>9} {'Sep F1':>9}")
-    print("-" * 70)
+    print(f"{'Model':<20} | {'Split Acc':>9} {'Split F1':>9} | {'Sep Acc':>9} {'Sep F1':>9} | {'Adapted Acc':>11} {'Adapted F1':>10}")
+    print("-" * 100)
     for name in split_results:
         sa, sf = split_results[name]['test_accuracy'], split_results[name]['test_f1']
         ea, ef = separate_results[name]['test_accuracy'], separate_results[name]['test_f1']
-        print(f"{name:<20} | {sa:>9.4f} {sf:>9.4f} | {ea:>9.4f} {ef:>9.4f}")
+        adapt_info = separate_results[name].get('adaptation', {})
+        after = adapt_info.get('after', {})
+        aa = after.get('accuracy', 0)
+        af = after.get('f1', 0)
+        print(f"{name:<20} | {sa:>9.4f} {sf:>9.4f} | {ea:>9.4f} {ef:>9.4f} | {aa:>11.4f} {af:>10.4f}")
 
     best_split = max(split_results.items(), key=lambda x: x[1]['test_f1'])
     best_sep   = max(separate_results.items(), key=lambda x: x[1]['test_f1'])

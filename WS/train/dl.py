@@ -319,9 +319,9 @@ def make_transformer_model(n_features, n_classes, config='default',
             'dropout': 0.1,
         },
         'small': {
-            'patch_dim': 600,
+            'patch_dim': 520,
             'd_model': 64,
-            'nhead': 4,
+            'nhead': 2,
             'num_layers': 1,
             'dim_feedforward': 128,
             'dropout': 0.1,
@@ -1384,10 +1384,10 @@ if __name__ == '__main__':
     import numpy as np
     from utils import load_csi_datasets
 
-    TRAIN_DIR = '../../../wifi_sensing_data/thoth_data/train'
-    TRAIN_DIR2 = '../../../wifi_sensing_data/thoth_data/train2'
-    TEST_DIR = '../../../wifi_sensing_data/thoth_data/test'
-    WINDOW_LEN = 600
+    TRAIN_DIR = '../../../wifi_sensing_data/har_data/train'
+    TRAIN_DIR2 = '../../../wifi_sensing_data/har_data/train_2'
+    TEST_DIR = '../../../wifi_sensing_data/har_data/test'
+    WINDOW_LEN = 2000
     EPOCHS = 100
     LRS = [1e-4]
 
@@ -1478,7 +1478,7 @@ if __name__ == '__main__':
                 # ('BN+GlobCRL', {},                         dict(use_coral=True)),
                 ('BN+CondCRL', {},                         dict(use_conditional_coral=True)),
                 ('BN+Whiten',  dict(use_whitening=True),   {}),
-                # ('BN+CC+W',    dict(use_whitening=True),   dict(use_conditional_coral=True)),
+                ('BN+CC+W',    dict(use_whitening=True),   dict(use_conditional_coral=True)),
             ]
 
             n_train = len(train_configs)
@@ -1489,7 +1489,7 @@ if __name__ == '__main__':
                 print(f"  Training {ti+1}/{n_train}: {tname}")
                 print(f"  {'='*60}")
 
-                mdl = make_transformer_model(n_features, n_classes, config='small', **model_kw)
+                mdl = make_adaptive_model(n_features, n_classes, config='small', **model_kw)
                 merged_kw = {**train_kw, **extra_train_kw}
                 trained_mdl, info = train_model(
                     mdl, X_tr, y_tr, X_target, X_te, y_te, **merged_kw)
