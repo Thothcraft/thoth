@@ -14,19 +14,19 @@ from xgboost import XGBClassifier
 
 def make_ml_models():
     """Return 5 sklearn classifiers for ML experiments."""
-    rf = RandomForestClassifier(n_estimators=200, class_weight='balanced', random_state=42, n_jobs=-1)
-    et = ExtraTreesClassifier(n_estimators=200, class_weight='balanced', random_state=42, n_jobs=-1)
-    xgb = XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.1, random_state=42, n_jobs=-1, verbosity=0, scale_pos_weight=1)
-    svm = SVC(kernel='rbf', C=10, gamma='scale', class_weight='balanced', random_state=42, probability=True)
+    rf = RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1)
+    et = ExtraTreesClassifier(n_estimators=200, random_state=42, n_jobs=-1)
+    xgb = XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.1, random_state=42, n_jobs=-1, verbosity=0)
+    svm = SVC(kernel='rbf', C=10, gamma='scale', random_state=42, probability=True)
     ensemble = VotingClassifier(
         estimators=[('rf', rf), ('et', et), ('xgb', xgb), ('svm', svm)],
         voting='soft', n_jobs=-1,
     )
     return [
-        ('RandomForest', RandomForestClassifier(n_estimators=200, class_weight='balanced', random_state=42, n_jobs=-1)),
-        # ('ExtraTrees', ExtraTreesClassifier(n_estimators=200, class_weight='balanced', random_state=42, n_jobs=-1)),
-        ('XGBoost', XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.1, random_state=42, n_jobs=-1, verbosity=0, scale_pos_weight=1)),
-        # ('SVM_RBF', SVC(kernel='rbf', C=10, gamma='scale', class_weight='balanced', random_state=42)),
+        ('RandomForest', RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1)),
+        # ('ExtraTrees', ExtraTreesClassifier(n_estimators=200, random_state=42, n_jobs=-1)),
+        ('XGBoost', XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.1, random_state=42, n_jobs=-1, verbosity=0)),
+        # ('SVM_RBF', SVC(kernel='rbf', C=10, gamma='scale', random_state=42)),
         # ('Ensemble', ensemble),
     ]
 
@@ -440,8 +440,8 @@ class CSI_Loader(ProcessingBlock):
 
         return (resampled['mag'], resampled['phase'], resampled['real'],
                 resampled['imag'], rssi_acc, resampled_ts, samples_per_bin, stats)
-
-
+# Processing Blocks
+# =============================================================================
 class FeatureSelector(ProcessingBlock):
     """Applies a boolean mask to exclude subcarriers/features.
 
@@ -1431,7 +1431,7 @@ class TrainingDataset:
 
     @staticmethod
     def _window_array_static(arr, window_len, stride, mode):
-        """Window a 2D array into (n_windows, ...) — static helper."""
+        """Window a 2D array into (n_windows, ...) -- static helper."""
         n_samples, n_features = arr.shape
         n_windows = (n_samples - window_len) // stride + 1
         if n_windows <= 0:
@@ -1447,7 +1447,7 @@ class TrainingDataset:
     @classmethod
     def from_metadata(cls, root_dir, pipeline_name='amplitude', window_len=100,
                       guaranteed_sr=100, mode='flattened', stride=None,
-                      var_window=20, balance=True, verbose=False):
+                      var_window=20, balance=False, verbose=False):
         """Load a dataset from a directory containing dataset_metadata.json.
 
         Reads the metadata, builds appropriate processing pipelines, creates
@@ -1471,7 +1471,7 @@ class TrainingDataset:
         var_window : int
             Rolling variance window size. Default 20.
         balance : bool
-            Balance classes. Default True.
+            Balance classes. Default False.
         verbose : bool
 
         Returns
@@ -1521,7 +1521,7 @@ class TrainingDataset:
                 continue
 
             mag = data['mag']
-            phase = data.get('phase')
+            phase = data['phase']
 
             if pipeline_name == 'amplitude':
                 X = cls._window_array_static(mag, window_len, stride, mode)
@@ -1631,285 +1631,6 @@ class TrainingDataset:
         return train_ds, test_ds
 
 
-    @classmethod
-    def _make_sub_dataset(cls, X, y, label_map, labels_list, name='',
-                          description='', environment='', task='',
-                          balance=False):
-        """Build a lightweight TrainingDataset from pre-computed arrays."""
-        ds = cls.__new__(cls)
-        ds.dataset_files = []
-        ds.feature_key = 'mag'
-        ds.label_map = label_map
-        ds.balance = balance
-        ds._X = X
-        ds._y = y
-        ds._name = name
-        ds._labels = labels_list
-        ds._description = description
-        ds._environment = environment
-        ds._task = task
-        if balance and X.shape[0] > 0:
-            ds._balance_classes()
-        return ds
-
-    @classmethod
-    def from_metadata_cv(cls, root_dir, n_folds=None, pipeline_name='amplitude',
-                         window_len=100, guaranteed_sr=100, mode='flattened',
-                         stride=None, var_window=20, balance=True, verbose=False):
-        """Load a dataset and produce temporal cross-validation folds.
-
-        For **file-based** datasets (split='train'/'test'), files are grouped
-        per label in metadata order (= chronological).  Forward-chaining CV is
-        used: fold *k* trains on sessions 0..k and tests on session k+1.  The
-        number of folds equals (min sessions per label - 1) unless overridden.
-
-        For **percentage** datasets (one file per label), each file's windows
-        are split into ``n_folds + 1`` consecutive temporal blocks; fold *k*
-        trains on blocks 0..k and tests on block k+1.
-
-        Parameters
-        ----------
-        root_dir : str
-            Path to the dataset folder (must contain dataset_metadata.json).
-        n_folds : int or None
-            Number of CV folds.  None = auto (max feasible folds).
-        pipeline_name, window_len, guaranteed_sr, mode, stride, var_window,
-        balance, verbose :
-            Same as ``from_metadata``.
-
-        Returns
-        -------
-        list of (fold_idx, train_ds, test_ds)
-            Each element is one temporal fold.
-        """
-        import json
-
-        root_dir = os.path.abspath(root_dir)
-        meta_path = os.path.join(root_dir, METADATA_FILENAME)
-        if not os.path.isfile(meta_path):
-            raise FileNotFoundError(f"Metadata file not found: {meta_path}")
-        with open(meta_path, 'r') as f:
-            metadata = json.load(f)
-
-        ds_name = metadata['name']
-        labels_list = sorted(metadata['labels'])
-        label_map = {lbl: i for i, lbl in enumerate(labels_list)}
-        stride = stride if stride is not None else window_len
-
-        loader = CSI_Loader(verbose=verbose)
-        loader.guaranteed_sr = guaranteed_sr
-        selector = FeatureSelector(mask=CSI_SUBCARRIER_MASK, verbose=verbose)
-
-        meta_info = dict(
-            label_map=label_map, labels_list=labels_list, name=ds_name,
-            description=metadata.get('description', ''),
-            environment=metadata.get('environment', ''),
-            task=metadata.get('task', ''),
-        )
-
-        # ------------------------------------------------------------------
-        # Phase 1: load all files, keeping per-label session order
-        # ------------------------------------------------------------------
-        per_label_sessions = {lbl: [] for lbl in labels_list}
-
-        print(f"\n[CV] Loading '{ds_name}' for temporal cross-validation "
-              f"(pipeline={pipeline_name}, window={window_len}, mode={mode})")
-
-        for entry in metadata['files']:
-            fpath = os.path.join(root_dir, entry['path'])
-            label = entry['label']
-            if label not in label_map:
-                continue
-
-            try:
-                data = loader.process(fpath)
-                data = selector.process(data)
-            except Exception as e:
-                print(f"  ERROR {entry['path']}: {e}")
-                continue
-
-            mag = data['mag']
-            phase = data.get('phase')
-
-            if pipeline_name == 'amplitude':
-                X = cls._window_array_static(mag, window_len, stride, mode)
-            elif pipeline_name == 'amplitude_phase':
-                mag_w = cls._window_array_static(mag, window_len, stride, mode)
-                phase_w = cls._window_array_static(phase, window_len, stride, mode)
-                if mag_w is None or phase_w is None:
-                    continue
-                X = (np.concatenate([mag_w, phase_w], axis=1) if mode == 'flattened'
-                     else np.concatenate([mag_w, phase_w], axis=2))
-            elif pipeline_name == 'amplitude_sanitized':
-                csi_complex = data['real'] + 1j * data['imag']
-                sanitizer = CsiSanitizer(verbose=verbose)
-                csi_san = sanitizer._sanitize(csi_complex)
-                san_phase = np.angle(csi_san).astype(np.float64)
-                mag_w = cls._window_array_static(mag, window_len, stride, mode)
-                phase_w = cls._window_array_static(san_phase, window_len, stride, mode)
-                if mag_w is None or phase_w is None:
-                    continue
-                X = (np.concatenate([mag_w, phase_w], axis=1) if mode == 'flattened'
-                     else np.concatenate([mag_w, phase_w], axis=2))
-            elif pipeline_name == 'rolling_variance':
-                rv = cls._rolling_variance(mag, var_window)
-                X = cls._window_array_static(rv, window_len, stride, mode)
-            else:
-                raise ValueError(f"Unknown pipeline: {pipeline_name}")
-
-            if X is None or len(X) == 0:
-                continue
-
-            per_label_sessions[label].append(X)
-            print(f"  {entry['path']:30s}  label={label:8s}  windows={X.shape[0]}")
-
-        # ------------------------------------------------------------------
-        # Phase 2: determine fold structure
-        # ------------------------------------------------------------------
-        session_counts = {lbl: len(sess) for lbl, sess in per_label_sessions.items()
-                          if len(sess) > 0}
-        if not session_counts:
-            raise RuntimeError(f"No data loaded for '{ds_name}'")
-
-        min_sessions = min(session_counts.values())
-        is_percentage = all(
-            entry.get('split', 'percentage') == 'percentage'
-            for entry in metadata['files']
-        )
-
-        if is_percentage:
-            default_folds = 4
-            k = n_folds if n_folds is not None else default_folds
-            print(f"[CV] Percentage mode: splitting each label into {k + 1} "
-                  f"temporal blocks -> {k} forward-chaining folds")
-
-            per_label_blocks = {}
-            for lbl in labels_list:
-                sessions = per_label_sessions[lbl]
-                if not sessions:
-                    continue
-                X_all = np.concatenate(sessions, axis=0)
-                n = X_all.shape[0]
-                block_size = n // (k + 1)
-                if block_size < 1:
-                    print(f"  [warn] {lbl}: only {n} windows, need {k+1} blocks")
-                    continue
-                blocks = []
-                for bi in range(k + 1):
-                    start = bi * block_size
-                    end = start + block_size if bi < k else n
-                    blocks.append(X_all[start:end])
-                per_label_blocks[lbl] = blocks
-        else:
-            max_folds = min_sessions - 1
-            if max_folds < 1:
-                raise RuntimeError(
-                    f"Need >=2 sessions per label for CV, got min={min_sessions}")
-            k = n_folds if n_folds is not None else max_folds
-            k = min(k, max_folds)
-            print(f"[CV] File-based mode: {min_sessions} min sessions/label "
-                  f"-> {k} forward-chaining folds")
-
-            per_label_blocks = {}
-            for lbl in labels_list:
-                sessions = per_label_sessions[lbl]
-                if not sessions:
-                    continue
-                per_label_blocks[lbl] = sessions
-
-        # ------------------------------------------------------------------
-        # Phase 3: generate forward-chaining folds
-        # ------------------------------------------------------------------
-        folds = []
-        for fold_idx in range(k):
-            train_X_parts, train_y_parts = [], []
-            test_X_parts, test_y_parts = [], []
-
-            for lbl, blocks in per_label_blocks.items():
-                y_val = label_map[lbl]
-                for bi in range(fold_idx + 1):
-                    if bi < len(blocks):
-                        train_X_parts.append(blocks[bi])
-                        train_y_parts.append(
-                            np.full(blocks[bi].shape[0], y_val, dtype=np.int64))
-                test_bi = fold_idx + 1
-                if test_bi < len(blocks):
-                    test_X_parts.append(blocks[test_bi])
-                    test_y_parts.append(
-                        np.full(blocks[test_bi].shape[0], y_val, dtype=np.int64))
-
-            if not train_X_parts or not test_X_parts:
-                continue
-
-            train_X = np.concatenate(train_X_parts, axis=0)
-            train_y = np.concatenate(train_y_parts, axis=0)
-            test_X = np.concatenate(test_X_parts, axis=0)
-            test_y = np.concatenate(test_y_parts, axis=0)
-
-            train_ds = cls._make_sub_dataset(
-                train_X, train_y, balance=balance, **meta_info)
-            test_ds = cls._make_sub_dataset(
-                test_X, test_y, balance=False, **meta_info)
-
-            print(f"  Fold {fold_idx}: train={train_X.shape[0]:5d}  "
-                  f"test={test_X.shape[0]:5d}  "
-                  f"(train classes {np.unique(train_y).tolist()}, "
-                  f"test classes {np.unique(test_y).tolist()})")
-
-            folds.append((fold_idx, train_ds, test_ds))
-
-        print(f"[CV] '{ds_name}': {len(folds)} folds generated")
-        return folds
-
-
-def load_all_datasets_cv(data_root, n_folds=None, window_len=100,
-                         guaranteed_sr=100, pipeline_name='amplitude',
-                         mode='flattened', stride=None, var_window=20,
-                         verbose=False):
-    """Load all 4 datasets with temporal cross-validation folds.
-
-    Parameters
-    ----------
-    data_root : str
-        Root folder containing the 4 dataset subfolders.
-    n_folds : int or None
-        Number of CV folds per dataset.  None = auto.
-
-    Returns
-    -------
-    dict : {dataset_name: [(fold_idx, train_ds, test_ds), ...]}
-    """
-    DATASET_DIRS = [
-        'home_har_data',
-        'home_occupation_data',
-        'office_har_data',
-        'office_localization_data',
-    ]
-
-    datasets = {}
-    for dname in DATASET_DIRS:
-        dpath = os.path.join(data_root, dname)
-        meta_path = os.path.join(dpath, METADATA_FILENAME)
-        if not os.path.isfile(meta_path):
-            print(f"[warn] Skipping {dname} -- no {METADATA_FILENAME}")
-            continue
-        folds = TrainingDataset.from_metadata_cv(
-            root_dir=dpath,
-            n_folds=n_folds,
-            pipeline_name=pipeline_name,
-            window_len=window_len,
-            guaranteed_sr=guaranteed_sr,
-            mode=mode,
-            stride=stride,
-            var_window=var_window,
-            verbose=verbose,
-        )
-        if folds:
-            datasets[folds[0][1].name] = folds
-
-    return datasets
-
-
 def load_all_datasets(data_root, window_len=100, guaranteed_sr=100,
                       pipeline_name='amplitude', mode='flattened',
                       stride=None, var_window=20, verbose=False):
@@ -1946,7 +1667,6 @@ def load_all_datasets(data_root, window_len=100, guaranteed_sr=100,
             mode=mode,
             stride=stride,
             var_window=var_window,
-            balance=True,
             verbose=verbose,
         )
         datasets[train_ds.name] = (train_ds, test_ds)
@@ -2288,231 +2008,6 @@ class TrainingJob:
 
 
 # =============================================================================
-# Reproducibility: Global Seed
-# =============================================================================
-def set_global_seed(seed):
-    """Set random seed for full reproducibility across numpy, random, and torch.
-
-    Call this at the start of every experiment with each seed value to ensure
-    reproducible results across multi-seed runs.
-
-    Parameters
-    ----------
-    seed : int
-        Random seed value.
-    """
-    import random
-    random.seed(seed)
-    np.random.seed(seed)
-    try:
-        import torch
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-    except ImportError:
-        pass
-
-
-# =============================================================================
-# Shared Metrics Computation (used by dl.py, utils.py, pca_test.py, fl.py)
-# =============================================================================
-def compute_all_metrics(y_true, y_pred, y_prob=None, n_classes=None):
-    """Compute a comprehensive, unified set of classification metrics.
-
-    This is the single source of truth for all experiment scripts. Every
-    experiment (ML, DL, PCA, FL) should call this function so that metric
-    columns are aligned across result CSVs.
-
-    Parameters
-    ----------
-    y_true : np.ndarray, shape (N,)
-        Ground truth integer labels.
-    y_pred : np.ndarray, shape (N,)
-        Predicted integer labels.
-    y_prob : np.ndarray, shape (N, C) or None
-        Predicted class probabilities. If provided, calibration metrics
-        (ECE, log_loss, confidence, entropy) are computed. For sklearn
-        models, pass ``model.predict_proba(X)``; for torch models, pass
-        softmax output.
-    n_classes : int or None
-        Total number of classes. Inferred from y_true/y_pred if None.
-
-    Returns
-    -------
-    dict
-        Keys: accuracy, balanced_accuracy, f1_weighted, f1_macro,
-        precision_weighted, recall_weighted, precision_macro, recall_macro,
-        cohen_kappa, mcc, per_class_precision, per_class_recall,
-        per_class_f1, per_class_accuracy, confusion_matrix.
-        If y_prob is provided: ece, log_loss, mean_confidence,
-        std_confidence, mean_entropy, std_entropy.
-    """
-    from sklearn.metrics import (
-        accuracy_score, balanced_accuracy_score,
-        f1_score, precision_score, recall_score,
-        cohen_kappa_score, matthews_corrcoef,
-        confusion_matrix as sk_confusion_matrix,
-    )
-
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-
-    if n_classes is None:
-        n_classes = max(int(y_true.max()), int(y_pred.max())) + 1
-    class_labels = list(range(n_classes))
-
-    acc  = round(float(accuracy_score(y_true, y_pred)), 4)
-    bacc = round(float(balanced_accuracy_score(y_true, y_pred)), 4)
-
-    f1_w   = round(float(f1_score(y_true, y_pred, average='weighted', zero_division=0)), 4)
-    f1_mac = round(float(f1_score(y_true, y_pred, average='macro',    zero_division=0)), 4)
-    prec_w = round(float(precision_score(y_true, y_pred, average='weighted', zero_division=0)), 4)
-    rec_w  = round(float(recall_score(y_true, y_pred, average='weighted', zero_division=0)), 4)
-    prec_mac = round(float(precision_score(y_true, y_pred, average='macro', zero_division=0)), 4)
-    rec_mac  = round(float(recall_score(y_true, y_pred, average='macro',  zero_division=0)), 4)
-
-    prec_per = np.round(precision_score(y_true, y_pred, average=None, zero_division=0, labels=class_labels), 4).tolist()
-    rec_per  = np.round(recall_score(y_true, y_pred, average=None, zero_division=0, labels=class_labels), 4).tolist()
-    f1_per   = np.round(f1_score(y_true, y_pred, average=None, zero_division=0, labels=class_labels), 4).tolist()
-
-    cm = sk_confusion_matrix(y_true, y_pred, labels=class_labels)
-    per_class_acc = []
-    for c in range(n_classes):
-        total_c = cm[c].sum()
-        per_class_acc.append(round(float(cm[c, c] / total_c), 4) if total_c > 0 else 0.0)
-
-    kappa = round(float(cohen_kappa_score(y_true, y_pred)), 4)
-    mcc   = round(float(matthews_corrcoef(y_true, y_pred)), 4)
-
-    result = {
-        'accuracy': acc,
-        'balanced_accuracy': bacc,
-        'f1_weighted': f1_w,
-        'f1_macro': f1_mac,
-        'precision_weighted': prec_w,
-        'recall_weighted': rec_w,
-        'precision_macro': prec_mac,
-        'recall_macro': rec_mac,
-        'per_class_precision': prec_per,
-        'per_class_recall': rec_per,
-        'per_class_f1': f1_per,
-        'per_class_accuracy': per_class_acc,
-        'cohen_kappa': kappa,
-        'mcc': mcc,
-        'confusion_matrix': cm.tolist(),
-    }
-
-    # ---- Calibration / probability-based metrics ----
-    if y_prob is not None:
-        y_prob = np.asarray(y_prob, dtype=np.float64)
-        from sklearn.metrics import log_loss as sk_log_loss
-
-        try:
-            ll = round(float(sk_log_loss(y_true, y_prob, labels=class_labels)), 4)
-        except Exception:
-            ll = float('nan')
-
-        max_probs = y_prob.max(axis=1)
-        mean_conf   = round(float(np.mean(max_probs)), 4)
-        std_conf    = round(float(np.std(max_probs)), 4)
-        median_conf = round(float(np.median(max_probs)), 4)
-
-        ent = -np.sum(y_prob * np.log(np.clip(y_prob, 1e-8, 1.0)), axis=1)
-        mean_ent = round(float(np.mean(ent)), 4)
-        std_ent  = round(float(np.std(ent)), 4)
-
-        # Expected Calibration Error (10 bins)
-        n_bins = 10
-        bin_boundaries = np.linspace(0, 1, n_bins + 1)
-        ece = 0.0
-        n = len(y_true)
-        for b in range(n_bins):
-            lo, hi = bin_boundaries[b], bin_boundaries[b + 1]
-            mask = (max_probs > lo) & (max_probs <= hi)
-            if mask.sum() == 0:
-                continue
-            bin_acc  = float((y_pred[mask] == y_true[mask]).mean())
-            bin_conf = float(max_probs[mask].mean())
-            ece += mask.sum() / n * abs(bin_acc - bin_conf)
-        ece = round(float(ece), 4)
-
-        result.update({
-            'log_loss': ll,
-            'ece': ece,
-            'mean_confidence': mean_conf,
-            'std_confidence': std_conf,
-            'median_confidence': median_conf,
-            'mean_entropy': mean_ent,
-            'std_entropy': std_ent,
-        })
-
-    return result
-
-
-def print_metrics_summary(metrics, title=''):
-    """Pretty-print a metrics dict from compute_all_metrics."""
-    if title:
-        print(f"\n{'='*60}")
-        print(f"  {title}")
-        print(f"{'='*60}")
-    print(f"  Accuracy:          {metrics['accuracy']}")
-    print(f"  Balanced Accuracy: {metrics['balanced_accuracy']}")
-    print(f"  F1 (weighted):     {metrics['f1_weighted']}")
-    print(f"  F1 (macro):        {metrics['f1_macro']}")
-    print(f"  Precision (w):     {metrics['precision_weighted']}")
-    print(f"  Recall (w):        {metrics['recall_weighted']}")
-    print(f"  Cohen's Kappa:     {metrics['cohen_kappa']}")
-    print(f"  MCC:               {metrics['mcc']}")
-    if 'ece' in metrics:
-        print(f"  ECE:               {metrics['ece']}")
-        print(f"  Log Loss:          {metrics['log_loss']}")
-        print(f"  Mean Confidence:   {metrics['mean_confidence']}")
-        print(f"  Mean Entropy:      {metrics['mean_entropy']}")
-    print(f"  Confusion Matrix:")
-    for row in metrics['confusion_matrix']:
-        print(f"    {row}")
-
-
-# CSV field names for unified results output (flat columns only)
-METRICS_CSV_FIELDS = [
-    'accuracy', 'balanced_accuracy', 'f1_weighted', 'f1_macro',
-    'precision_weighted', 'recall_weighted', 'precision_macro', 'recall_macro',
-    'cohen_kappa', 'mcc', 'ece', 'log_loss',
-    'mean_confidence', 'std_confidence', 'mean_entropy', 'std_entropy',
-]
-
-
-def aggregate_seed_metrics(seed_metrics_list):
-    """Aggregate metrics across multiple seeds into mean ± std.
-
-    Parameters
-    ----------
-    seed_metrics_list : list of dict
-        Each dict is output of compute_all_metrics for one seed.
-
-    Returns
-    -------
-    dict
-        For each numeric metric key: ``key_mean``, ``key_std``.
-        Also includes ``n_seeds``.
-    """
-    if not seed_metrics_list:
-        return {}
-    result = {'n_seeds': len(seed_metrics_list)}
-    for key in METRICS_CSV_FIELDS:
-        vals = [m[key] for m in seed_metrics_list if key in m and m[key] is not None
-                and not (isinstance(m[key], float) and np.isnan(m[key]))]
-        if vals:
-            result[f'{key}_mean'] = round(float(np.mean(vals)), 4)
-            result[f'{key}_std']  = round(float(np.std(vals)), 4)
-        else:
-            result[f'{key}_mean'] = float('nan')
-            result[f'{key}_std']  = float('nan')
-    return result
-
-
-# =============================================================================
 # Confusion Matrix Adaptation (domain drift correction)
 # =============================================================================
 class ConfusionMatrixAdapter:
@@ -2740,20 +2235,20 @@ def load_csi_datasets(train_dirs, test_dirs, window_len, verbose=False):
     
     test_ds_files = [DatasetFile(p, test_pipeline, [l]) for l, p in test_files]
     test_ds = TrainingDataset(test_ds_files, feature_key='mag', label_map=train_ds.label_map, balance=True)
+    test_ds.build()
+
+    return train_ds, test_ds
+
+
+# =============================================================================
+# ML Experiments: 4 pipelines × 4 datasets × 4 models
+# =============================================================================
 def run_ml_pipeline_experiment(data_root, window_len=100, guaranteed_sr=100,
-                               var_window=20, verbose=False, n_seeds=3,
-                               cv_mode=False, n_folds=None):
+                               var_window=20, verbose=False):
     """Run comprehensive ML experiment across all datasets and pipelines.
 
     Compares 4 ML models on 4 feature pipelines across 4 datasets.
-    Each configuration is run ``n_seeds`` times with different random seeds
-    to produce mean ± std statistics suitable for research publication.
-    Uses the shared ``compute_all_metrics`` function with ``predict_proba``
-    for calibration metrics (ECE, log_loss, confidence, entropy).
-
-    When ``cv_mode=True``, temporal forward-chaining cross-validation is
-    used instead of the fixed metadata train/test split.  Metrics are
-    collected per fold × seed, then aggregated for final mean ± std.
+    Reports accuracy, F1, precision, recall, train time, and resource usage.
 
     Parameters
     ----------
@@ -2767,22 +2262,15 @@ def run_ml_pipeline_experiment(data_root, window_len=100, guaranteed_sr=100,
         Rolling variance window. Default 20.
     verbose : bool
         Verbose CSI loading. Default False.
-    n_seeds : int
-        Number of random seeds for multi-seed runs. Default 3.
-    cv_mode : bool
-        Use temporal forward-chaining cross-validation. Default False.
-    n_folds : int or None
-        Number of CV folds (None = auto). Only used when cv_mode=True.
 
     Returns
     -------
-    dict : nested {dataset__pipeline__model: {'seeds': [...], 'agg': {...}}}
+    dict : nested {dataset__pipeline: {model: metrics}}
     """
     import traceback
     import psutil
 
     PIPELINES = ['amplitude', 'amplitude_phase', 'amplitude_sanitized', 'rolling_variance']
-    SEEDS = list(range(42, 42 + n_seeds))
 
     all_results = {}
 
@@ -2791,42 +2279,21 @@ def run_ml_pipeline_experiment(data_root, window_len=100, guaranteed_sr=100,
         print(f"# PIPELINE: {pipe_name}")
         print(f"{'#'*80}")
 
-        if cv_mode:
-            try:
-                datasets_cv = load_all_datasets_cv(
-                    data_root, n_folds=n_folds, window_len=window_len,
-                    guaranteed_sr=guaranteed_sr, pipeline_name=pipe_name,
-                    mode='flattened', stride=None, var_window=var_window,
-                    verbose=verbose,
-                )
-            except Exception as e:
-                print(f"  ERROR loading CV datasets for pipeline '{pipe_name}': {e}")
-                traceback.print_exc()
-                continue
-            # Flatten: list of (ds_name, fold_idx, train_ds, test_ds)
-            ds_fold_list = []
-            for ds_name, folds in datasets_cv.items():
-                for fold_idx, train_ds, test_ds in folds:
-                    ds_fold_list.append((ds_name, fold_idx, train_ds, test_ds))
-        else:
-            try:
-                datasets = load_all_datasets(
-                    data_root, window_len=window_len, guaranteed_sr=guaranteed_sr,
-                    pipeline_name=pipe_name, mode='flattened', stride=None,
-                    var_window=var_window, verbose=verbose,
-                )
-            except Exception as e:
-                print(f"  ERROR loading datasets for pipeline '{pipe_name}': {e}")
-                traceback.print_exc()
-                continue
-            ds_fold_list = []
-            for ds_name, (train_ds, test_ds) in datasets.items():
-                ds_fold_list.append((ds_name, -1, train_ds, test_ds))
+        try:
+            datasets = load_all_datasets(
+                data_root, window_len=window_len, guaranteed_sr=guaranteed_sr,
+                pipeline_name=pipe_name, mode='flattened', stride=None,
+                var_window=var_window, verbose=verbose,
+            )
+        except Exception as e:
+            print(f"  ERROR loading datasets for pipeline '{pipe_name}': {e}")
+            traceback.print_exc()
+            continue
 
-        for ds_name, fold_idx, train_ds, test_ds in ds_fold_list:
-            fold_tag = f"fold{fold_idx}" if fold_idx >= 0 else "fixed"
+        for ds_name, (train_ds, test_ds) in datasets.items():
+            key = f"{ds_name}__{pipe_name}"
             print(f"\n{'='*70}")
-            print(f"  Dataset: {ds_name}  |  Pipeline: {pipe_name}  |  Split: {fold_tag}")
+            print(f"  Dataset: {ds_name}  |  Pipeline: {pipe_name}")
             print(f"  Train: {train_ds.X.shape}  Test: {test_ds.X.shape}  "
                   f"Classes: {train_ds.num_classes} {train_ds.labels}")
             print(f"{'='*70}")
@@ -2835,911 +2302,117 @@ def run_ml_pipeline_experiment(data_root, window_len=100, guaranteed_sr=100,
                 print(f"  SKIP — no test data")
                 continue
 
-            n_classes = train_ds.num_classes
+            models = make_ml_models()
+            run_results = {}
 
-            models_template = make_ml_models()
+            for model_name, model in models:
+                print(f"\n  --- {model_name} ---")
+                proc = psutil.Process(os.getpid())
+                mem_before = proc.memory_info().rss / 1024 / 1024
 
-            for model_name, _ in models_template:
-                run_key = f"{ds_name}__{pipe_name}__{model_name}"
-                print(f"\n  --- {model_name} ({fold_tag}) ---")
+                t0 = time.process_time()
+                try:
+                    model.fit(train_ds.X, train_ds.y)
+                except Exception as e:
+                    print(f"    FIT ERROR: {e}")
+                    continue
+                train_time = time.process_time() - t0
 
-                for seed_idx, seed in enumerate(SEEDS):
-                    set_global_seed(seed)
+                mem_after = proc.memory_info().rss / 1024 / 1024
 
-                    # Re-create model for each seed (fresh state)
-                    fresh_models = make_ml_models()
-                    model = [m for n, m in fresh_models if n == model_name][0]
+                t1 = time.process_time()
+                y_pred = model.predict(test_ds.X)
+                infer_time = time.process_time() - t1
 
-                    proc = psutil.Process(os.getpid())
-                    mem_before = proc.memory_info().rss / 1024 / 1024
+                from sklearn.metrics import (
+                    accuracy_score, f1_score, precision_score,
+                    recall_score, confusion_matrix, cohen_kappa_score,
+                    matthews_corrcoef, balanced_accuracy_score,
+                )
 
-                    t0 = time.process_time()
-                    try:
-                        model.fit(train_ds.X, train_ds.y)
-                    except Exception as e:
-                        print(f"    FIT ERROR (seed {seed}): {e}")
-                        continue
-                    train_time = time.process_time() - t0
+                acc = round(accuracy_score(test_ds.y, y_pred), 4)
+                bal_acc = round(balanced_accuracy_score(test_ds.y, y_pred), 4)
+                f1_w = round(f1_score(test_ds.y, y_pred, average='weighted', zero_division=0), 4)
+                f1_mac = round(f1_score(test_ds.y, y_pred, average='macro', zero_division=0), 4)
+                prec = round(precision_score(test_ds.y, y_pred, average='weighted', zero_division=0), 4)
+                rec = round(recall_score(test_ds.y, y_pred, average='weighted', zero_division=0), 4)
+                kappa = round(cohen_kappa_score(test_ds.y, y_pred), 4)
+                mcc = round(matthews_corrcoef(test_ds.y, y_pred), 4)
+                cm = confusion_matrix(test_ds.y, y_pred).tolist()
 
-                    mem_after = proc.memory_info().rss / 1024 / 1024
+                metrics = {
+                    'accuracy': acc,
+                    'balanced_accuracy': bal_acc,
+                    'f1_weighted': f1_w,
+                    'f1_macro': f1_mac,
+                    'precision_weighted': prec,
+                    'recall_weighted': rec,
+                    'cohen_kappa': kappa,
+                    'mcc': mcc,
+                    'confusion_matrix': cm,
+                    'train_time_s': round(train_time, 3),
+                    'inference_time_s': round(infer_time, 3),
+                    'memory_delta_mb': round(mem_after - mem_before, 1),
+                    'train_samples': train_ds.X.shape[0],
+                    'test_samples': test_ds.X.shape[0],
+                    'n_features': train_ds.X.shape[1],
+                }
 
-                    t1 = time.process_time()
-                    y_pred = model.predict(test_ds.X)
-                    infer_time = time.process_time() - t1
+                print(f"    Acc={acc}  BalAcc={bal_acc}  F1w={f1_w}  "
+                      f"Kappa={kappa}  MCC={mcc}  "
+                      f"Train={train_time:.2f}s  Infer={infer_time:.3f}s  "
+                      f"Mem={mem_after - mem_before:+.1f}MB")
 
-                    # Get probabilities for calibration metrics
-                    y_prob = None
-                    if hasattr(model, 'predict_proba'):
-                        try:
-                            y_prob = model.predict_proba(test_ds.X)
-                        except Exception:
-                            pass
+                run_results[model_name] = metrics
 
-                    metrics = compute_all_metrics(
-                        test_ds.y, y_pred, y_prob=y_prob, n_classes=n_classes)
-                    metrics['train_time_s'] = round(train_time, 3)
-                    metrics['inference_time_s'] = round(infer_time, 3)
-                    metrics['memory_delta_mb'] = round(mem_after - mem_before, 1)
-                    metrics['train_samples'] = train_ds.X.shape[0]
-                    metrics['test_samples'] = test_ds.X.shape[0]
-                    metrics['n_features'] = train_ds.X.shape[1]
-                    metrics['seed'] = seed
-                    metrics['fold'] = fold_idx
+            all_results[key] = run_results
 
-                    if seed_idx == 0:
-                        print(f"    [seed {seed}] Acc={metrics['accuracy']}  "
-                              f"F1w={metrics['f1_weighted']}  "
-                              f"Kappa={metrics['cohen_kappa']}  "
-                              f"ECE={metrics.get('ece', 'N/A')}  "
-                              f"Train={train_time:.2f}s")
-                    else:
-                        print(f"    [seed {seed}] Acc={metrics['accuracy']}")
-
-                    # Accumulate per run_key
-                    if run_key not in all_results:
-                        all_results[run_key] = {'seeds': [], 'agg': None}
-                    all_results[run_key]['seeds'].append(metrics)
-
-        # After all folds for this pipeline, aggregate per run_key
-        for run_key in list(all_results.keys()):
-            entry = all_results[run_key]
-            if entry['agg'] is not None:
-                continue  # already aggregated from a previous pipeline
-            if not entry['seeds']:
-                continue
-            agg = aggregate_seed_metrics(entry['seeds'])
-            parts = run_key.split('__')
-            agg['dataset'] = parts[0]
-            agg['pipeline'] = parts[1] if len(parts) > 1 else ''
-            agg['model'] = parts[2] if len(parts) > 2 else ''
-            entry['agg'] = agg
-            print(f"  [{run_key}] MEAN±STD  "
-                  f"Acc={agg.get('accuracy_mean','?')}±{agg.get('accuracy_std','?')}  "
-                  f"F1w={agg.get('f1_weighted_mean','?')}±{agg.get('f1_weighted_std','?')}")
-
-    # ---- Final comparison table (mean ± std) ----
-    print(f"\n{'='*180}")
-    split_desc = f"CV {n_folds or 'auto'} folds × {n_seeds} seeds" if cv_mode else f"{n_seeds} seeds"
-    print(f"FINAL ML COMPARISON: 4 Pipelines x 4 Datasets x 4 Models  ({split_desc})")
-    print(f"{'='*180}")
+    # ---- Final comparison table ----
+    print(f"\n{'='*160}")
+    print("FINAL ML COMPARISON: 4 Pipelines x 4 Datasets x 4 Models")
+    print(f"{'='*160}")
     hdr = (f"{'Dataset':<25} {'Pipeline':<22} {'Model':<18} | "
-           f"{'Acc':>14} {'F1w':>14} {'Kappa':>14} {'MCC':>14} {'ECE':>14}")
+           f"{'Acc':>6} {'BalAcc':>6} {'F1w':>6} {'F1mac':>6} "
+           f"{'Prec':>6} {'Rec':>6} {'Kappa':>6} {'MCC':>6} | "
+           f"{'Train':>7} {'Infer':>7} {'Mem':>6}")
     print(hdr)
     print("-" * 160)
-    for key in sorted(all_results.keys()):
-        a = all_results[key]['agg']
-        def _fmt(k):
-            m = a.get(f'{k}_mean', float('nan'))
-            s = a.get(f'{k}_std', float('nan'))
-            return f"{m:.4f}±{s:.4f}"
-        print(f"{a['dataset']:<25} {a['pipeline']:<22} {a['model']:<18} | "
-              f"{_fmt('accuracy'):>14} {_fmt('f1_weighted'):>14} "
-              f"{_fmt('cohen_kappa'):>14} {_fmt('mcc'):>14} "
-              f"{_fmt('ece'):>14}")
+    for key, run_res in all_results.items():
+        parts = key.split('__')
+        ds_name, pipe = parts[0], parts[1]
+        for mname, m in run_res.items():
+            print(f"{ds_name:<25} {pipe:<22} {mname:<18} | "
+                  f"{m['accuracy']:>6.4f} {m['balanced_accuracy']:>6.4f} "
+                  f"{m['f1_weighted']:>6.4f} {m['f1_macro']:>6.4f} "
+                  f"{m['precision_weighted']:>6.4f} {m['recall_weighted']:>6.4f} "
+                  f"{m['cohen_kappa']:>6.4f} {m['mcc']:>6.4f} | "
+                  f"{m['train_time_s']:>6.2f}s {m['inference_time_s']:>6.3f}s "
+                  f"{m['memory_delta_mb']:>+5.1f}M")
+        print("-" * 160)
 
-    # ---- Save per-seed results to CSV (full unified columns) ----
+    # ---- Save results to CSV ----
     import csv
     results_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'results')
     os.makedirs(results_dir, exist_ok=True)
-
-    csv_tag = '_cv' if cv_mode else ''
-    csv_path = os.path.join(results_dir, f'ml_pipeline_results_per_seed{csv_tag}.csv')
-    fieldnames = (['dataset', 'pipeline', 'model', 'fold', 'seed']
-                  + METRICS_CSV_FIELDS
-                  + ['train_time_s', 'inference_time_s', 'memory_delta_mb',
-                     'train_samples', 'test_samples', 'n_features'])
+    csv_path = os.path.join(results_dir, 'ml_pipeline_results.csv')
+    fieldnames = ['dataset', 'pipeline', 'model',
+                  'accuracy', 'balanced_accuracy', 'f1_weighted', 'f1_macro',
+                  'precision_weighted', 'recall_weighted', 'cohen_kappa', 'mcc',
+                  'train_time_s', 'inference_time_s', 'memory_delta_mb',
+                  'train_samples', 'test_samples', 'n_features']
     with open(csv_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for key in sorted(all_results.keys()):
-            entry = all_results[key]
-            for sm in entry['seeds']:
-                row = {
-                    'dataset': entry['agg']['dataset'],
-                    'pipeline': entry['agg']['pipeline'],
-                    'model': entry['agg']['model'],
-                }
-                row.update(sm)
+        for key, run_res in all_results.items():
+            parts = key.split('__')
+            ds_name, pipe = parts[0], parts[1]
+            for model_name, m in run_res.items():
+                row = {'dataset': ds_name, 'pipeline': pipe, 'model': model_name}
+                row.update({k: m[k] for k in fieldnames if k in m})
                 writer.writerow(row)
-    print(f"\n[info] Per-seed results saved to {os.path.abspath(csv_path)}")
-
-    # Aggregated CSV
-    agg_csv_path = os.path.join(results_dir, f'ml_pipeline_results_aggregated{csv_tag}.csv')
-    agg_fields = ['dataset', 'pipeline', 'model', 'n_seeds']
-    for k in METRICS_CSV_FIELDS:
-        agg_fields.extend([f'{k}_mean', f'{k}_std'])
-    with open(agg_csv_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=agg_fields, extrasaction='ignore')
-        writer.writeheader()
-        for key in sorted(all_results.keys()):
-            writer.writerow(all_results[key]['agg'])
-    print(f"[info] Aggregated results saved to {os.path.abspath(agg_csv_path)}")
+    print(f"\n[info] Results saved to {os.path.abspath(csv_path)}")
 
     return all_results
-
-
-def visualize_results(results_dir=None, save=True):
-    """Load saved CSV results and produce comprehensive plots + tables in a
-    single tabbed GUI window with per-plot export buttons.
-
-    Parameters
-    ----------
-    results_dir : str or None
-        Directory containing the CSV result files. If None, uses ../results.
-    save : bool
-        If True, auto-save every plot as PNG into results_dir.
-    """
-    import pandas as pd
-    import matplotlib
-    matplotlib.use('TkAgg')
-    import matplotlib.pyplot as plt
-    from matplotlib.lines import Line2D
-    from vis_gui import PlotGUI
-
-    plots = []  # collect (tab_name, fig, default_filename) for GUI
-
-    if results_dir is None:
-        results_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   '..', 'results')
-    results_dir = os.path.abspath(results_dir)
-
-    # Try both CV and non-CV filenames
-    per_seed_path = None
-    agg_path = None
-    for tag in ['', '_cv']:
-        p = os.path.join(results_dir, f'ml_pipeline_results_per_seed{tag}.csv')
-        a = os.path.join(results_dir, f'ml_pipeline_results_aggregated{tag}.csv')
-        if os.path.exists(p):
-            per_seed_path = p
-        if os.path.exists(a):
-            agg_path = a
-    if per_seed_path is None or agg_path is None:
-        print(f"[vis] ERROR: CSV results not found in {results_dir}")
-        print(f"[vis] Run the pipeline first (without --vis) to generate results.")
-        return
-
-    df_seed = pd.read_csv(per_seed_path)
-    df_agg = pd.read_csv(agg_path)
-    print(f"[vis] Loaded {len(df_seed)} per-seed rows, {len(df_agg)} aggregated rows")
-    print(f"[vis]   from {per_seed_path}")
-
-    datasets = df_agg['dataset'].unique()
-    pipelines = df_agg['pipeline'].unique()
-    models = df_agg['model'].unique()
-
-    n_datasets = len(datasets)
-    n_pipelines = len(pipelines)
-    n_models = len(models)
-
-    # Short display names
-    ds_short = {d: d.replace('_data', '').replace('_', ' ').title() for d in datasets}
-    pipe_short = {p: p.replace('_', ' ').title() for p in pipelines}
-
-    # Color palettes
-    model_colors = {}
-    cmap = plt.cm.Set2
-    for i, m in enumerate(models):
-        model_colors[m] = cmap(i / max(len(models) - 1, 1))
-    pipe_colors = {}
-    pcmap = plt.cm.tab10
-    for i, p in enumerate(pipelines):
-        pipe_colors[p] = pcmap(i / max(len(pipelines) - 1, 1))
-
-    # ================================================================
-    # TABLE 1: Console summary
-    # ================================================================
-    print(f"\n{'=' * 130}")
-    print(f"  RESULTS SUMMARY: {n_datasets} Datasets x {n_pipelines} Pipelines x {n_models} Models")
-    print(f"{'=' * 130}")
-    hdr = (f"{'Dataset':<28} {'Pipeline':<22} {'Model':<15} | "
-           f"{'Accuracy':>12} {'F1w':>12} {'Kappa':>12} {'MCC':>12} {'ECE':>12}")
-    print(hdr)
-    print('-' * 130)
-
-    best_per_ds = {}
-    for _, row in df_agg.iterrows():
-        ds = row['dataset']
-        acc = row.get('accuracy_mean', float('nan'))
-        if ds not in best_per_ds or acc > best_per_ds[ds][1]:
-            best_per_ds[ds] = (f"{row['pipeline']}+{row['model']}", acc)
-
-        def _fmt(k, r=row):
-            m = r.get(f'{k}_mean', float('nan'))
-            s = r.get(f'{k}_std', float('nan'))
-            if pd.isna(m):
-                return f"{'N/A':>12}"
-            return f"{m:.4f}+/-{s:.4f}"
-        print(f"{ds_short.get(ds, ds):<28} {pipe_short.get(row['pipeline'], row['pipeline']):<22} "
-              f"{row['model']:<15} | {_fmt('accuracy'):>12} {_fmt('f1_weighted'):>12} "
-              f"{_fmt('cohen_kappa'):>12} {_fmt('mcc'):>12} {_fmt('ece'):>12}")
-
-    print('-' * 130)
-    print("  BEST per dataset:")
-    for ds, (combo, acc) in best_per_ds.items():
-        print(f"    {ds_short.get(ds, ds):<28} -> {combo:<35} Acc={acc:.4f}")
-    print()
-
-    # ================================================================
-    # PLOT 1: Grouped bar chart — Accuracy by Pipeline x Model per Dataset
-    # ================================================================
-    fig1, axes1 = plt.subplots(1, n_datasets, figsize=(5 * n_datasets, 5), sharey=True)
-    if n_datasets == 1:
-        axes1 = [axes1]
-    fig1.suptitle('Accuracy by Pipeline x Model', fontsize=14, fontweight='bold', y=1.02)
-
-    bar_width = 0.8 / n_models
-    for ax, ds in zip(axes1, datasets):
-        sub = df_agg[df_agg['dataset'] == ds]
-        for j, mdl in enumerate(models):
-            msub = sub[sub['model'] == mdl]
-            x = np.arange(n_pipelines)
-            vals = []
-            errs = []
-            for p in pipelines:
-                r = msub[msub['pipeline'] == p]
-                if len(r) > 0:
-                    vals.append(float(r['accuracy_mean'].iloc[0]))
-                    errs.append(float(r['accuracy_std'].iloc[0]))
-                else:
-                    vals.append(0)
-                    errs.append(0)
-            ax.bar(x + j * bar_width, vals, bar_width, yerr=errs,
-                   label=mdl, color=model_colors[mdl], edgecolor='white',
-                   linewidth=0.5, capsize=3, alpha=0.85)
-        ax.set_xticks(np.arange(n_pipelines) + bar_width * (n_models - 1) / 2)
-        ax.set_xticklabels([pipe_short.get(p, p) for p in pipelines],
-                           rotation=30, ha='right', fontsize=9)
-        ax.set_title(ds_short.get(ds, ds), fontsize=11, fontweight='bold')
-        ax.set_ylim(0, 1.05)
-        ax.grid(axis='y', alpha=0.3, linestyle='--')
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-    axes1[0].set_ylabel('Accuracy', fontsize=11)
-    axes1[-1].legend(fontsize=9, loc='lower right')
-    fig1.tight_layout()
-    if save:
-        fig1.savefig(os.path.join(results_dir, 'plot_accuracy_bars.png'),
-                     dpi=150, bbox_inches='tight')
-        print(f"[vis] Saved plot_accuracy_bars.png")
-
-    # ================================================================
-    # PLOT 2: Heatmap — Accuracy across all combos
-    # ================================================================
-    combo_labels = [f"{pipe_short.get(p, p)}\n{m}" for p in pipelines for m in models]
-    heat_data = np.zeros((n_datasets, n_pipelines * n_models))
-    for i, ds in enumerate(datasets):
-        for j, p in enumerate(pipelines):
-            for k, m in enumerate(models):
-                r = df_agg[(df_agg['dataset'] == ds) &
-                           (df_agg['pipeline'] == p) &
-                           (df_agg['model'] == m)]
-                if len(r) > 0:
-                    heat_data[i, j * n_models + k] = float(r['accuracy_mean'].iloc[0])
-
-    fig2, ax2 = plt.subplots(figsize=(max(10, n_pipelines * n_models * 1.2),
-                                      n_datasets * 1.2 + 2))
-    im = ax2.imshow(heat_data, cmap='RdYlGn', aspect='auto', vmin=0, vmax=1)
-    ax2.set_xticks(np.arange(len(combo_labels)))
-    ax2.set_xticklabels(combo_labels, rotation=45, ha='right', fontsize=8)
-    ax2.set_yticks(np.arange(n_datasets))
-    ax2.set_yticklabels([ds_short.get(d, d) for d in datasets], fontsize=10)
-    for i in range(n_datasets):
-        for j in range(len(combo_labels)):
-            v = heat_data[i, j]
-            color = 'white' if v < 0.5 else 'black'
-            ax2.text(j, i, f'{v:.3f}', ha='center', va='center',
-                     fontsize=8, fontweight='bold', color=color)
-    plt.colorbar(im, ax=ax2, label='Accuracy', shrink=0.8)
-    ax2.set_title('Accuracy Heatmap: Dataset x (Pipeline + Model)',
-                  fontsize=13, fontweight='bold')
-    fig2.tight_layout()
-    if save:
-        fig2.savefig(os.path.join(results_dir, 'plot_accuracy_heatmap.png'),
-                     dpi=150, bbox_inches='tight')
-        print(f"[vis] Saved plot_accuracy_heatmap.png")
-
-    # ================================================================
-    # PLOT 3: Multi-metric radar chart per dataset
-    # ================================================================
-    radar_metrics = ['accuracy', 'f1_weighted', 'cohen_kappa', 'mcc', 'balanced_accuracy']
-    radar_labels = ['Accuracy', 'F1 Weighted', 'Cohen k', 'MCC', 'Balanced Acc']
-    n_rm = len(radar_metrics)
-    angles = np.linspace(0, 2 * np.pi, n_rm, endpoint=False).tolist()
-    angles += angles[:1]
-
-    fig3, axes3 = plt.subplots(1, n_datasets, figsize=(5 * n_datasets, 5),
-                               subplot_kw=dict(polar=True))
-    if n_datasets == 1:
-        axes3 = [axes3]
-    fig3.suptitle('Multi-Metric Radar by Dataset (best pipeline per model)',
-                  fontsize=13, fontweight='bold', y=1.05)
-
-    for ax, ds in zip(axes3, datasets):
-        sub = df_agg[df_agg['dataset'] == ds]
-        for mdl in models:
-            msub = sub[sub['model'] == mdl]
-            if len(msub) == 0:
-                continue
-            best_row = msub.loc[msub['accuracy_mean'].idxmax()]
-            values = []
-            for rm in radar_metrics:
-                v = best_row.get(f'{rm}_mean', 0)
-                values.append(max(0, float(v) if not pd.isna(v) else 0))
-            values += values[:1]
-            ax.plot(angles, values, 'o-', linewidth=1.5,
-                    label=f"{mdl} ({best_row['pipeline']})",
-                    color=model_colors[mdl], markersize=4)
-            ax.fill(angles, values, alpha=0.1, color=model_colors[mdl])
-
-        ax.set_xticks(angles[:-1])
-        ax.set_xticklabels(radar_labels, fontsize=8)
-        ax.set_ylim(0, 1.05)
-        ax.set_title(ds_short.get(ds, ds), fontsize=11, fontweight='bold', pad=15)
-        ax.legend(fontsize=7, loc='lower right', bbox_to_anchor=(1.3, -0.1))
-    fig3.tight_layout()
-    if save:
-        fig3.savefig(os.path.join(results_dir, 'plot_radar_metrics.png'),
-                     dpi=150, bbox_inches='tight')
-        print(f"[vis] Saved plot_radar_metrics.png")
-
-    # ================================================================
-    # PLOT 4: Training time comparison (from per-seed data)
-    # ================================================================
-    if 'train_time_s' in df_seed.columns:
-        fig4, axes4 = plt.subplots(1, n_datasets, figsize=(5 * n_datasets, 4),
-                                   sharey=False)
-        if n_datasets == 1:
-            axes4 = [axes4]
-        fig4.suptitle('Training Time (seconds, log scale)',
-                      fontsize=13, fontweight='bold', y=1.02)
-
-        for ax, ds in zip(axes4, datasets):
-            sub = df_seed[df_seed['dataset'] == ds]
-            positions = []
-            labels = []
-            data_groups = []
-            idx = 0
-            for p in pipelines:
-                for m in models:
-                    vals = sub[(sub['pipeline'] == p) &
-                               (sub['model'] == m)]['train_time_s'].dropna()
-                    if len(vals) > 0:
-                        data_groups.append(vals.values)
-                        labels.append(f"{pipe_short.get(p, p)[:8]}\n{m[:6]}")
-                        positions.append(idx)
-                        idx += 1
-            if data_groups:
-                bp = ax.boxplot(data_groups, positions=positions, widths=0.6,
-                                patch_artist=True, showmeans=True,
-                                meanprops=dict(marker='D', markerfacecolor='red',
-                                               markersize=4))
-                for patch_i, patch in enumerate(bp['boxes']):
-                    patch.set_facecolor(
-                        model_colors.get(models[patch_i % n_models], '#cccccc'))
-                    patch.set_alpha(0.6)
-                ax.set_xticks(positions)
-                ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=7)
-                ax.set_yscale('log')
-                ax.grid(axis='y', alpha=0.3, linestyle='--')
-            ax.set_title(ds_short.get(ds, ds), fontsize=10, fontweight='bold')
-            ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(False)
-        axes4[0].set_ylabel('Time (s)', fontsize=10)
-        fig4.tight_layout()
-        if save:
-            fig4.savefig(os.path.join(results_dir, 'plot_training_time.png'),
-                         dpi=150, bbox_inches='tight')
-            print(f"[vis] Saved plot_training_time.png")
-
-    # ================================================================
-    # PLOT 5: Pipeline comparison — F1 weighted grouped by dataset
-    # ================================================================
-    fig5, ax5 = plt.subplots(figsize=(max(8, n_datasets * 2.5), 5))
-    fig5.suptitle('F1 Weighted Score by Dataset x Pipeline',
-                  fontsize=13, fontweight='bold')
-    bar_w = 0.8 / n_pipelines
-    for j, p in enumerate(pipelines):
-        x = np.arange(n_datasets)
-        vals = []
-        errs = []
-        for ds in datasets:
-            sub = df_agg[(df_agg['dataset'] == ds) & (df_agg['pipeline'] == p)]
-            if len(sub) > 0:
-                vals.append(float(sub['f1_weighted_mean'].mean()))
-                errs.append(float(sub['f1_weighted_std'].mean()))
-            else:
-                vals.append(0)
-                errs.append(0)
-        ax5.bar(x + j * bar_w, vals, bar_w, yerr=errs,
-                label=pipe_short.get(p, p), color=pipe_colors[p],
-                edgecolor='white', linewidth=0.5, capsize=3, alpha=0.85)
-    ax5.set_xticks(np.arange(n_datasets) + bar_w * (n_pipelines - 1) / 2)
-    ax5.set_xticklabels([ds_short.get(d, d) for d in datasets], fontsize=10)
-    ax5.set_ylabel('F1 Weighted (avg across models)', fontsize=10)
-    ax5.set_ylim(0, 1.05)
-    ax5.legend(fontsize=9, loc='lower right')
-    ax5.grid(axis='y', alpha=0.3, linestyle='--')
-    ax5.spines['top'].set_visible(False)
-    ax5.spines['right'].set_visible(False)
-    fig5.tight_layout()
-    if save:
-        fig5.savefig(os.path.join(results_dir, 'plot_f1_by_pipeline.png'),
-                     dpi=150, bbox_inches='tight')
-        print(f"[vis] Saved plot_f1_by_pipeline.png")
-
-    # ================================================================
-    # PLOT 6: Calibration quality — ECE vs Accuracy scatter
-    # ================================================================
-    if 'ece_mean' in df_agg.columns and 'accuracy_mean' in df_agg.columns:
-        fig6, ax6 = plt.subplots(figsize=(8, 6))
-        for ds in datasets:
-            sub = df_agg[df_agg['dataset'] == ds]
-            for _, row in sub.iterrows():
-                mdl = row['model']
-                acc = row.get('accuracy_mean', np.nan)
-                ece = row.get('ece_mean', np.nan)
-                if pd.isna(acc) or pd.isna(ece):
-                    continue
-                marker = 'o' if mdl == models[0] else 's'
-                ax6.scatter(acc, ece, c=[pipe_colors[row['pipeline']]],
-                            marker=marker, s=80, alpha=0.8, edgecolors='black',
-                            linewidths=0.5)
-                ax6.annotate(
-                    f"{pipe_short.get(row['pipeline'], row['pipeline'])[:6]}",
-                    (acc, ece), fontsize=6, alpha=0.7,
-                    textcoords='offset points', xytext=(5, 3))
-
-        legend_pipe = [Line2D([0], [0], marker='o', color='w',
-                              markerfacecolor=pipe_colors[p], markersize=8,
-                              label=pipe_short.get(p, p)) for p in pipelines]
-        legend_mdl = [Line2D([0], [0], marker=('o' if i == 0 else 's'), color='w',
-                             markerfacecolor='gray', markersize=8,
-                             label=m) for i, m in enumerate(models)]
-        l1 = ax6.legend(handles=legend_pipe, title='Pipeline',
-                        loc='upper left', fontsize=8)
-        ax6.add_artist(l1)
-        ax6.legend(handles=legend_mdl, title='Model',
-                   loc='upper right', fontsize=8)
-        ax6.set_xlabel('Accuracy', fontsize=11)
-        ax6.set_ylabel('ECE (lower = better calibrated)', fontsize=11)
-        ax6.set_title('Calibration Quality: ECE vs Accuracy',
-                      fontsize=13, fontweight='bold')
-        ax6.grid(alpha=0.3, linestyle='--')
-        ax6.spines['top'].set_visible(False)
-        ax6.spines['right'].set_visible(False)
-        fig6.tight_layout()
-        if save:
-            fig6.savefig(os.path.join(results_dir, 'plot_ece_vs_accuracy.png'),
-                         dpi=150, bbox_inches='tight')
-            print(f"[vis] Saved plot_ece_vs_accuracy.png")
-
-    # ================================================================
-    # PLOT 7: Best model ranking table as figure
-    # ================================================================
-    fig7, ax7 = plt.subplots(figsize=(12, max(3, n_datasets * 0.8 + 2)))
-    ax7.axis('off')
-    rank_cols = ['Dataset', 'Best Pipeline', 'Best Model',
-                 'Accuracy', 'F1w', 'Kappa', 'MCC']
-    rank_data = []
-    for ds in datasets:
-        sub = df_agg[df_agg['dataset'] == ds]
-        best = sub.loc[sub['accuracy_mean'].idxmax()]
-        rank_data.append([
-            ds_short.get(ds, ds),
-            pipe_short.get(best['pipeline'], best['pipeline']),
-            best['model'],
-            f"{best['accuracy_mean']:.4f}",
-            f"{best.get('f1_weighted_mean', 0):.4f}",
-            f"{best.get('cohen_kappa_mean', 0):.4f}",
-            f"{best.get('mcc_mean', 0):.4f}",
-        ])
-    tbl = ax7.table(cellText=rank_data, colLabels=rank_cols,
-                    loc='center', cellLoc='center')
-    tbl.auto_set_font_size(False)
-    tbl.set_fontsize(10)
-    tbl.scale(1.0, 1.5)
-    for j in range(len(rank_cols)):
-        tbl[0, j].set_facecolor('#2d333b')
-        tbl[0, j].set_text_props(color='white', fontweight='bold')
-    for i in range(len(rank_data)):
-        color = '#f0f4f8' if i % 2 == 0 else 'white'
-        for j in range(len(rank_cols)):
-            tbl[i + 1, j].set_facecolor(color)
-    ax7.set_title('Best Configuration per Dataset', fontsize=14,
-                  fontweight='bold', pad=20)
-    fig7.tight_layout()
-    if save:
-        fig7.savefig(os.path.join(results_dir, 'plot_best_ranking.png'),
-                     dpi=150, bbox_inches='tight')
-        print(f"[vis] Saved plot_best_ranking.png")
-
-    # ================================================================
-    # PLOT 8: MCC vs Cohen's Kappa scatter (agreement metrics)
-    # ================================================================
-    if 'mcc_mean' in df_agg.columns and 'cohen_kappa_mean' in df_agg.columns:
-        fig8, ax8 = plt.subplots(figsize=(8, 6))
-        markers_map = {}
-        for i, m in enumerate(models):
-            markers_map[m] = ['o', 's', '^', 'D', 'v', 'P', 'X', '*'][i % 8]
-        for _, row in df_agg.iterrows():
-            mcc = row.get('mcc_mean', np.nan)
-            kappa = row.get('cohen_kappa_mean', np.nan)
-            if pd.isna(mcc) or pd.isna(kappa):
-                continue
-            mdl = row['model']
-            marker = markers_map.get(mdl, 'o')
-            ax8.scatter(kappa, mcc, c=[pipe_colors[row['pipeline']]],
-                        marker=marker, s=70, alpha=0.8, edgecolors='black',
-                        linewidths=0.4)
-        ax8.plot([-0.5, 1], [-0.5, 1], 'k--', alpha=0.3, linewidth=0.8)
-        legend_mdl = [Line2D([0], [0], marker=markers_map.get(m, 'o'), color='w',
-                             markerfacecolor='gray', markersize=8, label=m)
-                      for m in models]
-        legend_pipe = [Line2D([0], [0], marker='o', color='w',
-                              markerfacecolor=pipe_colors[p], markersize=8,
-                              label=pipe_short.get(p, p)) for p in pipelines]
-        l1 = ax8.legend(handles=legend_mdl, title='Model',
-                        loc='upper left', fontsize=8)
-        ax8.add_artist(l1)
-        ax8.legend(handles=legend_pipe, title='Pipeline',
-                   loc='lower right', fontsize=8)
-        ax8.set_xlabel("Cohen's Kappa", fontsize=11)
-        ax8.set_ylabel('MCC', fontsize=11)
-        ax8.set_title('Agreement Metrics: MCC vs Kappa', fontsize=13, fontweight='bold')
-        ax8.grid(alpha=0.3, linestyle='--')
-        ax8.spines['top'].set_visible(False); ax8.spines['right'].set_visible(False)
-        fig8.tight_layout()
-        if save:
-            fig8.savefig(os.path.join(results_dir, 'plot_mcc_vs_kappa.png'),
-                         dpi=150, bbox_inches='tight')
-            print(f"[vis] Saved plot_mcc_vs_kappa.png")
-
-    # ================================================================
-    # PLOT 9: Confidence distribution boxplots by model
-    # ================================================================
-    if 'mean_confidence' in df_seed.columns:
-        fig9, axes9 = plt.subplots(1, n_datasets, figsize=(5 * n_datasets, 4),
-                                   sharey=True)
-        if n_datasets == 1:
-            axes9 = [axes9]
-        fig9.suptitle('Prediction Confidence Distribution by Model',
-                      fontsize=13, fontweight='bold', y=1.02)
-        for ax, ds in zip(axes9, datasets):
-            sub = df_seed[df_seed['dataset'] == ds]
-            box_data, box_labels = [], []
-            for mdl in models:
-                vals = sub[sub['model'] == mdl]['mean_confidence'].dropna()
-                if len(vals) > 0:
-                    box_data.append(vals.values)
-                    box_labels.append(mdl)
-            if box_data:
-                bp = ax.boxplot(box_data, labels=box_labels, patch_artist=True,
-                                showmeans=True, meanprops=dict(marker='D',
-                                markerfacecolor='red', markersize=4))
-                for pi, patch in enumerate(bp['boxes']):
-                    patch.set_facecolor(model_colors.get(box_labels[pi], '#cccccc'))
-                    patch.set_alpha(0.6)
-                ax.set_xticklabels(box_labels, rotation=30, ha='right', fontsize=8)
-            ax.set_title(ds_short.get(ds, ds), fontsize=10, fontweight='bold')
-            ax.set_ylim(0, 1.05)
-            ax.grid(axis='y', alpha=0.3, linestyle='--')
-            ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
-        axes9[0].set_ylabel('Mean Confidence', fontsize=10)
-        fig9.tight_layout()
-        if save:
-            fig9.savefig(os.path.join(results_dir, 'plot_confidence_dist.png'),
-                         dpi=150, bbox_inches='tight')
-            print(f"[vis] Saved plot_confidence_dist.png")
-
-    # ================================================================
-    # PLOT 10: Metric correlation matrix (from per-seed data)
-    # ================================================================
-    corr_cols = [c for c in ['accuracy', 'f1_weighted', 'f1_macro',
-                              'cohen_kappa', 'mcc', 'ece', 'log_loss',
-                              'mean_confidence', 'mean_entropy']
-                 if c in df_seed.columns]
-    if len(corr_cols) >= 4:
-        fig10, ax10 = plt.subplots(figsize=(9, 7))
-        corr_matrix = df_seed[corr_cols].corr()
-        im = ax10.imshow(corr_matrix.values, cmap='RdBu_r', vmin=-1, vmax=1,
-                         aspect='auto')
-        n_corr = len(corr_cols)
-        short_labels = [c.replace('_', '\n').replace('weighted', 'w')
-                        .replace('confidence', 'conf')
-                        .replace('entropy', 'ent') for c in corr_cols]
-        ax10.set_xticks(np.arange(n_corr))
-        ax10.set_xticklabels(short_labels, rotation=45, ha='right', fontsize=8)
-        ax10.set_yticks(np.arange(n_corr))
-        ax10.set_yticklabels(short_labels, fontsize=8)
-        for i in range(n_corr):
-            for j in range(n_corr):
-                v = corr_matrix.values[i, j]
-                color = 'white' if abs(v) > 0.5 else 'black'
-                ax10.text(j, i, f'{v:.2f}', ha='center', va='center',
-                         fontsize=7, fontweight='bold', color=color)
-        plt.colorbar(im, ax=ax10, label='Correlation', shrink=0.8)
-        ax10.set_title('Metric Correlation Matrix (across all experiments)',
-                       fontsize=13, fontweight='bold')
-        fig10.tight_layout()
-        if save:
-            fig10.savefig(os.path.join(results_dir, 'plot_metric_correlation.png'),
-                          dpi=150, bbox_inches='tight')
-            print(f"[vis] Saved plot_metric_correlation.png")
-
-    # ================================================================
-    # PLOT 11: Balanced Accuracy vs Accuracy scatter (class imbalance indicator)
-    # ================================================================
-    if 'balanced_accuracy_mean' in df_agg.columns:
-        fig11, ax11b = plt.subplots(figsize=(8, 6))
-        for _, row in df_agg.iterrows():
-            acc = row.get('accuracy_mean', np.nan)
-            bal = row.get('balanced_accuracy_mean', np.nan)
-            if pd.isna(acc) or pd.isna(bal):
-                continue
-            mdl = row['model']
-            marker = markers_map.get(mdl, 'o')
-            ax11b.scatter(acc, bal, c=[pipe_colors[row['pipeline']]],
-                          marker=marker, s=70, alpha=0.8, edgecolors='black',
-                          linewidths=0.4)
-        ax11b.plot([0, 1], [0, 1], 'k--', alpha=0.3, linewidth=0.8)
-        ax11b.set_xlabel('Accuracy', fontsize=11)
-        ax11b.set_ylabel('Balanced Accuracy', fontsize=11)
-        ax11b.set_title('Class Imbalance: Balanced Acc vs Accuracy',
-                        fontsize=13, fontweight='bold')
-        ax11b.grid(alpha=0.3, linestyle='--')
-        ax11b.spines['top'].set_visible(False); ax11b.spines['right'].set_visible(False)
-        fig11.tight_layout()
-        if save:
-            fig11.savefig(os.path.join(results_dir, 'plot_balanced_vs_accuracy.png'),
-                          dpi=150, bbox_inches='tight')
-            print(f"[vis] Saved plot_balanced_vs_accuracy.png")
-
-    # ================================================================
-    # PLOT 12: Entropy vs ECE scatter (uncertainty quality)
-    # ================================================================
-    if 'mean_entropy_mean' in df_agg.columns and 'ece_mean' in df_agg.columns:
-        fig12, ax12 = plt.subplots(figsize=(8, 6))
-        for _, row in df_agg.iterrows():
-            ent = row.get('mean_entropy_mean', np.nan)
-            ece = row.get('ece_mean', np.nan)
-            if pd.isna(ent) or pd.isna(ece):
-                continue
-            mdl = row['model']
-            marker = markers_map.get(mdl, 'o')
-            ax12.scatter(ent, ece, c=[pipe_colors[row['pipeline']]],
-                         marker=marker, s=70, alpha=0.8, edgecolors='black',
-                         linewidths=0.4)
-        ax12.set_xlabel('Mean Entropy', fontsize=11)
-        ax12.set_ylabel('ECE', fontsize=11)
-        ax12.set_title('Uncertainty Quality: Entropy vs ECE',
-                        fontsize=13, fontweight='bold')
-        ax12.grid(alpha=0.3, linestyle='--')
-        ax12.spines['top'].set_visible(False); ax12.spines['right'].set_visible(False)
-        fig12.tight_layout()
-        if save:
-            fig12.savefig(os.path.join(results_dir, 'plot_entropy_vs_ece.png'),
-                          dpi=150, bbox_inches='tight')
-            print(f"[vis] Saved plot_entropy_vs_ece.png")
-
-    # ================================================================
-    # PLOT 13: Full multi-metric table as figure (all combos)
-    # ================================================================
-    fig13, ax13 = plt.subplots(figsize=(16, max(4, len(df_agg) * 0.35 + 2)))
-    ax13.axis('off')
-    tbl_cols = ['Dataset', 'Pipeline', 'Model', 'Acc', 'BalAcc', 'F1w',
-                'Kappa', 'MCC', 'ECE', 'LogLoss']
-    tbl_data = []
-    for _, row in df_agg.iterrows():
-        tbl_data.append([
-            ds_short.get(row['dataset'], row['dataset']),
-            pipe_short.get(row['pipeline'], row['pipeline']),
-            row['model'],
-            f"{row.get('accuracy_mean', 0):.4f}",
-            f"{row.get('balanced_accuracy_mean', 0):.4f}",
-            f"{row.get('f1_weighted_mean', 0):.4f}",
-            f"{row.get('cohen_kappa_mean', 0):.4f}",
-            f"{row.get('mcc_mean', 0):.4f}",
-            f"{row.get('ece_mean', 0):.4f}",
-            f"{row.get('log_loss_mean', 0):.4f}",
-        ])
-    tbl13 = ax13.table(cellText=tbl_data, colLabels=tbl_cols,
-                       loc='center', cellLoc='center')
-    tbl13.auto_set_font_size(False)
-    tbl13.set_fontsize(8)
-    tbl13.scale(1.0, 1.3)
-    for j in range(len(tbl_cols)):
-        tbl13[0, j].set_facecolor('#2d333b')
-        tbl13[0, j].set_text_props(color='white', fontweight='bold')
-    for i in range(len(tbl_data)):
-        color = '#f0f4f8' if i % 2 == 0 else 'white'
-        for j in range(len(tbl_cols)):
-            tbl13[i + 1, j].set_facecolor(color)
-    ax13.set_title('Full Results Table (all configurations)',
-                   fontsize=14, fontweight='bold', pad=20)
-    fig13.tight_layout()
-    if save:
-        fig13.savefig(os.path.join(results_dir, 'plot_full_results_table.png'),
-                      dpi=150, bbox_inches='tight')
-        print(f"[vis] Saved plot_full_results_table.png")
-
-    # ================================================================
-    # PLOT 14: Log Loss comparison by model per dataset
-    # ================================================================
-    if 'log_loss_mean' in df_agg.columns:
-        fig14, ax14 = plt.subplots(figsize=(max(8, n_datasets * 2.5), 5))
-        fig14.suptitle('Log Loss by Model per Dataset (lower = better)',
-                       fontsize=13, fontweight='bold')
-        bar_w14 = 0.8 / n_models
-        for j, mdl in enumerate(models):
-            x = np.arange(n_datasets)
-            vals, errs = [], []
-            for ds in datasets:
-                sub = df_agg[(df_agg['dataset'] == ds) & (df_agg['model'] == mdl)]
-                if len(sub) > 0:
-                    vals.append(float(sub['log_loss_mean'].mean()))
-                    errs.append(float(sub['log_loss_std'].mean()) if 'log_loss_std' in sub.columns else 0)
-                else:
-                    vals.append(0); errs.append(0)
-            ax14.bar(x + j * bar_w14, vals, bar_w14, yerr=errs,
-                     label=mdl, color=model_colors[mdl], edgecolor='white',
-                     linewidth=0.5, capsize=3, alpha=0.85)
-        ax14.set_xticks(np.arange(n_datasets) + bar_w14 * (n_models - 1) / 2)
-        ax14.set_xticklabels([ds_short.get(d, d) for d in datasets], fontsize=10)
-        ax14.set_ylabel('Log Loss (avg across pipelines)', fontsize=10)
-        ax14.legend(fontsize=9, loc='upper right')
-        ax14.grid(axis='y', alpha=0.3, linestyle='--')
-        ax14.spines['top'].set_visible(False); ax14.spines['right'].set_visible(False)
-        fig14.tight_layout()
-        if save:
-            fig14.savefig(os.path.join(results_dir, 'plot_log_loss_bars.png'),
-                          dpi=150, bbox_inches='tight')
-            print(f"[vis] Saved plot_log_loss_bars.png")
-
-    # ================================================================
-    # PLOT 15: Precision vs Recall scatter (per experiment)
-    # ================================================================
-    if 'precision_weighted_mean' in df_agg.columns and 'recall_weighted_mean' in df_agg.columns:
-        fig15, ax15 = plt.subplots(figsize=(8, 6))
-        for _, row in df_agg.iterrows():
-            prec = row.get('precision_weighted_mean', np.nan)
-            rec = row.get('recall_weighted_mean', np.nan)
-            if pd.isna(prec) or pd.isna(rec):
-                continue
-            mdl = row['model']
-            marker = markers_map.get(mdl, 'o') if 'markers_map' in dir() else 'o'
-            ax15.scatter(rec, prec, c=[pipe_colors[row['pipeline']]],
-                         marker=marker, s=70, alpha=0.8, edgecolors='black',
-                         linewidths=0.4)
-        ax15.plot([0, 1], [0, 1], 'k--', alpha=0.3, linewidth=0.8)
-        ax15.set_xlabel('Recall (Weighted)', fontsize=11)
-        ax15.set_ylabel('Precision (Weighted)', fontsize=11)
-        ax15.set_title('Precision vs Recall (Weighted)', fontsize=13, fontweight='bold')
-        ax15.grid(alpha=0.3, linestyle='--')
-        ax15.spines['top'].set_visible(False); ax15.spines['right'].set_visible(False)
-        fig15.tight_layout()
-        if save:
-            fig15.savefig(os.path.join(results_dir, 'plot_precision_vs_recall.png'),
-                          dpi=150, bbox_inches='tight')
-            print(f"[vis] Saved plot_precision_vs_recall.png")
-
-    # ================================================================
-    # PLOT 16: Per-seed accuracy variance (box per model x pipeline)
-    # ================================================================
-    fig16, axes16 = plt.subplots(1, n_datasets, figsize=(5 * n_datasets, 4), sharey=True)
-    if n_datasets == 1:
-        axes16 = [axes16]
-    fig16.suptitle('Per-Seed Accuracy Spread by Model',
-                   fontsize=13, fontweight='bold', y=1.02)
-    for ax, ds in zip(axes16, datasets):
-        sub = df_seed[df_seed['dataset'] == ds]
-        box_data, box_labels = [], []
-        for mdl in models:
-            vals = sub[sub['model'] == mdl]['accuracy'].dropna()
-            if len(vals) > 0:
-                box_data.append(vals.values)
-                box_labels.append(mdl)
-        if box_data:
-            bp = ax.boxplot(box_data, labels=box_labels, patch_artist=True,
-                            showmeans=True, meanprops=dict(marker='D',
-                            markerfacecolor='red', markersize=4))
-            for pi, patch in enumerate(bp['boxes']):
-                patch.set_facecolor(model_colors.get(box_labels[pi], '#cccccc'))
-                patch.set_alpha(0.6)
-            ax.set_xticklabels(box_labels, rotation=30, ha='right', fontsize=8)
-        ax.set_title(ds_short.get(ds, ds), fontsize=10, fontweight='bold')
-        ax.set_ylim(0, 1.05)
-        ax.grid(axis='y', alpha=0.3, linestyle='--')
-        ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
-    axes16[0].set_ylabel('Accuracy', fontsize=10)
-    fig16.tight_layout()
-    if save:
-        fig16.savefig(os.path.join(results_dir, 'plot_accuracy_variance.png'),
-                      dpi=150, bbox_inches='tight')
-        print(f"[vis] Saved plot_accuracy_variance.png")
-
-    # ================================================================
-    # PLOT 17: Memory usage by model (if available)
-    # ================================================================
-    if 'memory_delta_mb' in df_seed.columns:
-        fig17, ax17 = plt.subplots(figsize=(max(8, n_models * 1.5), 5))
-        fig17.suptitle('Memory Delta (MB) by Model (avg across all runs)',
-                       fontsize=13, fontweight='bold')
-        mem_means, mem_stds, mem_labels = [], [], []
-        for mdl in models:
-            vals = df_seed[df_seed['model'] == mdl]['memory_delta_mb'].dropna()
-            if len(vals) > 0:
-                mem_means.append(vals.mean())
-                mem_stds.append(vals.std())
-                mem_labels.append(mdl)
-        if mem_labels:
-            x17 = np.arange(len(mem_labels))
-            bars17 = ax17.bar(x17, mem_means, yerr=mem_stds, capsize=4,
-                              color=[model_colors.get(m, '#cccccc') for m in mem_labels],
-                              edgecolor='white', linewidth=0.5, alpha=0.85)
-            ax17.set_xticks(x17)
-            ax17.set_xticklabels(mem_labels, fontsize=10)
-            ax17.set_ylabel('Memory Delta (MB)', fontsize=10)
-            ax17.grid(axis='y', alpha=0.3, linestyle='--')
-            ax17.spines['top'].set_visible(False); ax17.spines['right'].set_visible(False)
-        fig17.tight_layout()
-        if save:
-            fig17.savefig(os.path.join(results_dir, 'plot_memory_usage.png'),
-                          dpi=150, bbox_inches='tight')
-            print(f"[vis] Saved plot_memory_usage.png")
-
-    # ================================================================
-    # Launch tabbed GUI with all figures
-    # ================================================================
-    tab_names = [
-        ('Accuracy Bars', 'plot_accuracy_bars.png'),
-        ('Accuracy Heatmap', 'plot_accuracy_heatmap.png'),
-        ('Radar Metrics', 'plot_radar_metrics.png'),
-        ('Training Time', 'plot_training_time.png'),
-        ('F1 by Pipeline', 'plot_f1_by_pipeline.png'),
-        ('ECE vs Accuracy', 'plot_ece_vs_accuracy.png'),
-        ('Best Ranking', 'plot_best_ranking.png'),
-        ('MCC vs Kappa', 'plot_mcc_vs_kappa.png'),
-        ('Confidence Dist', 'plot_confidence_dist.png'),
-        ('Metric Correlation', 'plot_metric_correlation.png'),
-        ('Balanced vs Acc', 'plot_balanced_vs_accuracy.png'),
-        ('Entropy vs ECE', 'plot_entropy_vs_ece.png'),
-        ('Full Results Table', 'plot_full_results_table.png'),
-        ('Log Loss Bars', 'plot_log_loss_bars.png'),
-        ('Precision vs Recall', 'plot_precision_vs_recall.png'),
-        ('Accuracy Variance', 'plot_accuracy_variance.png'),
-        ('Memory Usage', 'plot_memory_usage.png'),
-    ]
-    gui = PlotGUI("ML Pipeline Results", results_dir=results_dir)
-    open_figs = {fig.number: fig for fig in [plt.figure(n) for n in plt.get_fignums()]}
-    fig_list = list(open_figs.values())
-    for i, fig in enumerate(fig_list):
-        if i < len(tab_names):
-            name, fname = tab_names[i]
-        else:
-            name, fname = f"Plot {i+1}", f"plot_{i+1}.png"
-        gui.add_plot(name, fig, fname)
-    print(f"\n[vis] Launching GUI with {len(fig_list)} plots...")
-    gui.show()
 
 
 if __name__ == '__main__':
@@ -3753,29 +2426,13 @@ if __name__ == '__main__':
     parser.add_argument('--window', type=int, default=300, help='Window length')
     parser.add_argument('--sr', type=int, default=150, help='Guaranteed sample rate')
     parser.add_argument('--var-window', type=int, default=20, help='Rolling variance window')
-    parser.add_argument('--n-seeds', type=int, default=3,
-                        help='Number of random seeds for multi-run (default: 3)')
-    parser.add_argument('--cv', action='store_true',
-                        help='Use temporal forward-chaining cross-validation')
-    parser.add_argument('--n-folds', type=int, default=None,
-                        help='Number of CV folds (auto if not set)')
     parser.add_argument('--verbose', action='store_true')
-    parser.add_argument('--vis', action='store_true',
-                        help='Skip training — load saved CSV results and show plots/tables')
-    parser.add_argument('--results-dir', type=str, default=None,
-                        help='Directory containing result CSVs (default: ../results)')
     args = parser.parse_args()
 
-    if args.vis:
-        visualize_results(results_dir=args.results_dir, save=True)
-    else:
-        run_ml_pipeline_experiment(
-            data_root=os.path.abspath(args.data_root),
-            window_len=args.window,
-            guaranteed_sr=args.sr,
-            var_window=args.var_window,
-            verbose=args.verbose,
-            n_seeds=args.n_seeds,
-            cv_mode=args.cv,
-            n_folds=args.n_folds,
-        )
+    run_ml_pipeline_experiment(
+        data_root=os.path.abspath(args.data_root),
+        window_len=args.window,
+        guaranteed_sr=args.sr,
+        var_window=args.var_window,
+        verbose=args.verbose,
+    )

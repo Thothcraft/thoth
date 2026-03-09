@@ -17,6 +17,11 @@ import numpy as np
 import xgboost as xgb
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from utils import (compute_all_metrics, print_metrics_summary, set_global_seed,
+                  METRICS_CSV_FIELDS, aggregate_seed_metrics)
+
 
 # =============================================================================
 # FedXgbBagging Strategy (from Flower)
@@ -217,8 +222,14 @@ class FedXGBoostSimulator:
         for model_bytes, _ in client_models:
             self.global_model = aggregate_xgb_trees(self.global_model, model_bytes)
     
-    def _evaluate_global(self, X: np.ndarray, y: np.ndarray) -> dict:
-        """Evaluate global model on given data."""
+    def _evaluate_global(self, X: np.ndarray, y: np.ndarray, full_metrics=False) -> dict:
+        """Evaluate global model on given data.
+
+        Parameters
+        ----------
+        full_metrics : bool
+            If True, use compute_all_metrics for the full unified metric set.
+        """
         if self.global_model is None:
             return {'accuracy': 0.0, 'f1': 0.0}
         
@@ -232,14 +243,21 @@ class FedXGBoostSimulator:
         bst.load_model(bytearray(self.global_model))
         
         dtest = xgb.DMatrix(X)
-        y_pred = bst.predict(dtest)
+        y_pred_raw = bst.predict(dtest)
         
         # Handle multi-class vs binary
-        if len(y_pred.shape) > 1:
-            y_pred = np.argmax(y_pred, axis=1)
+        y_prob = None
+        if len(y_pred_raw.shape) > 1:
+            y_prob = y_pred_raw  # already (N, C) softmax probs
+            y_pred = np.argmax(y_pred_raw, axis=1)
         else:
-            y_pred = y_pred.astype(int)
+            y_pred = y_pred_raw.astype(int)
         
+        if full_metrics:
+            metrics = compute_all_metrics(y, y_pred, y_prob=y_prob, n_classes=num_classes)
+            metrics['predictions'] = y_pred
+            return metrics
+
         acc = accuracy_score(y, y_pred)
         f1 = f1_score(y, y_pred, average='weighted', zero_division=0)
         
@@ -354,20 +372,27 @@ class FedXGBoostSimulator:
         }
         
         if self.test_dataset is not None:
-            test_metrics = self._evaluate_global(self.test_dataset.X, self.test_dataset.y)
+            test_metrics = self._evaluate_global(
+                self.test_dataset.X, self.test_dataset.y, full_metrics=True)
+            # Merge all unified metrics into final_metrics
+            for k, v in test_metrics.items():
+                if k != 'predictions':
+                    final_metrics[k] = v
+            # Backward compat aliases
             final_metrics['test_accuracy'] = test_metrics['accuracy']
-            final_metrics['test_f1'] = test_metrics['f1']
-            
-            cm = confusion_matrix(self.test_dataset.y, test_metrics['predictions'])
-            final_metrics['confusion_matrix'] = cm.tolist()
+            final_metrics['test_f1'] = test_metrics['f1_weighted']
             
             self._log(f"Final Test Accuracy: {test_metrics['accuracy']:.4f}")
-            self._log(f"Final Test F1: {test_metrics['f1']:.4f}")
+            self._log(f"Final Test F1w:      {test_metrics['f1_weighted']:.4f}")
+            self._log(f"Final Cohen Kappa:   {test_metrics['cohen_kappa']:.4f}")
+            self._log(f"Final MCC:           {test_metrics['mcc']:.4f}")
+            if 'ece' in test_metrics:
+                self._log(f"Final ECE:           {test_metrics['ece']:.4f}")
             self._log(f"Total Trees: {final_metrics['final_num_trees']}")
             self._log(f"Total Time: {total_time:.2f}s")
             self._log(f"Confusion Matrix:")
-            for row in cm:
-                self._log(f"  {row.tolist()}")
+            for row in test_metrics['confusion_matrix']:
+                self._log(f"  {row}")
         
         self._log_separator()
         
@@ -604,48 +629,95 @@ class FedAvgMLPSimulator:
             eval_model.eval()
             with torch.no_grad():
                 xte = torch.FloatTensor(self.test_dataset.X).to(self.device)
-                preds = eval_model(xte).argmax(dim=1).cpu().numpy()
-            final['test_accuracy'] = accuracy_score(self.test_dataset.y, preds)
-            final['test_f1'] = f1_score(self.test_dataset.y, preds, average='weighted', zero_division=0)
-            cm = confusion_matrix(self.test_dataset.y, preds)
-            final['confusion_matrix'] = cm.tolist()
+                logits = eval_model(xte)
+                probs = torch.softmax(logits, dim=1).cpu().numpy()
+                preds = logits.argmax(dim=1).cpu().numpy()
+
+            metrics = compute_all_metrics(
+                self.test_dataset.y, preds, y_prob=probs, n_classes=n_classes)
+            for k, v in metrics.items():
+                final[k] = v
+            # Backward compat aliases
+            final['test_accuracy'] = metrics['accuracy']
+            final['test_f1'] = metrics['f1_weighted']
 
             self._log("=" * 70)
             self._log("FINAL RESULTS")
-            self._log(f"  Test Accuracy: {final['test_accuracy']:.4f}")
-            self._log(f"  Test F1:       {final['test_f1']:.4f}")
-            self._log(f"  Total Time:    {total_time:.2f}s")
+            self._log(f"  Test Accuracy:     {metrics['accuracy']:.4f}")
+            self._log(f"  Test F1 (weighted):{metrics['f1_weighted']:.4f}")
+            self._log(f"  Cohen's Kappa:     {metrics['cohen_kappa']:.4f}")
+            self._log(f"  MCC:               {metrics['mcc']:.4f}")
+            if 'ece' in metrics:
+                self._log(f"  ECE:               {metrics['ece']:.4f}")
+            self._log(f"  Total Time:        {total_time:.2f}s")
             self._log(f"  Confusion Matrix:")
-            for row in cm:
-                self._log(f"    {row.tolist()}")
+            for row in metrics['confusion_matrix']:
+                self._log(f"    {row}")
             self._log("=" * 70)
 
         return final
 
 
 if __name__ == '__main__':
-    import sys, os
+    import sys, os, csv, argparse
     sys.path.insert(0, os.path.dirname(__file__))
-    from utils import load_csi_datasets, FederatedPartitioner, TrainingDataset
+    from utils import (load_all_datasets, load_all_datasets_cv,
+                       FederatedPartitioner, TrainingDataset,
+                       METRICS_CSV_FIELDS)
 
-    TRAIN_DIR = '../../../wifi_sensing_data/thoth_data/train'
-    TEST_DIR  = '../../../wifi_sensing_data/thoth_data/test'
-    WINDOW_LEN = 1500
-    NUM_PARTITIONS = 5
-    ALPHA = 1e6  # IID partitioning (very high alpha -> uniform distribution)
-    NUM_ROUNDS = 20
-    LOCAL_EPOCHS = 5
+    parser = argparse.ArgumentParser(description='Federated Learning Experiments')
+    parser.add_argument('--data-root', type=str,
+                        default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                             '..', '..', '..', 'wifi_sensing_data'),
+                        help='Root folder containing dataset subfolders')
+    parser.add_argument('--window', type=int, default=300, help='Window length')
+    parser.add_argument('--sr', type=int, default=150, help='Guaranteed sample rate')
+    parser.add_argument('--num-partitions', type=int, default=5)
+    parser.add_argument('--alpha', type=float, default=1e6,
+                        help='Dirichlet alpha (high=IID)')
+    parser.add_argument('--num-rounds', type=int, default=20)
+    parser.add_argument('--local-epochs', type=int, default=5)
+    parser.add_argument('--cv', action='store_true',
+                        help='Use temporal forward-chaining cross-validation')
+    parser.add_argument('--n-folds', type=int, default=None,
+                        help='Number of CV folds (auto if not set)')
+    parser.add_argument('--verbose', action='store_true')
+    args = parser.parse_args()
 
     print("=" * 70)
-    print("FL EXPERIMENTS: FedXGBoost vs FedAvg")
+    print("FL EXPERIMENTS: FedXGBoost vs FedAvg  (unified metrics)")
     print("=" * 70)
 
-    combined_ds, test_ds = load_csi_datasets(TRAIN_DIR, TEST_DIR, WINDOW_LEN, verbose=False)
-    print(f"Train: {combined_ds.X.shape}, Test: {test_ds.X.shape}")
-    print(f"Classes: {combined_ds.num_classes}, Label map: {combined_ds.label_map}")
+    # Build dataset list: either fixed splits or temporal CV folds
+    if args.cv:
+        datasets_cv = load_all_datasets_cv(
+            os.path.abspath(args.data_root),
+            n_folds=args.n_folds,
+            window_len=args.window,
+            guaranteed_sr=args.sr,
+            pipeline_name='rolling_variance',
+            mode='flattened',
+            var_window=20,
+        )
+        ds_fold_list = []
+        for ds_name, folds in datasets_cv.items():
+            for fold_idx, train_ds, test_ds in folds:
+                ds_fold_list.append((ds_name, fold_idx, train_ds, test_ds))
+    else:
+        datasets = load_all_datasets(
+            os.path.abspath(args.data_root),
+            window_len=args.window,
+            guaranteed_sr=args.sr,
+            pipeline_name='rolling_variance',
+            mode='flattened',
+            var_window=20,
+        )
+        ds_fold_list = []
+        for ds_name, (train_ds, test_ds) in datasets.items():
+            ds_fold_list.append((ds_name, -1, train_ds, test_ds))
 
     xgb_params = {
-        'objective': 'multi:softmax',
+        'objective': 'multi:softprob',
         'eval_metric': 'mlogloss',
         'max_depth': 4,
         'eta': 0.1,
@@ -654,88 +726,87 @@ if __name__ == '__main__':
         'colsample_bytree': 0.8,
     }
 
-    # Time-series split helper
-    def time_split(ds, test_frac=0.2):
-        X, y = ds.X, ds.y
-        train_idx, test_idx = [], []
-        for cls in np.unique(y):
-            ci = np.where(y == cls)[0]
-            sp = len(ci) - max(1, int(len(ci) * test_frac))
-            train_idx.append(ci[:sp])
-            test_idx.append(ci[sp:])
-        tri = np.concatenate(train_idx)
-        tei = np.concatenate(test_idx)
-        # Build sub-datasets
-        train_sub = TrainingDataset.__new__(TrainingDataset)
-        train_sub.dataset_files = []
-        train_sub.feature_key = ds.feature_key
-        train_sub.label_map = ds.label_map
-        train_sub.balance = False
-        train_sub._X = X[tri]
-        train_sub._y = y[tri]
-        test_sub = TrainingDataset.__new__(TrainingDataset)
-        test_sub.dataset_files = []
-        test_sub.feature_key = ds.feature_key
-        test_sub.label_map = ds.label_map
-        test_sub.balance = False
-        test_sub._X = X[tei]
-        test_sub._y = y[tei]
-        return train_sub, test_sub
+    all_results = {}  # key -> metrics dict
 
-    all_results = {}
-
-    for exp_name, use_separate in [ ("B: Separate test set", True), ("A: Time-series split", False)]:
+    for ds_name, fold_idx, train_ds, test_ds in ds_fold_list:
+        fold_tag = f"fold{fold_idx}" if fold_idx >= 0 else "fixed"
         print(f"\n{'='*70}")
-        print(f"EXPERIMENT {exp_name}")
+        print(f"  Dataset: {ds_name}  |  Split: {fold_tag}")
+        print(f"  Train: {train_ds.X.shape}  Test: {test_ds.X.shape}")
         print(f"{'='*70}")
 
-        if use_separate:
-            train_data, eval_data = combined_ds, test_ds
-        else:
-            train_data, eval_data = time_split(combined_ds)
+        if test_ds.X.shape[0] == 0:
+            print(f"  SKIP - no test data")
+            continue
 
-        print(f"  Train: {train_data.X.shape[0]}, Test: {eval_data.X.shape[0]}")
+        set_global_seed(42)
 
         partitioner = FederatedPartitioner(
-            dataset=train_data, num_partitions=NUM_PARTITIONS, alpha=ALPHA, seed=42)
+            dataset=train_ds, num_partitions=args.num_partitions,
+            alpha=args.alpha, seed=42)
 
-        print(f"  Partitions ({NUM_PARTITIONS}, alpha={ALPHA}):")
-        for i in range(NUM_PARTITIONS):
+        print(f"  Partitions ({args.num_partitions}, alpha={args.alpha}):")
+        for i in range(args.num_partitions):
             p = partitioner.load_partition(i)
             unique, counts = np.unique(p.y, return_counts=True)
-            print(f"    Client {i}: {len(p.X)} samples, dist={dict(zip(unique.tolist(), counts.tolist()))}")
-
-        exp_res = {}
+            print(f"    Client {i}: {len(p.X)} samples, "
+                  f"dist={dict(zip(unique.tolist(), counts.tolist()))}")
 
         # --- FedXGBoost ---
-        print(f"\n  --- FedXGBoost (Bagging) ---")
+        print(f"\n  --- FedXGBoost (Bagging) [{fold_tag}] ---")
         sim_xgb = FedXGBoostSimulator(
-            partitioner=partitioner, num_rounds=NUM_ROUNDS, local_epochs=LOCAL_EPOCHS,
-            xgb_params=xgb_params, test_dataset=eval_data, verbose=True)
-        exp_res['FedXGB'] = sim_xgb.run()
+            partitioner=partitioner, num_rounds=args.num_rounds,
+            local_epochs=args.local_epochs,
+            xgb_params=xgb_params, test_dataset=test_ds, verbose=args.verbose)
+        xgb_res = sim_xgb.run()
+        xgb_res['dataset'] = ds_name
+        xgb_res['strategy'] = 'FedXGB'
+        xgb_res['fold'] = fold_idx
+        all_results[f"{ds_name}__{fold_tag}__FedXGB"] = xgb_res
 
         # --- FedAvg MLP ---
-        print(f"\n  --- FedAvg (MLP) ---")
+        print(f"\n  --- FedAvg (MLP) [{fold_tag}] ---")
         sim_avg = FedAvgMLPSimulator(
-            partitioner=partitioner, num_rounds=NUM_ROUNDS, local_epochs=LOCAL_EPOCHS,
+            partitioner=partitioner, num_rounds=args.num_rounds,
+            local_epochs=args.local_epochs,
             hidden_dims=[256, 128], dropout=0.3, lr=1e-3, batch_size=64,
-            test_dataset=eval_data, verbose=True)
-        exp_res['FedAvg'] = sim_avg.run()
+            test_dataset=test_ds, verbose=args.verbose)
+        avg_res = sim_avg.run()
+        avg_res['dataset'] = ds_name
+        avg_res['strategy'] = 'FedAvg'
+        avg_res['fold'] = fold_idx
+        all_results[f"{ds_name}__{fold_tag}__FedAvg"] = avg_res
 
-        all_results[exp_name] = exp_res
+    # ---- Final comparison (unified metrics) ----
+    print(f"\n{'='*160}")
+    print("FINAL FL COMPARISON: FedXGBoost vs FedAvg  (unified metrics)")
+    print(f"{'='*160}")
+    hdr = (f"{'Dataset':<25} {'Strategy':<10} | "
+           f"{'Acc':>6} {'BalAcc':>6} {'F1w':>6} {'Kappa':>6} {'MCC':>6} "
+           f"{'ECE':>6} | {'Time':>7}")
+    print(hdr)
+    print("-" * 120)
+    for key in sorted(all_results.keys()):
+        m = all_results[key]
+        ece_val = m.get('ece', float('nan'))
+        print(f"{m.get('dataset','?'):<25} {m.get('strategy','?'):<10} | "
+              f"{m.get('accuracy',0):>6.4f} {m.get('balanced_accuracy',0):>6.4f} "
+              f"{m.get('f1_weighted',0):>6.4f} {m.get('cohen_kappa',0):>6.4f} "
+              f"{m.get('mcc',0):>6.4f} {ece_val:>6.4f} | "
+              f"{m.get('total_time',0):>6.1f}s")
 
-    # ---- Final comparison ----
-    print(f"\n{'='*80}")
-    print("FINAL COMPARISON: FedXGBoost vs FedAvg")
-    print(f"{'='*80}")
-    print(f"{'Experiment':<30} | {'Strategy':<10} | {'Acc':>7} {'F1':>7} | {'Time':>7}")
-    print("-" * 75)
-    for exp_name, exp_res in all_results.items():
-        for strat, m in exp_res.items():
-            acc = m.get('test_accuracy', 0)
-            f1v = m.get('test_f1', 0)
-            t = m.get('total_time', 0)
-            print(f"{exp_name:<30} | {strat:<10} | {acc:>7.4f} {f1v:>7.4f} | {t:>6.1f}s")
+    # ---- Save results to CSV ----
+    results_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'results')
+    os.makedirs(results_dir, exist_ok=True)
+    csv_tag = '_cv' if args.cv else ''
+    csv_path = os.path.join(results_dir, f'fl_results{csv_tag}.csv')
+    fieldnames = ['dataset', 'strategy', 'fold'] + METRICS_CSV_FIELDS + ['total_time']
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+        writer.writeheader()
+        for key in sorted(all_results.keys()):
+            writer.writerow(all_results[key])
+    print(f"\n[info] Results saved to {os.path.abspath(csv_path)}")
 
     print(f"\n{'='*70}")
     print("FL experiments completed!")

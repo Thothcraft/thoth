@@ -14,10 +14,12 @@ Deep Learning components for CSI-based activity recognition.
 
 Contains:
 - MLP: Multi-layer perceptron classifier
+- Conv1DClassifier: Pure 1D-CNN (temporal convolution) classifier
+- ResMLPClassifier: MLP with residual skip connections
+- CnnLstmClassifier: CNN+BiLSTM sequential classifier
 - FeatureExtractor: Shared feature extraction network with BatchNorm
 - LabelClassifier: Classification head
 - AdaptiveModel: Domain adaptation model using AdaBN + Deep CORAL + TTA
-- TransformerClassifier: Transformer-based sequential classifier using nn.TransformerEncoder
 
 Adaptive Methods:
 1. AdaBN (Adaptive Batch Normalization):
@@ -75,274 +77,260 @@ class MLP(nn.Module):
 
 
 # =============================================================================
-# Transformer Classifier (Sequential / Patch-based)
+# 1D-CNN Classifier (Temporal Convolution Network)
 # =============================================================================
-class TransformerClassifier(nn.Module):
-    """Transformer-based classifier for sequential CSI data.
+class Conv1DClassifier(nn.Module):
+    """Pure 1D-CNN classifier for sequential CSI data.
 
-    Reshapes a flat input vector into a sequence of patches (sub-windows),
-    projects each patch into an embedding space, adds learnable positional
-    encodings, and processes the sequence with nn.TransformerEncoder.
-    Classification is performed on the [CLS] token output (prepended to
-    the sequence) or via mean-pooling, controlled by ``pool``.
-
-    This is compatible with the existing flat-tensor data pipeline:
-    input shape (batch_size, input_dim) is internally reshaped to
-    (batch_size, seq_len, patch_dim) where seq_len = input_dim // patch_dim.
+    Reshapes flat input (B, T*C) -> (B, C, T), applies stacked Conv1d blocks
+    with BatchNorm, ReLU, and MaxPool, then global average pools and classifies.
+    Very fast on CPU; captures local temporal patterns without recurrence or
+    attention.
 
     Parameters
     ----------
-    input_dim : int
-        Total number of input features (must be divisible by patch_dim).
+    n_subcarriers : int
+        Number of CSI subcarriers (channels). Default 52.
+    window_len : int
+        Temporal length of one window. Default 100.
     num_classes : int
         Number of output classes.
-    patch_dim : int
-        Size of each patch / sub-window. Default: 64
-    d_model : int
-        Transformer embedding dimension. Default: 128
-    nhead : int
-        Number of attention heads. Default: 4
-    num_layers : int
-        Number of TransformerEncoderLayers. Default: 2
-    dim_feedforward : int
-        Feed-forward dimension inside each encoder layer. Default: 256
+    conv_channels : list of int
+        Output channels for each Conv1d block.
+    kernel_size : int
+        Kernel size for all Conv1d layers. Default 7.
     dropout : float
-        Dropout probability. Default: 0.1
-    pool : str
-        Pooling strategy: 'cls' (learnable CLS token) or 'mean'. Default: 'cls'
-    use_whitening : bool
-        Whether to apply FeatureWhitening after the transformer pooling. Default: False
+        Dropout probability. Default 0.2.
     use_batch_norm : bool
-        Accepted for API compatibility with AdaptiveModel (unused). Default: True
+        Whether to use BatchNorm after each Conv1d. Default True.
+    use_whitening : bool
+        Whether to use FeatureWhitening after pooling. Default False.
 
     Example
     -------
-    >>> model = TransformerClassifier(input_dim=1024, num_classes=6)
-    >>> logits = model(torch.randn(32, 1024))
+    >>> model = Conv1DClassifier(52, 100, num_classes=6)
+    >>> logits = model(torch.randn(32, 5200))
     >>> logits.shape
     torch.Size([32, 6])
     """
 
-    def __init__(
-        self,
-        input_dim,
-        num_classes,
-        patch_dim=64,
-        d_model=128,
-        nhead=4,
-        num_layers=2,
-        dim_feedforward=256,
-        dropout=0.1,
-        pool='cls',
-        use_whitening=False,
-        use_batch_norm=True,
-    ):
+    def __init__(self, n_subcarriers=52, window_len=100, num_classes=7,
+                 conv_channels=None, kernel_size=7, dropout=0.2,
+                 use_batch_norm=True, use_whitening=False):
         super().__init__()
-        assert input_dim % patch_dim == 0, (
-            f"input_dim ({input_dim}) must be divisible by patch_dim ({patch_dim})"
-        )
-        self.input_dim = input_dim
-        self.patch_dim = patch_dim
-        self.seq_len = input_dim // patch_dim
-        self.d_model = d_model
-        self.pool = pool
+        if conv_channels is None:
+            conv_channels = [64, 128, 128]
+        self.n_subcarriers = n_subcarriers
+        self.window_len = window_len
         self.num_classes = num_classes
+
+        # Build Conv1d blocks
+        layers = []
+        in_ch = n_subcarriers
+        for out_ch in conv_channels:
+            layers.append(nn.Conv1d(in_ch, out_ch, kernel_size=kernel_size,
+                                    padding=kernel_size // 2))
+            if use_batch_norm:
+                layers.append(nn.BatchNorm1d(out_ch))
+            layers.append(nn.ReLU(inplace=True))
+            layers.append(nn.MaxPool1d(2))
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            in_ch = out_ch
+        self.convs = nn.Sequential(*layers)
+
+        repr_dim = conv_channels[-1]
+        self.pool_norm = nn.BatchNorm1d(repr_dim) if use_batch_norm else nn.Identity()
+
         self.use_whitening = use_whitening
-
-        # Linear projection from patch_dim -> d_model
-        self.patch_proj = nn.Linear(patch_dim, d_model)
-
-        # Learnable positional encoding (seq_len + 1 for CLS token)
-        max_len = self.seq_len + 1  # +1 for CLS token
-        self.pos_embedding = nn.Parameter(torch.randn(1, max_len, d_model) * 0.02)
-
-        # CLS token
-        if pool == 'cls':
-            self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
-
-        # Layer norm before transformer (pre-norm stabilization)
-        self.input_norm = nn.LayerNorm(d_model)
-
-        # Transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            activation='gelu',
-            batch_first=True,
-            norm_first=True,
-        )
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=num_layers,
-        )
-
-        # Optional feature whitening (matches AdaptiveModel API)
         if use_whitening:
-            self.whitening = FeatureWhitening(d_model)
+            self.whitening = FeatureWhitening(repr_dim)
 
         # Classification head
-        self.head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, num_classes),
+        self.label_classifier = nn.Sequential(
+            nn.Linear(repr_dim, repr_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(repr_dim // 2, num_classes),
         )
-
-        # Alias for AdaptiveModel API compatibility (train_model uses model.label_classifier)
-        self.label_classifier = self.head
-
+        self._repr_dim = repr_dim
         self._init_weights()
 
     def _init_weights(self):
-        """Xavier-uniform initialization for linear layers."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def extract_features(self, x):
+        B = x.size(0)
+        # (B, T*C) -> (B, C, T)
+        x = x.view(B, self.window_len, self.n_subcarriers).permute(0, 2, 1)
+        x = self.convs(x)
+        # Global average pooling over time
+        z = x.mean(dim=2)
+        z = self.pool_norm(z)
+        if self.use_whitening:
+            z = self.whitening(z)
+        return z
+
+    def forward(self, x):
+        z = self.extract_features(x)
+        return self.label_classifier(z)
+
+    def predict(self, x, batch_size=256):
+        if x.size(0) <= batch_size:
+            return self.forward(x)
+        parts = [self.forward(x[i:i+batch_size]) for i in range(0, x.size(0), batch_size)]
+        return torch.cat(parts, 0)
+
+
+def make_conv1d_model(n_subcarriers, window_len, n_classes, config='small',
+                      use_batch_norm=True, use_whitening=False):
+    """Factory for Conv1DClassifier with preset configs."""
+    configs = {
+        'small': dict(conv_channels=[32, 64],    kernel_size=5, dropout=0.2),
+        'mid':   dict(conv_channels=[64, 128],    kernel_size=7, dropout=0.25),
+        'large': dict(conv_channels=[64, 128, 256], kernel_size=7, dropout=0.3),
+    }
+    cfg = configs.get(config, configs['small'])
+    return Conv1DClassifier(
+        n_subcarriers=n_subcarriers, window_len=window_len,
+        num_classes=n_classes, use_batch_norm=use_batch_norm,
+        use_whitening=use_whitening, **cfg,
+    )
+
+
+# =============================================================================
+# Residual MLP Classifier (MLP with skip connections)
+# =============================================================================
+class _ResBlock(nn.Module):
+    """Single residual block: Linear -> BN -> ReLU -> Dropout -> Linear -> BN + skip."""
+
+    def __init__(self, dim, dropout=0.2, use_batch_norm=True):
+        super().__init__()
+        layers = [nn.Linear(dim, dim)]
+        if use_batch_norm:
+            layers.append(nn.BatchNorm1d(dim))
+        layers.append(nn.ReLU(inplace=True))
+        if dropout > 0:
+            layers.append(nn.Dropout(dropout))
+        layers.append(nn.Linear(dim, dim))
+        if use_batch_norm:
+            layers.append(nn.BatchNorm1d(dim))
+        self.block = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return F.relu(x + self.block(x))
+
+
+class ResMLPClassifier(nn.Module):
+    """Residual MLP classifier for CSI activity recognition.
+
+    Projects input to a hidden dimension, passes through N residual blocks
+    (each with skip connections), then classifies. Skip connections enable
+    deeper networks without degradation — isolates the value of residual
+    learning compared to the vanilla MLP baseline.
+
+    Parameters
+    ----------
+    input_dim : int
+        Number of input features (flattened window).
+    num_classes : int
+        Number of output classes.
+    hidden_dim : int
+        Width of residual blocks. Default 256.
+    num_blocks : int
+        Number of residual blocks. Default 3.
+    dropout : float
+        Dropout probability. Default 0.2.
+    use_batch_norm : bool
+        Whether to use BatchNorm inside residual blocks. Default True.
+    use_whitening : bool
+        Whether to use FeatureWhitening after residual blocks. Default False.
+
+    Example
+    -------
+    >>> model = ResMLPClassifier(input_dim=5200, num_classes=6)
+    >>> logits = model(torch.randn(32, 5200))
+    >>> logits.shape
+    torch.Size([32, 6])
+    """
+
+    def __init__(self, input_dim, num_classes, hidden_dim=256, num_blocks=3,
+                 dropout=0.2, use_batch_norm=True, use_whitening=False):
+        super().__init__()
+        self.num_classes = num_classes
+
+        # Input projection
+        proj_layers = [nn.Linear(input_dim, hidden_dim)]
+        if use_batch_norm:
+            proj_layers.append(nn.BatchNorm1d(hidden_dim))
+        proj_layers.append(nn.ReLU(inplace=True))
+        self.input_proj = nn.Sequential(*proj_layers)
+
+        # Residual blocks
+        self.res_blocks = nn.Sequential(
+            *[_ResBlock(hidden_dim, dropout=dropout, use_batch_norm=use_batch_norm)
+              for _ in range(num_blocks)]
+        )
+
+        self.use_whitening = use_whitening
+        if use_whitening:
+            self.whitening = FeatureWhitening(hidden_dim)
+
+        # Classification head
+        self.label_classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, num_classes),
+        )
+        self._repr_dim = hidden_dim
+        self._init_weights()
+
+    def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def forward(self, x):
-        """Forward pass.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Flat input of shape (batch_size, input_dim).
-
-        Returns
-        -------
-        torch.Tensor
-            Logits of shape (batch_size, num_classes).
-        """
-        B = x.size(0)
-
-        # Reshape flat vector into patch sequence: (B, seq_len, patch_dim)
-        x = x.view(B, self.seq_len, self.patch_dim)
-
-        # Project patches to d_model
-        x = self.patch_proj(x)  # (B, seq_len, d_model)
-
-        if self.pool == 'cls':
-            # Prepend CLS token
-            cls_tokens = self.cls_token.expand(B, -1, -1)  # (B, 1, d_model)
-            x = torch.cat([cls_tokens, x], dim=1)  # (B, seq_len+1, d_model)
-
-        # Add positional encoding
-        x = x + self.pos_embedding[:, :x.size(1), :]
-
-        # Pre-norm + transformer encoder
-        x = self.input_norm(x)
-        x = self.transformer_encoder(x)  # (B, seq_len(+1), d_model)
-
-        # Pool
-        if self.pool == 'cls':
-            x = x[:, 0]  # CLS token output: (B, d_model)
-        else:
-            x = x.mean(dim=1)  # Mean pool: (B, d_model)
-
-        if self.use_whitening:
-            x = self.whitening(x)
-
-        return self.head(x)
-
     def extract_features(self, x):
-        """Extract features before the classification head.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Flat input of shape (batch_size, input_dim).
-
-        Returns
-        -------
-        torch.Tensor
-            Features of shape (batch_size, d_model).
-        """
-        B = x.size(0)
-        x = x.view(B, self.seq_len, self.patch_dim)
-        x = self.patch_proj(x)
-
-        if self.pool == 'cls':
-            cls_tokens = self.cls_token.expand(B, -1, -1)
-            x = torch.cat([cls_tokens, x], dim=1)
-
-        x = x + self.pos_embedding[:, :x.size(1), :]
-        x = self.input_norm(x)
-        x = self.transformer_encoder(x)
-
-        if self.pool == 'cls':
-            x = x[:, 0]
-        else:
-            x = x.mean(dim=1)
-
+        x = self.input_proj(x)
+        x = self.res_blocks(x)
         if self.use_whitening:
             x = self.whitening(x)
         return x
 
-    def predict(self, x, batch_size=64):
-        """Predict labels (for inference, matches AdaptiveModel API).
+    def forward(self, x):
+        z = self.extract_features(x)
+        return self.label_classifier(z)
 
-        Uses batched forward passes to avoid OOM on large inputs.
-        """
+    def predict(self, x, batch_size=256):
         if x.size(0) <= batch_size:
             return self.forward(x)
-        outputs = []
-        for i in range(0, x.size(0), batch_size):
-            outputs.append(self.forward(x[i:i+batch_size]))
-        return torch.cat(outputs, dim=0)
+        parts = [self.forward(x[i:i+batch_size]) for i in range(0, x.size(0), batch_size)]
+        return torch.cat(parts, 0)
 
 
-def make_transformer_model(n_features, n_classes, config='default',
-                          use_batch_norm=True, use_whitening=False):
-    """Factory function to create TransformerClassifier with preset configurations.
-
-    Parameters
-    ----------
-    n_features : int
-        Number of input features (must be divisible by patch_dim in the config).
-    n_classes : int
-        Number of activity classes.
-    config : str
-        Configuration preset: 'default', 'small', 'large'.
-
-    Returns
-    -------
-    TransformerClassifier
-    """
+def make_resmlp_model(n_features, n_classes, config='small',
+                      use_batch_norm=True, use_whitening=False):
+    """Factory for ResMLPClassifier with preset configs."""
     configs = {
-        'default': {
-            'patch_dim': 800,
-            'd_model': 128,
-            'nhead': 4,
-            'num_layers': 2,
-            'dim_feedforward': 256,
-            'dropout': 0.1,
-        },
-        'small': {
-            'patch_dim': 520,
-            'd_model': 64,
-            'nhead': 2,
-            'num_layers': 1,
-            'dim_feedforward': 128,
-            'dropout': 0.1,
-        },
-        'large': {
-            'patch_dim': 1200,
-            'd_model': 256,
-            'nhead': 8,
-            'num_layers': 4,
-            'dim_feedforward': 512,
-            'dropout': 0.15,
-        },
+        'small': dict(hidden_dim=256,  num_blocks=2, dropout=0.2),
+        'mid':   dict(hidden_dim=512,  num_blocks=3, dropout=0.25),
+        'large': dict(hidden_dim=1024, num_blocks=4, dropout=0.3),
     }
-
-    cfg = configs.get(config, configs['default'])
-    return TransformerClassifier(
-        input_dim=n_features,
-        num_classes=n_classes,
-        use_whitening=use_whitening,
-        use_batch_norm=use_batch_norm,
-        **cfg,
+    cfg = configs.get(config, configs['small'])
+    return ResMLPClassifier(
+        input_dim=n_features, num_classes=n_classes,
+        use_batch_norm=use_batch_norm, use_whitening=use_whitening, **cfg,
     )
 
 
@@ -977,7 +965,15 @@ def train_model(model, X_source, y_source, X_target, X_test, y_test,
     source_ds = TensorDataset(torch.FloatTensor(X_source), torch.LongTensor(y_source))
     source_loader = DataLoader(source_ds, batch_size=batch_size, shuffle=True, drop_last=True)
 
-    criterion = nn.CrossEntropyLoss()
+    # Class-weighted loss for imbalanced data
+    import numpy as _np
+    _classes, _counts = _np.unique(y_source, return_counts=True)
+    _weights = 1.0 / _counts.astype(_np.float64)
+    _weights = _weights / _weights.sum() * len(_classes)  # normalize so mean=1
+    _weight_tensor = torch.zeros(int(_classes.max()) + 1, device=device)
+    for _c, _w in zip(_classes, _weights):
+        _weight_tensor[int(_c)] = _w
+    criterion = nn.CrossEntropyLoss(weight=_weight_tensor.float())
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     any_coral = use_coral or use_conditional_coral
@@ -995,7 +991,7 @@ def train_model(model, X_source, y_source, X_target, X_test, y_test,
     X_test_tensor = torch.FloatTensor(X_test).to(device)
     y_test_tensor = torch.LongTensor(y_test).to(device)
 
-    t0 = time.time()
+    t0 = time.process_time()
     report_interval = max(1, epochs // 10)
 
     for epoch in range(epochs):
@@ -1062,7 +1058,7 @@ def train_model(model, X_source, y_source, X_target, X_test, y_test,
                 msg += f" | CORAL: {total_coral_loss/total:.6f}"
             print(msg)
 
-    train_time = round(time.time() - t0, 2)
+    train_time = round(time.process_time() - t0, 2)
     model.eval()
 
     if verbose:
@@ -1378,227 +1374,1330 @@ def _print_dl_metrics(name, m, label_map=None):
             print(f"    {rname:<10}" + '  '.join(f'{v:>6}' for v in row))
 
 
-if __name__ == '__main__':
-    import sys, os
-    sys.path.insert(0, os.path.dirname(__file__))
+# =============================================================================
+# CNN+LSTM Classifier (wraps SeqEncoder for the DL experiment)
+# =============================================================================
+class CnnLstmClassifier(nn.Module):
+    """CNN+LSTM classifier for sequential CSI data.
+
+    Reshapes flat input (B, T*C) -> (B, T, C), applies Conv1D blocks then
+    Bi-LSTM, pools, and classifies.  Uses the SeqEncoder from seq.py internally.
+
+    Parameters
+    ----------
+    n_subcarriers : int
+        Number of CSI subcarriers (channels). Default 52.
+    window_len : int
+        Temporal length of one window. Default 100.
+    num_classes : int
+        Number of output classes.
+    conv_channels : list
+        Channel sizes for Conv1D blocks.
+    lstm_hidden : int
+        LSTM hidden size per direction.
+    lstm_layers : int
+        Number of stacked LSTM layers.
+    dropout : float
+        Dropout probability.
+    use_batch_norm : bool
+        Accepted for API compat (Conv1D blocks always use BN). Default True.
+    use_whitening : bool
+        Whether to use FeatureWhitening after pooling. Default False.
+    """
+
+    def __init__(self, n_subcarriers=52, window_len=100, num_classes=7,
+                 conv_channels=None, lstm_hidden=64, lstm_layers=1,
+                 dropout=0.2, use_batch_norm=True, use_whitening=False):
+        super().__init__()
+        if conv_channels is None:
+            conv_channels = [32, 64]
+        self.n_subcarriers = n_subcarriers
+        self.window_len = window_len
+        self.num_classes = num_classes
+
+        # Conv1D blocks
+        layers = []
+        in_ch = n_subcarriers
+        for out_ch in conv_channels:
+            layers.append(nn.Conv1d(in_ch, out_ch, kernel_size=5, padding=2))
+            if use_batch_norm:
+                layers.append(nn.BatchNorm1d(out_ch))
+            layers.append(nn.ReLU(inplace=True))
+            layers.append(nn.MaxPool1d(2))
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            in_ch = out_ch
+        self.convs = nn.Sequential(*layers)
+
+        # Compute temporal length after conv pooling
+        t = window_len
+        for _ in conv_channels:
+            t = t // 2
+        self._conv_time = t
+        self._conv_out_ch = conv_channels[-1]
+
+        # Bi-LSTM
+        self.lstm = nn.LSTM(
+            input_size=self._conv_out_ch,
+            hidden_size=lstm_hidden,
+            num_layers=lstm_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout if lstm_layers > 1 else 0.0,
+        )
+
+        repr_dim = lstm_hidden * 2
+        self.pool_norm = nn.BatchNorm1d(repr_dim) if use_batch_norm else nn.Identity()
+
+        self.use_whitening = use_whitening
+        if use_whitening:
+            self.whitening = FeatureWhitening(repr_dim)
+
+        # Classification head
+        self.label_classifier = nn.Sequential(
+            nn.Linear(repr_dim, repr_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(repr_dim // 2, num_classes),
+        )
+
+        self._repr_dim = repr_dim
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def extract_features(self, x):
+        B = x.size(0)
+        x = x.view(B, self.window_len, self.n_subcarriers).permute(0, 2, 1)
+        x = self.convs(x)
+        x = x.permute(0, 2, 1)
+        x, _ = self.lstm(x)
+        z = x.mean(dim=1)
+        z = self.pool_norm(z)
+        if self.use_whitening:
+            z = self.whitening(z)
+        return z
+
+    def forward(self, x):
+        z = self.extract_features(x)
+        return self.label_classifier(z)
+
+    def predict(self, x, batch_size=256):
+        if x.size(0) <= batch_size:
+            return self.forward(x)
+        parts = [self.forward(x[i:i+batch_size]) for i in range(0, x.size(0), batch_size)]
+        return torch.cat(parts, 0)
+
+
+def make_cnn_lstm_model(n_subcarriers, window_len, n_classes, config='small',
+                        use_batch_norm=True, use_whitening=False):
+    """Factory for CnnLstmClassifier with preset configs."""
+    configs = {
+        'small': dict(conv_channels=[32, 64], lstm_hidden=64, lstm_layers=1, dropout=0.2),
+        'mid':   dict(conv_channels=[64, 128], lstm_hidden=128, lstm_layers=2, dropout=0.25),
+        'large': dict(conv_channels=[64, 128, 256], lstm_hidden=256, lstm_layers=2, dropout=0.3),
+    }
+    cfg = configs.get(config, configs['small'])
+    return CnnLstmClassifier(
+        n_subcarriers=n_subcarriers, window_len=window_len,
+        num_classes=n_classes, use_batch_norm=use_batch_norm,
+        use_whitening=use_whitening, **cfg,
+    )
+
+
+# =============================================================================
+# MLP factory with small/mid/large configs
+# =============================================================================
+def make_mlp_model(n_features, n_classes, config='small',
+                   use_batch_norm=True, use_whitening=False):
+    """Factory for MLP with preset configs. Input is flattened."""
+    configs = {
+        'small': dict(hidden_dims=[256, 128], dropout=0.2),
+        'mid':   dict(hidden_dims=[512, 256, 128], dropout=0.3),
+        'large': dict(hidden_dims=[1024, 512, 256, 128], dropout=0.4),
+    }
+    cfg = configs.get(config, configs['small'])
+    return AdaptiveModel(
+        input_dim=n_features,
+        feature_dims=cfg['hidden_dims'][:-1],
+        feature_output_dim=cfg['hidden_dims'][-1],
+        label_hidden_dims=[cfg['hidden_dims'][-1] // 2],
+        num_classes=n_classes,
+        dropout=cfg['dropout'],
+        use_batch_norm=use_batch_norm,
+        use_whitening=use_whitening,
+    )
+
+
+# =============================================================================
+# DL Experiment: 5 conditions x 4 architectures x 4 datasets x 2 pipelines
+# =============================================================================
+def fewshot_finetune(model, X_fs, y_fs, epochs=20, lr=1e-5, batch_size=32):
+    """Few-shot fine-tuning: freeze feature extractor, train classifier only.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Must have extract_features() and label_classifier attributes.
+    X_fs, y_fs : np.ndarray
+        Few-shot labeled data (from beginning of test set).
+    epochs : int
+    lr : float
+        Reduced learning rate for fine-tuning.
+    batch_size : int
+    """
+    import copy
+    from torch.utils.data import DataLoader, TensorDataset
+
+    device = next(model.parameters()).device
+    model = copy.deepcopy(model).to(device)
+
+    # Freeze everything except the classifier head
+    for p in model.parameters():
+        p.requires_grad_(False)
+    for p in model.label_classifier.parameters():
+        p.requires_grad_(True)
+
+    fs_ds = TensorDataset(torch.FloatTensor(X_fs), torch.LongTensor(y_fs))
+    fs_loader = DataLoader(fs_ds, batch_size=min(batch_size, len(X_fs)),
+                           shuffle=True, drop_last=False)
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+    criterion = nn.CrossEntropyLoss()
+
+    model.train()
+    for _ in range(epochs):
+        for xb, yb in fs_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            loss = criterion(model(xb), yb)
+            loss.backward()
+            optimizer.step()
+
+    # Unfreeze all for subsequent use
+    for p in model.parameters():
+        p.requires_grad_(True)
+    model.eval()
+    return model
+
+
+def run_dl_experiment(data_root, window_len=100, guaranteed_sr=100,
+                      epochs=50, lr=1e-3, model_size='small', verbose=True,
+                      n_seeds=3, cv_mode=False, n_folds=None):
+    """Run DL experiment: noBN/BN/BN+Whiten/FS20perclass/CORAL x 4 models x 4 datasets x 2 pipelines.
+
+    Each configuration is run ``n_seeds`` times with different random seeds
+    to produce mean ± std statistics suitable for research publication.
+
+    When ``cv_mode=True``, temporal forward-chaining cross-validation is
+    used instead of the fixed metadata train/test split.  Metrics are
+    collected per fold × seed, then aggregated for final mean ± std.
+
+    Parameters
+    ----------
+    data_root : str
+        Root folder containing the 4 dataset subfolders.
+    window_len : int
+        Window length. Default 100.
+    guaranteed_sr : int
+        Resampling rate. Default 100.
+    epochs : int
+        Training epochs. Default 50.
+    lr : float
+        Learning rate. Default 1e-3.
+    model_size : str
+        'small', 'mid', or 'large'. Default 'small'.
+    verbose : bool
+    n_seeds : int
+        Number of random seeds for multi-seed runs. Default 3.
+    cv_mode : bool
+        Use temporal forward-chaining cross-validation. Default False.
+    n_folds : int or None
+        Number of CV folds (None = auto). Only used when cv_mode=True.
+
+    Returns
+    -------
+    dict : nested results with per-seed and aggregated metrics
+    """
+    import sys, os, time, copy, traceback
     import numpy as np
-    from utils import load_csi_datasets
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from utils import (load_all_datasets, load_all_datasets_cv,
+                       set_global_seed,
+                       compute_all_metrics as _compute_all_metrics,
+                       aggregate_seed_metrics, print_metrics_summary,
+                       METRICS_CSV_FIELDS)
 
-    TRAIN_DIR = '../../../wifi_sensing_data/har_data/train'
-    TRAIN_DIR2 = '../../../wifi_sensing_data/har_data/train_2'
-    TEST_DIR = '../../../wifi_sensing_data/har_data/test'
-    WINDOW_LEN = 2000
-    EPOCHS = 100
-    LRS = [1e-4]
+    N_SUBCARRIERS = 52
+    SEEDS = list(range(42, 42 + n_seeds))
 
-    print("=" * 80)
-    print("DL EXPERIMENTS: Comprehensive Domain Adaptation Comparison")
-    print(f"  Epochs: {EPOCHS}, Learning rates: {LRS}")
-    print("  5 unique trainings × 2 splits × 2 LRs = 20 training runs")
-    print("  + 3 adaptation variants on shared model = 9 results per combo")
-    print("=" * 80)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    combined_ds, test_ds = load_csi_datasets([TRAIN_DIR, TRAIN_DIR2], [TEST_DIR], WINDOW_LEN, verbose=False)
-    n_features = combined_ds.X.shape[1]
-    n_classes  = combined_ds.num_classes
+    # Conditions to compare
+    CONDITIONS = ['noBN', 'BN', 'BN+Whiten', 'FS20perclass', 'CORAL']
 
-    print(f"Train: {combined_ds.X.shape}, Test: {test_ds.X.shape}")
-    print(f"Features: {n_features}, Classes: {n_classes}")
-    print(f"Label map: {combined_ds.label_map}")
+    # Model architectures
+    ARCHITECTURES = ['MLP', 'ResMLP', 'Conv1D', 'CNN_LSTM']
 
-    idx2name = {v: k for k, v in combined_ds.label_map.items()}
+    # Pipelines to compare: amplitude vs rolling_variance (var_window=20, same as viewshape)
+    PIPELINES = [
+        ('amplitude',        dict(pipeline_name='amplitude', var_window=0)),
+        ('rolling_variance', dict(pipeline_name='rolling_variance', var_window=20)),
+    ]
 
-    def time_split(X, y, test_frac=0.2):
-        train_idx, test_idx = [], []
-        for cls in np.unique(y):
-            ci = np.where(y == cls)[0]
-            sp = len(ci) - max(1, int(len(ci) * test_frac))
-            train_idx.append(ci[:sp])
-            test_idx.append(ci[sp:])
-        return np.concatenate(train_idx), np.concatenate(test_idx)
-
-    def sample_fewshot(X, y, n_per_class):
-        idxs = []
-        for cls in np.unique(y):
-            ci = np.where(y == cls)[0]
-            k = min(n_per_class, len(ci))
-            idxs.append(np.random.choice(ci, k, replace=False))
-        return X[np.concatenate(idxs)], y[np.concatenate(idxs)]
-
-    def sample_fewshot_pct(X, y, pct):
-        idxs = []
-        for cls in np.unique(y):
-            ci = np.where(y == cls)[0]
-            k = max(1, int(len(ci) * pct))
-            idxs.append(np.random.choice(ci, k, replace=False))
-        return X[np.concatenate(idxs)], y[np.concatenate(idxs)]
-
+    # all_results[run_key] = {'seeds': [metrics_per_seed...], 'agg': aggregated}
     all_results = {}
 
-    for split_name, use_test_ds in [ ("Separate", True), ("Split", False)]:
-        for lr in LRS:
-            run_key = f"{split_name}_lr{lr}"
-            print(f"\n{'='*80}")
-            print(f"EXPERIMENT: {split_name} | LR={lr} | Epochs={EPOCHS}")
-            print(f"{'='*80}")
+    for pipe_name, pipe_kwargs in PIPELINES:
+        print(f"\n{'#'*80}")
+        print(f"# PIPELINE: {pipe_name}")
+        print(f"{'#'*80}")
 
-            if use_test_ds:
-                X_tr, y_tr = combined_ds.X, combined_ds.y
-                X_te, y_te = test_ds.X, test_ds.y
-            else:
-                tri, tei = time_split(combined_ds.X, combined_ds.y)
-                X_tr, y_tr = combined_ds.X[tri], combined_ds.y[tri]
-                X_te, y_te = combined_ds.X[tei], combined_ds.y[tei]
+        if cv_mode:
+            try:
+                datasets_cv = load_all_datasets_cv(
+                    data_root, n_folds=n_folds, window_len=window_len,
+                    guaranteed_sr=guaranteed_sr, mode='flattened',
+                    stride=None, verbose=False, **pipe_kwargs,
+                )
+            except Exception as e:
+                print(f"  ERROR loading CV datasets for pipeline '{pipe_name}': {e}")
+                traceback.print_exc()
+                continue
+            ds_fold_list = []
+            for ds_name, folds in datasets_cv.items():
+                for fold_idx, train_ds, test_ds in folds:
+                    ds_fold_list.append((ds_name, fold_idx, train_ds, test_ds))
+        else:
+            try:
+                datasets = load_all_datasets(
+                    data_root, window_len=window_len, guaranteed_sr=guaranteed_sr,
+                    mode='flattened', stride=None, verbose=False, **pipe_kwargs,
+                )
+            except Exception as e:
+                print(f"  ERROR loading datasets for pipeline '{pipe_name}': {e}")
+                traceback.print_exc()
+                continue
+            ds_fold_list = []
+            for ds_name, (train_ds, test_ds) in datasets.items():
+                ds_fold_list.append((ds_name, -1, train_ds, test_ds))
 
+        for ds_name, fold_idx, train_ds, test_ds in ds_fold_list:
+            fold_tag = f"fold{fold_idx}" if fold_idx >= 0 else "fixed"
+            print(f"\n{'='*70}")
+            print(f"  Dataset: {ds_name}  |  Pipeline: {pipe_name}  |  Split: {fold_tag}")
+            print(f"  Train: {train_ds.X.shape}  Test: {test_ds.X.shape}  "
+                  f"Classes: {train_ds.num_classes} {train_ds.labels}")
+            print(f"{'='*70}")
+
+            if test_ds.X.shape[0] == 0:
+                print(f"  SKIP - no test data")
+                continue
+
+            n_features = train_ds.X.shape[1]
+            n_classes = train_ds.num_classes
+            X_tr, y_tr = train_ds.X, train_ds.y
+            X_te, y_te = test_ds.X, test_ds.y
             X_target = X_te
-            print(f"  Train: {X_tr.shape[0]}, Test/Target: {X_te.shape[0]}")
 
-            np.random.seed(42)
-            X_fs10, y_fs10 = sample_fewshot(X_te, y_te, n_per_class=10)
-            X_fs10pct, y_fs10pct = sample_fewshot_pct(X_te, y_te, pct=0.10)
-            print(f"  Few-shot 10/class: {len(X_fs10)} samples")
-            print(f"  Few-shot 10%/class: {len(X_fs10pct)} samples")
+            # Few-shot: 20 per class from BEGINNING of test set
+            X_fs, y_fs = test_ds.get_fewshot(n_per_class=20)
+            print(f"  Few-shot: {X_fs.shape[0]} samples (20/class from test start)")
 
-            run_results = {}
-            train_kw = dict(epochs=EPOCHS, lr=lr, coral_weight=0.5,
-                            confidence_threshold=0.8, verbose=True)
+            for arch_name in ARCHITECTURES:
+              for cond_name in CONDITIONS:
+                run_key = f"{ds_name}__{pipe_name}__{arch_name}__{cond_name}"
+                print(f"\n    {'='*60}")
+                print(f"    {arch_name} | {cond_name} | {ds_name} | {pipe_name}")
+                print(f"    {'='*60}")
 
-            # Few-shot adaptation configs applied to every trained model
-            fs_variants = [
-                ('',       {}),
-                ('+FS10',  dict(X_target_labeled=X_fs10, y_target_labeled=y_fs10,
-                                fewshot_epochs=20, fewshot_lr=1e-4)),
-                # ('+FS10%', dict(X_target_labeled=X_f54rt4wesssssssssssssfewshot_lr=1e-4)),
-            ]
+                # Determine model kwargs from condition
+                use_bn = (cond_name != 'noBN')
+                use_coral = (cond_name == 'CORAL')
+                use_whitening = (cond_name == 'BN+Whiten')
 
-            # Define training configs: (label, model_kwargs, train_kwargs)
-            train_configs = [
-                # ('NoBN',       dict(use_batch_norm=False), {}),
-                ('BN',         {},                         {}),
-                # ('BN+GlobCRL', {},                         dict(use_coral=True)),
-                ('BN+CondCRL', {},                         dict(use_conditional_coral=True)),
-                ('BN+Whiten',  dict(use_whitening=True),   {}),
-                ('BN+CC+W',    dict(use_whitening=True),   dict(use_conditional_coral=True)),
-            ]
+                seed_metrics_list = []
 
-            n_train = len(train_configs)
-            trained_models = {}
+                for seed_idx, seed in enumerate(SEEDS):
+                    set_global_seed(seed)
+                    print(f"      [seed {seed}] ({seed_idx+1}/{n_seeds})")
 
-            for ti, (tname, model_kw, extra_train_kw) in enumerate(train_configs):
-                print(f"\n  {'='*60}")
-                print(f"  Training {ti+1}/{n_train}: {tname}")
-                print(f"  {'='*60}")
+                    try:
+                        if arch_name == 'MLP':
+                            model = make_mlp_model(
+                                n_features, n_classes, config=model_size,
+                                use_batch_norm=use_bn, use_whitening=use_whitening)
+                        elif arch_name == 'ResMLP':
+                            model = make_resmlp_model(
+                                n_features, n_classes, config=model_size,
+                                use_batch_norm=use_bn, use_whitening=use_whitening)
+                        elif arch_name == 'Conv1D':
+                            model = make_conv1d_model(
+                                N_SUBCARRIERS, window_len, n_classes,
+                                config=model_size, use_batch_norm=use_bn,
+                                use_whitening=use_whitening)
+                        elif arch_name == 'CNN_LSTM':
+                            model = make_cnn_lstm_model(
+                                N_SUBCARRIERS, window_len, n_classes,
+                                config=model_size, use_batch_norm=use_bn,
+                                use_whitening=use_whitening)
+                        else:
+                            continue
+                    except Exception as e:
+                        print(f"      MODEL CREATION ERROR: {e}")
+                        traceback.print_exc()
+                        continue
 
-                mdl = make_adaptive_model(n_features, n_classes, config='small', **model_kw)
-                merged_kw = {**train_kw, **extra_train_kw}
-                trained_mdl, info = train_model(
-                    mdl, X_tr, y_tr, X_target, X_te, y_te, **merged_kw)
-                trained_models[tname] = (trained_mdl, info)
+                    # Train
+                    try:
+                        trained_model, info = train_model(
+                            model, X_tr, y_tr, X_target, X_te, y_te,
+                            epochs=epochs, lr=lr, batch_size=64,
+                            coral_weight=0.5 if use_coral else 0.0,
+                            use_conditional_coral=use_coral,
+                            confidence_threshold=0.8,
+                            verbose=(verbose and seed_idx == 0),
+                        )
+                    except Exception as e:
+                        print(f"      TRAIN ERROR: {e}")
+                        traceback.print_exc()
+                        continue
 
-                # Evaluate: base (no adaptation) + few-shot variants
-                for fs_suffix, fs_kw in fs_variants:
-                    key = f"{tname}{fs_suffix}"
-                    m = adapt_and_evaluate(trained_mdl, X_target, X_te, y_te,
-                                           info, adapt_name=key, **fs_kw)
-                    _print_dl_metrics(key, m, label_map=idx2name)
-                    run_results[key] = m
+                    # Evaluate using shared metrics (with probabilities for ECE)
+                    trained_model.eval()
+                    t_infer = time.process_time()
+                    with torch.no_grad():
+                        logits = trained_model.predict(
+                            torch.FloatTensor(X_te).to(device))
+                    infer_time = time.process_time() - t_infer
+                    probs = F.softmax(logits, dim=1).cpu().numpy()
+                    preds = logits.argmax(dim=1).cpu().numpy()
 
-            # Additional AdaBN variants on BN+CC+W (shared trained model)
-            if 'BN+CC+W' in trained_models:
-                mdl_ccw, info_ccw = trained_models['BN+CC+W']
-                adabn_variants = [
-                    ('AdaBN+CC+W',       dict(use_adabn=True, adabn_alpha=0.3)),
-                    ('AdaBN+CC+W+FS10',  dict(use_adabn=True, adabn_alpha=0.3,
-                                               X_target_labeled=X_fs10, y_target_labeled=y_fs10,
-                                               fewshot_epochs=20, fewshot_lr=1e-4)),
-                    # ('AdaBN+CC+W+FS10%', dict(use_adabn=True, adabn_alpha=0.3,
-                    #                            X_target_labeled=X_fs10pct, y_target_labeled=y_fs10pct,
-                    #                            fewshot_epochs=20, fewshot_lr=1e-4)),
-                ]
-                print(f"\n  {'='*60}")
-                print(f"  AdaBN adaptation variants on BN+CC+W")
-                print(f"  {'='*60}")
-                for aname, akw in adabn_variants:
-                    m = adapt_and_evaluate(mdl_ccw, X_target, X_te, y_te,
-                                           info_ccw, adapt_name=aname, **akw)
-                    _print_dl_metrics(aname, m, label_map=idx2name)
-                    run_results[aname] = m
+                    metrics = _compute_all_metrics(
+                        y_te, preds, y_prob=probs, n_classes=n_classes)
+                    metrics['train_time_s'] = info['train_time_s']
+                    metrics['infer_time_s'] = round(infer_time, 4)
+                    metrics['seed'] = seed
+                    metrics['fold'] = fold_idx
 
-            all_results[run_key] = run_results
+                    # For FS20perclass: additionally fine-tune and re-evaluate
+                    if cond_name == 'FS20perclass' and X_fs.shape[0] > 0:
+                        fs_model = fewshot_finetune(
+                            trained_model, X_fs, y_fs,
+                            epochs=20, lr=1e-5, batch_size=32)
+                        with torch.no_grad():
+                            fs_logits = fs_model.predict(
+                                torch.FloatTensor(X_te).to(device))
+                        fs_probs = F.softmax(fs_logits, dim=1).cpu().numpy()
+                        fs_preds = fs_logits.argmax(dim=1).cpu().numpy()
+                        metrics = _compute_all_metrics(
+                            y_te, fs_preds, y_prob=fs_probs, n_classes=n_classes)
+                        metrics['train_time_s'] = info['train_time_s']
+                        metrics['infer_time_s'] = round(infer_time, 4)
+                        metrics['seed'] = seed
+                        metrics['fold'] = fold_idx
 
-    # ---- Final comparison table ----
-    # Collect all model names in order
-    all_model_names = []
-    for run_res in all_results.values():
-        for k in run_res:
-            if k not in all_model_names:
-                all_model_names.append(k)
+                    print(f"        Acc={metrics['accuracy']}  F1w={metrics['f1_weighted']}  "
+                          f"Kappa={metrics['cohen_kappa']}  MCC={metrics['mcc']}  "
+                          f"ECE={metrics.get('ece','N/A')}")
 
-    print(f"\n{'='*140}")
-    print("FINAL COMPARISON")
-    print(f"{'='*140}")
+                    # Accumulate per run_key across folds
+                    if run_key not in all_results:
+                        all_results[run_key] = {'seeds': [], 'agg': None}
+                    all_results[run_key]['seeds'].append(metrics)
 
-    hdr = (f"{'Run':<18} | {'Model':<22} | {'Acc':>6} {'BalAcc':>6} {'F1w':>6} "
-           f"{'F1mac':>6} {'Prec':>6} {'Rec':>6} {'Kappa':>6} {'MCC':>6} "
-           f"{'ECE':>6} {'LogL':>6} {'Conf':>6} {'Ent':>6} | {'Time':>6}")
+        # After all folds for this pipeline, aggregate where not yet done
+        for run_key in list(all_results.keys()):
+            entry = all_results[run_key]
+            if entry['agg'] is not None:
+                continue
+            if not entry['seeds']:
+                continue
+            agg = aggregate_seed_metrics(entry['seeds'])
+            parts = run_key.split('__')
+            agg['dataset'] = parts[0]
+            agg['pipeline'] = parts[1] if len(parts) > 1 else ''
+            agg['architecture'] = parts[2] if len(parts) > 2 else ''
+            agg['condition'] = parts[3] if len(parts) > 3 else ''
+            entry['agg'] = agg
+            print(f"  [{run_key}] MEAN±STD  "
+                  f"Acc={agg.get('accuracy_mean','?')}±{agg.get('accuracy_std','?')}  "
+                  f"F1w={agg.get('f1_weighted_mean','?')}±{agg.get('f1_weighted_std','?')}  "
+                  f"Kappa={agg.get('cohen_kappa_mean','?')}±{agg.get('cohen_kappa_std','?')}")
+
+    # ---- Final comparison table (mean ± std) ----
+    print(f"\n{'='*200}")
+    split_desc = f"CV {n_folds or 'auto'} folds × {n_seeds} seeds" if cv_mode else f"{n_seeds} seeds"
+    print(f"FINAL DL COMPARISON: 2 Pipelines x 4 Datasets x 4 Architectures x 5 Conditions  ({split_desc})")
+    print(f"{'='*200}")
+    hdr = (f"{'Dataset':<25} {'Pipeline':<20} {'Arch':<14} {'Condition':<14} | "
+           f"{'Acc':>14} {'F1w':>14} {'Kappa':>14} {'MCC':>14} {'ECE':>14}")
     print(hdr)
-    print("-" * 140)
-    for run_key, run_res in all_results.items():
-        for mname in all_model_names:
-            if mname in run_res:
-                m = run_res[mname]
-                p = m.get('post', {})
-                print(f"{run_key:<18} | {mname:<22} | "
-                      f"{p.get('accuracy', m['test_accuracy']):>6.4f} "
-                      f"{p.get('balanced_accuracy', 0):>6.4f} "
-                      f"{p.get('f1_weighted', m['test_f1']):>6.4f} "
-                      f"{p.get('f1_macro', 0):>6.4f} "
-                      f"{p.get('precision_weighted', 0):>6.4f} "
-                      f"{p.get('recall_weighted', 0):>6.4f} "
-                      f"{p.get('cohen_kappa', 0):>6.4f} "
-                      f"{p.get('mcc', 0):>6.4f} "
-                      f"{p.get('ece', 0):>6.4f} "
-                      f"{p.get('log_loss', 0):>6.4f} "
-                      f"{p.get('mean_confidence', 0):>6.4f} "
-                      f"{p.get('mean_entropy', 0):>6.4f} | "
-                      f"{m['train_time_s']:>5.0f}s")
-        print("-" * 140)
+    print("-" * 160)
+    for key in sorted(all_results.keys()):
+        a = all_results[key]['agg']
+        def _fmt(k):
+            m = a.get(f'{k}_mean', float('nan'))
+            s = a.get(f'{k}_std', float('nan'))
+            return f"{m:.4f}±{s:.4f}"
+        print(f"{a['dataset']:<25} {a['pipeline']:<20} "
+              f"{a['architecture']:<14} {a['condition']:<14} | "
+              f"{_fmt('accuracy'):>14} {_fmt('f1_weighted'):>14} "
+              f"{_fmt('cohen_kappa'):>14} {_fmt('mcc'):>14} "
+              f"{_fmt('ece'):>14}")
 
-    # ---- Adaptation delta table (pre vs post) ----
+    # ---- Best per dataset+pipeline ----
     print(f"\n{'='*100}")
-    print("ADAPTATION EFFECT: Pre-Adapt vs Post-Adapt Accuracy")
+    print("BEST MODEL PER DATASET + PIPELINE (by mean accuracy)")
     print(f"{'='*100}")
-    print(f"{'Run':<18} | {'Model':<22} | {'Pre-Acc':>8} {'Post-Acc':>9} {'Delta':>7} {'Pre-F1':>7} {'Post-F1':>8}")
-    print("-" * 82)
-    for run_key, run_res in all_results.items():
-        for mname in all_model_names:
-            if mname in run_res:
-                m = run_res[mname]
-                pre_a = m.get('pre_adapt_accuracy', m['test_accuracy'])
-                post_a = m['test_accuracy']
-                delta = round(post_a - pre_a, 4)
-                sign = '+' if delta >= 0 else ''
-                pre_f = m.get('pre_adapt_f1', m['test_f1'])
-                print(f"{run_key:<18} | {mname:<22} | {pre_a:>8.4f} {post_a:>9.4f} {sign}{delta:>6.4f} {pre_f:>7.4f} {m['test_f1']:>8.4f}")
-        print("-" * 82)
-
-    # ---- Best model per configuration ----
-    print(f"\n{'='*80}")
-    print("BEST MODEL PER CONFIGURATION")
-    print(f"{'='*80}")
-    for run_key, run_res in all_results.items():
-        best_name, best_acc = None, -1
-        for mname, m in run_res.items():
-            if m['test_accuracy'] > best_acc:
-                best_acc = m['test_accuracy']
-                best_name = mname
-        bm = run_res[best_name]
-        p = bm.get('post', {})
-        print(f"  {run_key:<18}: {best_name:<22} "
-              f"Acc={bm['test_accuracy']:.4f}  F1={bm['test_f1']:.4f}  "
-              f"Kappa={p.get('cohen_kappa', 'N/A')}  MCC={p.get('mcc', 'N/A')}  "
-              f"ECE={p.get('ece', 'N/A')}")
+    ds_pipe_pairs = sorted(set((a['agg']['dataset'], a['agg']['pipeline'])
+                               for a in all_results.values()))
+    for dn, pn in ds_pipe_pairs:
+        subset = {k: v for k, v in all_results.items()
+                  if v['agg']['dataset'] == dn and v['agg']['pipeline'] == pn}
+        if not subset:
+            continue
+        best_key = max(subset, key=lambda k: subset[k]['agg'].get('accuracy_mean', 0))
+        ba = subset[best_key]['agg']
+        print(f"  {dn:<25} {pn:<20}: {ba['architecture']}/{ba['condition']}  "
+              f"Acc={ba.get('accuracy_mean',0):.4f}±{ba.get('accuracy_std',0):.4f}  "
+              f"F1={ba.get('f1_weighted_mean',0):.4f}±{ba.get('f1_weighted_std',0):.4f}")
 
     print(f"\n{'='*80}")
     print("DL experiments completed!")
     print(f"{'='*80}")
+
+    # ---- Save per-seed results to CSV (full unified columns) ----
+    import csv
+    results_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'results')
+    os.makedirs(results_dir, exist_ok=True)
+
+    # Per-seed CSV
+    csv_tag = '_cv' if cv_mode else ''
+    csv_path = os.path.join(results_dir, f'dl_results_per_seed{csv_tag}.csv')
+    fieldnames = (['dataset', 'pipeline', 'architecture', 'condition', 'fold', 'seed']
+                  + METRICS_CSV_FIELDS + ['train_time_s', 'infer_time_s'])
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+        writer.writeheader()
+        for key in sorted(all_results.keys()):
+            entry = all_results[key]
+            for sm in entry['seeds']:
+                row = {
+                    'dataset': entry['agg']['dataset'],
+                    'pipeline': entry['agg']['pipeline'],
+                    'architecture': entry['agg']['architecture'],
+                    'condition': entry['agg']['condition'],
+                }
+                row.update(sm)
+                writer.writerow(row)
+    print(f"\n[info] Per-seed results saved to {os.path.abspath(csv_path)}")
+
+    # Aggregated CSV (mean ± std)
+    agg_csv_path = os.path.join(results_dir, f'dl_results_aggregated{csv_tag}.csv')
+    agg_fields = ['dataset', 'pipeline', 'architecture', 'condition', 'n_seeds']
+    for k in METRICS_CSV_FIELDS:
+        agg_fields.extend([f'{k}_mean', f'{k}_std'])
+    with open(agg_csv_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=agg_fields, extrasaction='ignore')
+        writer.writeheader()
+        for key in sorted(all_results.keys()):
+            writer.writerow(all_results[key]['agg'])
+    print(f"[info] Aggregated results saved to {os.path.abspath(agg_csv_path)}")
+
+    return all_results
+
+
+def visualize_dl_results(results_dir=None, save=True):
+    """Load saved DL experiment CSV results and produce comprehensive plots + tables.
+
+    Parameters
+    ----------
+    results_dir : str or None
+        Directory containing the CSV result files. If None, uses ../results.
+    save : bool
+        If True, save plots as PNG files into results_dir.
+    """
+    import os
+    import numpy as np
+    import pandas as pd
+    import matplotlib
+    matplotlib.use('TkAgg')
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from vis_gui import PlotGUI
+
+    if results_dir is None:
+        results_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   '..', 'results')
+    results_dir = os.path.abspath(results_dir)
+
+    # Try both CV and non-CV filenames
+    per_seed_path = None
+    agg_path = None
+    for tag in ['', '_cv']:
+        p = os.path.join(results_dir, f'dl_results_per_seed{tag}.csv')
+        a = os.path.join(results_dir, f'dl_results_aggregated{tag}.csv')
+        if os.path.exists(p):
+            per_seed_path = p
+        if os.path.exists(a):
+            agg_path = a
+    if per_seed_path is None or agg_path is None:
+        print(f"[vis] ERROR: DL CSV results not found in {results_dir}")
+        print(f"[vis] Expected: dl_results_per_seed[_cv].csv + dl_results_aggregated[_cv].csv")
+        print(f"[vis] Run the DL experiment first (without --vis) to generate results.")
+        return
+
+    df_seed = pd.read_csv(per_seed_path)
+    df_agg = pd.read_csv(agg_path)
+    print(f"[vis] Loaded {len(df_seed)} per-seed rows, {len(df_agg)} aggregated rows")
+    print(f"[vis]   from {per_seed_path}")
+
+    datasets = df_agg['dataset'].unique()
+    pipelines = df_agg['pipeline'].unique()
+    architectures = df_agg['architecture'].unique()
+    conditions = df_agg['condition'].unique()
+
+    n_ds = len(datasets)
+    n_pipe = len(pipelines)
+    n_arch = len(architectures)
+    n_cond = len(conditions)
+
+    # Short display names
+    ds_short = {d: d.replace('_data', '').replace('_', ' ').title() for d in datasets}
+    pipe_short = {p: p.replace('_', ' ').title() for p in pipelines}
+
+    # Color palettes
+    arch_colors = {}
+    cmap_arch = plt.cm.Set2
+    for i, a in enumerate(architectures):
+        arch_colors[a] = cmap_arch(i / max(n_arch - 1, 1))
+    cond_colors = {}
+    cmap_cond = plt.cm.tab10
+    for i, c in enumerate(conditions):
+        cond_colors[c] = cmap_cond(i / max(n_cond - 1, 1))
+    pipe_colors = {}
+    for i, p in enumerate(pipelines):
+        pipe_colors[p] = plt.cm.Dark2(i / max(n_pipe - 1, 1))
+
+    os.makedirs(results_dir, exist_ok=True)
+
+    # ================================================================
+    # TABLE 1: Console summary
+    # ================================================================
+    print(f"\n{'=' * 160}")
+    print(f"  DL RESULTS: {n_ds} Datasets x {n_pipe} Pipelines x {n_arch} Architectures x {n_cond} Conditions")
+    print(f"{'=' * 160}")
+    hdr = (f"{'Dataset':<25} {'Pipeline':<18} {'Arch':<12} {'Condition':<14} | "
+           f"{'Accuracy':>14} {'F1w':>14} {'Kappa':>14} {'MCC':>14} {'ECE':>14}")
+    print(hdr)
+    print('-' * 160)
+
+    best_per_ds = {}
+    for _, row in df_agg.iterrows():
+        ds = row['dataset']
+        acc = row.get('accuracy_mean', float('nan'))
+        if ds not in best_per_ds or acc > best_per_ds[ds][1]:
+            best_per_ds[ds] = (f"{row['pipeline']}/{row['architecture']}/{row['condition']}", acc)
+
+        def _fmt(k, r=row):
+            m = r.get(f'{k}_mean', float('nan'))
+            s = r.get(f'{k}_std', float('nan'))
+            if pd.isna(m):
+                return f"{'N/A':>14}"
+            return f"{m:.4f}+/-{s:.4f}"
+        print(f"{ds_short.get(ds, ds):<25} {pipe_short.get(row['pipeline'], row['pipeline']):<18} "
+              f"{row['architecture']:<12} {row['condition']:<14} | "
+              f"{_fmt('accuracy'):>14} {_fmt('f1_weighted'):>14} "
+              f"{_fmt('cohen_kappa'):>14} {_fmt('mcc'):>14} {_fmt('ece'):>14}")
+
+    print('-' * 160)
+    print("  BEST per dataset:")
+    for ds, (combo, acc) in best_per_ds.items():
+        print(f"    {ds_short.get(ds, ds):<25} -> {combo:<40} Acc={acc:.4f}")
+    print()
+
+    # ================================================================
+    # PLOT 1: Grouped bar — Accuracy by Architecture x Condition (one subplot per dataset, best pipeline)
+    # ================================================================
+    fig1, axes1 = plt.subplots(1, n_ds, figsize=(5 * n_ds, 5), sharey=True)
+    if n_ds == 1:
+        axes1 = [axes1]
+    fig1.suptitle('DL Accuracy by Architecture x Condition (best pipeline per combo)',
+                  fontsize=13, fontweight='bold', y=1.02)
+
+    bar_w = 0.8 / n_arch
+    for ax, ds in zip(axes1, datasets):
+        sub = df_agg[df_agg['dataset'] == ds]
+        for j, arch in enumerate(architectures):
+            x = np.arange(n_cond)
+            vals, errs = [], []
+            for c in conditions:
+                r = sub[(sub['architecture'] == arch) & (sub['condition'] == c)]
+                if len(r) > 0:
+                    best_row = r.loc[r['accuracy_mean'].idxmax()]
+                    vals.append(float(best_row['accuracy_mean']))
+                    errs.append(float(best_row['accuracy_std']))
+                else:
+                    vals.append(0); errs.append(0)
+            ax.bar(x + j * bar_w, vals, bar_w, yerr=errs,
+                   label=arch, color=arch_colors[arch], edgecolor='white',
+                   linewidth=0.5, capsize=2, alpha=0.85)
+        ax.set_xticks(np.arange(n_cond) + bar_w * (n_arch - 1) / 2)
+        ax.set_xticklabels(conditions, rotation=35, ha='right', fontsize=8)
+        ax.set_title(ds_short.get(ds, ds), fontsize=10, fontweight='bold')
+        ax.set_ylim(0, 1.05)
+        ax.grid(axis='y', alpha=0.3, linestyle='--')
+        ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    axes1[0].set_ylabel('Accuracy', fontsize=11)
+    axes1[-1].legend(fontsize=8, loc='lower right')
+    fig1.tight_layout()
+    if save:
+        fig1.savefig(os.path.join(results_dir, 'dl_plot_accuracy_arch_cond.png'),
+                     dpi=150, bbox_inches='tight')
+        print(f"[vis] Saved dl_plot_accuracy_arch_cond.png")
+
+    # ================================================================
+    # PLOT 2: Heatmap — Accuracy (Architecture x Condition) for each pipeline+dataset
+    # ================================================================
+    for pipe in pipelines:
+        fig2, axes2 = plt.subplots(1, n_ds, figsize=(max(6, n_cond * 1.5) * n_ds, n_arch * 0.8 + 2),
+                                   sharey=True)
+        if n_ds == 1:
+            axes2 = [axes2]
+        fig2.suptitle(f'DL Accuracy Heatmap — Pipeline: {pipe_short.get(pipe, pipe)}',
+                      fontsize=13, fontweight='bold', y=1.02)
+        for ax, ds in zip(axes2, datasets):
+            heat = np.zeros((n_arch, n_cond))
+            for i, arch in enumerate(architectures):
+                for j, cond in enumerate(conditions):
+                    r = df_agg[(df_agg['dataset'] == ds) & (df_agg['pipeline'] == pipe) &
+                               (df_agg['architecture'] == arch) & (df_agg['condition'] == cond)]
+                    if len(r) > 0:
+                        heat[i, j] = float(r['accuracy_mean'].iloc[0])
+            im = ax.imshow(heat, cmap='RdYlGn', aspect='auto', vmin=0, vmax=1)
+            ax.set_xticks(np.arange(n_cond))
+            ax.set_xticklabels(conditions, rotation=40, ha='right', fontsize=8)
+            ax.set_yticks(np.arange(n_arch))
+            ax.set_yticklabels(architectures, fontsize=9)
+            for i in range(n_arch):
+                for j in range(n_cond):
+                    v = heat[i, j]
+                    color = 'white' if v < 0.5 else 'black'
+                    ax.text(j, i, f'{v:.3f}', ha='center', va='center',
+                            fontsize=8, fontweight='bold', color=color)
+            ax.set_title(ds_short.get(ds, ds), fontsize=10, fontweight='bold')
+        plt.colorbar(im, ax=axes2, label='Accuracy', shrink=0.8)
+        fig2.tight_layout()
+        if save:
+            fname = f'dl_plot_heatmap_{pipe}.png'
+            fig2.savefig(os.path.join(results_dir, fname), dpi=150, bbox_inches='tight')
+            print(f"[vis] Saved {fname}")
+
+    # ================================================================
+    # PLOT 3: Multi-metric radar per dataset (best condition per architecture)
+    # ================================================================
+    radar_metrics = ['accuracy', 'f1_weighted', 'cohen_kappa', 'mcc', 'balanced_accuracy']
+    radar_labels = ['Accuracy', 'F1 Weighted', 'Cohen k', 'MCC', 'Balanced Acc']
+    n_rm = len(radar_metrics)
+    angles = np.linspace(0, 2 * np.pi, n_rm, endpoint=False).tolist()
+    angles += angles[:1]
+
+    fig3, axes3 = plt.subplots(1, n_ds, figsize=(5 * n_ds, 5),
+                               subplot_kw=dict(polar=True))
+    if n_ds == 1:
+        axes3 = [axes3]
+    fig3.suptitle('DL Multi-Metric Radar (best condition per architecture)',
+                  fontsize=13, fontweight='bold', y=1.05)
+
+    for ax, ds in zip(axes3, datasets):
+        sub = df_agg[df_agg['dataset'] == ds]
+        for arch in architectures:
+            asub = sub[sub['architecture'] == arch]
+            if len(asub) == 0:
+                continue
+            best_row = asub.loc[asub['accuracy_mean'].idxmax()]
+            values = []
+            for rm in radar_metrics:
+                v = best_row.get(f'{rm}_mean', 0)
+                values.append(max(0, float(v) if not pd.isna(v) else 0))
+            values += values[:1]
+            ax.plot(angles, values, 'o-', linewidth=1.5,
+                    label=f"{arch} ({best_row['condition']})",
+                    color=arch_colors[arch], markersize=4)
+            ax.fill(angles, values, alpha=0.1, color=arch_colors[arch])
+        ax.set_xticks(angles[:-1])
+        ax.set_xticklabels(radar_labels, fontsize=8)
+        ax.set_ylim(0, 1.05)
+        ax.set_title(ds_short.get(ds, ds), fontsize=10, fontweight='bold', pad=15)
+        ax.legend(fontsize=7, loc='lower right', bbox_to_anchor=(1.3, -0.1))
+    fig3.tight_layout()
+    if save:
+        fig3.savefig(os.path.join(results_dir, 'dl_plot_radar_metrics.png'),
+                     dpi=150, bbox_inches='tight')
+        print(f"[vis] Saved dl_plot_radar_metrics.png")
+
+    # ================================================================
+    # PLOT 4: Condition benefit — stacked delta bars showing improvement over noBN
+    # ================================================================
+    fig4, axes4 = plt.subplots(1, n_ds, figsize=(5 * n_ds, 5), sharey=True)
+    if n_ds == 1:
+        axes4 = [axes4]
+    fig4.suptitle('Condition Benefit: Accuracy Delta vs noBN Baseline',
+                  fontsize=13, fontweight='bold', y=1.02)
+
+    for ax, ds in zip(axes4, datasets):
+        sub = df_agg[df_agg['dataset'] == ds]
+        other_conds = [c for c in conditions if c != 'noBN']
+        bar_w2 = 0.8 / n_arch
+        for j, arch in enumerate(architectures):
+            asub = sub[sub['architecture'] == arch]
+            base = asub[asub['condition'] == 'noBN']
+            base_acc = float(base['accuracy_mean'].mean()) if len(base) > 0 else 0
+            x = np.arange(len(other_conds))
+            deltas = []
+            for c in other_conds:
+                r = asub[asub['condition'] == c]
+                if len(r) > 0:
+                    deltas.append(float(r['accuracy_mean'].mean()) - base_acc)
+                else:
+                    deltas.append(0)
+            colors = ['#66bb6a' if d >= 0 else '#ef5350' for d in deltas]
+            ax.bar(x + j * bar_w2, deltas, bar_w2, label=arch if ds == datasets[0] else '',
+                   color=arch_colors[arch], edgecolor='white', linewidth=0.5, alpha=0.85)
+        ax.axhline(0, color='gray', linewidth=0.8, linestyle='-')
+        ax.set_xticks(np.arange(len(other_conds)) + bar_w2 * (n_arch - 1) / 2)
+        ax.set_xticklabels(other_conds, rotation=30, ha='right', fontsize=8)
+        ax.set_title(ds_short.get(ds, ds), fontsize=10, fontweight='bold')
+        ax.grid(axis='y', alpha=0.3, linestyle='--')
+        ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    axes4[0].set_ylabel('Accuracy Delta vs noBN', fontsize=10)
+    axes4[0].legend(fontsize=8, loc='best')
+    fig4.tight_layout()
+    if save:
+        fig4.savefig(os.path.join(results_dir, 'dl_plot_condition_benefit.png'),
+                     dpi=150, bbox_inches='tight')
+        print(f"[vis] Saved dl_plot_condition_benefit.png")
+
+    # ================================================================
+    # PLOT 5: Architecture comparison — F1 Weighted by pipeline+dataset
+    # ================================================================
+    fig5, axes5 = plt.subplots(1, n_pipe, figsize=(6 * n_pipe, 5), sharey=True)
+    if n_pipe == 1:
+        axes5 = [axes5]
+    fig5.suptitle('F1 Weighted by Architecture (avg across conditions)',
+                  fontsize=13, fontweight='bold', y=1.02)
+
+    bar_w5 = 0.8 / n_arch
+    for ax, pipe in zip(axes5, pipelines):
+        sub = df_agg[df_agg['pipeline'] == pipe]
+        for j, arch in enumerate(architectures):
+            x = np.arange(n_ds)
+            vals, errs = [], []
+            for ds in datasets:
+                r = sub[(sub['dataset'] == ds) & (sub['architecture'] == arch)]
+                if len(r) > 0:
+                    vals.append(float(r['f1_weighted_mean'].mean()))
+                    errs.append(float(r['f1_weighted_std'].mean()))
+                else:
+                    vals.append(0); errs.append(0)
+            ax.bar(x + j * bar_w5, vals, bar_w5, yerr=errs,
+                   label=arch, color=arch_colors[arch], edgecolor='white',
+                   linewidth=0.5, capsize=2, alpha=0.85)
+        ax.set_xticks(np.arange(n_ds) + bar_w5 * (n_arch - 1) / 2)
+        ax.set_xticklabels([ds_short.get(d, d) for d in datasets], fontsize=9, rotation=20, ha='right')
+        ax.set_title(pipe_short.get(pipe, pipe), fontsize=10, fontweight='bold')
+        ax.set_ylim(0, 1.05)
+        ax.grid(axis='y', alpha=0.3, linestyle='--')
+        ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    axes5[0].set_ylabel('F1 Weighted', fontsize=10)
+    axes5[-1].legend(fontsize=8, loc='lower right')
+    fig5.tight_layout()
+    if save:
+        fig5.savefig(os.path.join(results_dir, 'dl_plot_f1_architecture.png'),
+                     dpi=150, bbox_inches='tight')
+        print(f"[vis] Saved dl_plot_f1_architecture.png")
+
+    # ================================================================
+    # PLOT 6: Training time boxplots (per-seed data)
+    # ================================================================
+    if 'train_time_s' in df_seed.columns:
+        fig6, axes6 = plt.subplots(1, n_ds, figsize=(5 * n_ds, 4), sharey=False)
+        if n_ds == 1:
+            axes6 = [axes6]
+        fig6.suptitle('DL Training Time (seconds, log scale)',
+                      fontsize=13, fontweight='bold', y=1.02)
+        for ax, ds in zip(axes6, datasets):
+            sub = df_seed[df_seed['dataset'] == ds]
+            positions, labels_list, data_groups = [], [], []
+            idx = 0
+            for arch in architectures:
+                for cond in conditions:
+                    vals = sub[(sub['architecture'] == arch) &
+                               (sub['condition'] == cond)]['train_time_s'].dropna()
+                    if len(vals) > 0:
+                        data_groups.append(vals.values)
+                        labels_list.append(f"{arch[:5]}\n{cond[:6]}")
+                        positions.append(idx)
+                        idx += 1
+            if data_groups:
+                bp = ax.boxplot(data_groups, positions=positions, widths=0.6,
+                                patch_artist=True, showmeans=True,
+                                meanprops=dict(marker='D', markerfacecolor='red', markersize=3))
+                for pi, patch in enumerate(bp['boxes']):
+                    patch.set_facecolor(arch_colors.get(
+                        architectures[pi // n_cond % n_arch], '#cccccc'))
+                    patch.set_alpha(0.6)
+                ax.set_xticks(positions)
+                ax.set_xticklabels(labels_list, rotation=45, ha='right', fontsize=6)
+                ax.set_yscale('log')
+                ax.grid(axis='y', alpha=0.3, linestyle='--')
+            ax.set_title(ds_short.get(ds, ds), fontsize=10, fontweight='bold')
+            ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+        axes6[0].set_ylabel('Time (s)', fontsize=10)
+        fig6.tight_layout()
+        if save:
+            fig6.savefig(os.path.join(results_dir, 'dl_plot_training_time.png'),
+                         dpi=150, bbox_inches='tight')
+            print(f"[vis] Saved dl_plot_training_time.png")
+
+    # ================================================================
+    # PLOT 7: ECE vs Accuracy scatter
+    # ================================================================
+    if 'ece_mean' in df_agg.columns and 'accuracy_mean' in df_agg.columns:
+        fig7, ax7 = plt.subplots(figsize=(9, 7))
+        markers_map = {'MLP': 'o', 'ResMLP': 's', 'Conv1D': '^', 'CNN_LSTM': 'D'}
+        for _, row in df_agg.iterrows():
+            acc = row.get('accuracy_mean', np.nan)
+            ece = row.get('ece_mean', np.nan)
+            if pd.isna(acc) or pd.isna(ece):
+                continue
+            arch = row['architecture']
+            cond = row['condition']
+            marker = markers_map.get(arch, 'o')
+            ax7.scatter(acc, ece, c=[cond_colors[cond]], marker=marker,
+                        s=70, alpha=0.75, edgecolors='black', linewidths=0.4)
+
+        # Legends
+        legend_arch = [Line2D([0], [0], marker=markers_map.get(a, 'o'), color='w',
+                              markerfacecolor='gray', markersize=8, label=a)
+                       for a in architectures]
+        legend_cond = [Line2D([0], [0], marker='o', color='w',
+                              markerfacecolor=cond_colors[c], markersize=8, label=c)
+                       for c in conditions]
+        l1 = ax7.legend(handles=legend_arch, title='Architecture',
+                        loc='upper left', fontsize=8)
+        ax7.add_artist(l1)
+        ax7.legend(handles=legend_cond, title='Condition',
+                   loc='upper right', fontsize=8)
+        ax7.set_xlabel('Accuracy', fontsize=11)
+        ax7.set_ylabel('ECE (lower = better)', fontsize=11)
+        ax7.set_title('DL Calibration: ECE vs Accuracy', fontsize=13, fontweight='bold')
+        ax7.grid(alpha=0.3, linestyle='--')
+        ax7.spines['top'].set_visible(False); ax7.spines['right'].set_visible(False)
+        fig7.tight_layout()
+        if save:
+            fig7.savefig(os.path.join(results_dir, 'dl_plot_ece_vs_accuracy.png'),
+                         dpi=150, bbox_inches='tight')
+            print(f"[vis] Saved dl_plot_ece_vs_accuracy.png")
+
+    # ================================================================
+    # PLOT 8: Pipeline comparison — amplitude vs rolling_variance per arch
+    # ================================================================
+    if n_pipe >= 2:
+        fig8, axes8 = plt.subplots(1, n_ds, figsize=(5 * n_ds, 5), sharey=True)
+        if n_ds == 1:
+            axes8 = [axes8]
+        fig8.suptitle('Pipeline Comparison: Accuracy (avg across conditions)',
+                      fontsize=13, fontweight='bold', y=1.02)
+        bar_w8 = 0.8 / n_pipe
+        for ax, ds in zip(axes8, datasets):
+            sub = df_agg[df_agg['dataset'] == ds]
+            for j, pipe in enumerate(pipelines):
+                x = np.arange(n_arch)
+                vals, errs = [], []
+                for arch in architectures:
+                    r = sub[(sub['pipeline'] == pipe) & (sub['architecture'] == arch)]
+                    if len(r) > 0:
+                        vals.append(float(r['accuracy_mean'].mean()))
+                        errs.append(float(r['accuracy_std'].mean()))
+                    else:
+                        vals.append(0); errs.append(0)
+                ax.bar(x + j * bar_w8, vals, bar_w8, yerr=errs,
+                       label=pipe_short.get(pipe, pipe), color=pipe_colors[pipe],
+                       edgecolor='white', linewidth=0.5, capsize=2, alpha=0.85)
+            ax.set_xticks(np.arange(n_arch) + bar_w8 * (n_pipe - 1) / 2)
+            ax.set_xticklabels(architectures, fontsize=9, rotation=20, ha='right')
+            ax.set_title(ds_short.get(ds, ds), fontsize=10, fontweight='bold')
+            ax.set_ylim(0, 1.05)
+            ax.grid(axis='y', alpha=0.3, linestyle='--')
+            ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+        axes8[0].set_ylabel('Accuracy', fontsize=10)
+        axes8[-1].legend(fontsize=8, loc='lower right')
+        fig8.tight_layout()
+        if save:
+            fig8.savefig(os.path.join(results_dir, 'dl_plot_pipeline_comparison.png'),
+                         dpi=150, bbox_inches='tight')
+            print(f"[vis] Saved dl_plot_pipeline_comparison.png")
+
+    # ================================================================
+    # PLOT 9: MCC vs Cohen's Kappa scatter (agreement metrics)
+    # ================================================================
+    if 'mcc_mean' in df_agg.columns and 'cohen_kappa_mean' in df_agg.columns:
+        fig9, ax9 = plt.subplots(figsize=(8, 6))
+        for _, row in df_agg.iterrows():
+            mcc = row.get('mcc_mean', np.nan)
+            kappa = row.get('cohen_kappa_mean', np.nan)
+            if pd.isna(mcc) or pd.isna(kappa):
+                continue
+            ds = row['dataset']
+            arch = row['architecture']
+            marker = markers_map.get(arch, 'o')
+            ax9.scatter(kappa, mcc, c=[cond_colors[row['condition']]],
+                        marker=marker, s=60, alpha=0.7, edgecolors='black', linewidths=0.4)
+        # Diagonal reference
+        ax9.plot([-0.5, 1], [-0.5, 1], 'k--', alpha=0.3, linewidth=0.8)
+        ax9.set_xlabel("Cohen's Kappa", fontsize=11)
+        ax9.set_ylabel('MCC', fontsize=11)
+        ax9.set_title('Agreement Metrics: MCC vs Kappa', fontsize=13, fontweight='bold')
+        ax9.grid(alpha=0.3, linestyle='--')
+        ax9.spines['top'].set_visible(False); ax9.spines['right'].set_visible(False)
+        fig9.tight_layout()
+        if save:
+            fig9.savefig(os.path.join(results_dir, 'dl_plot_mcc_vs_kappa.png'),
+                         dpi=150, bbox_inches='tight')
+            print(f"[vis] Saved dl_plot_mcc_vs_kappa.png")
+
+    # ================================================================
+    # PLOT 10: Confidence distribution — mean confidence by condition
+    # ================================================================
+    if 'mean_confidence' in df_seed.columns:
+        fig10, axes10 = plt.subplots(1, n_ds, figsize=(5 * n_ds, 4), sharey=True)
+        if n_ds == 1:
+            axes10 = [axes10]
+        fig10.suptitle('Prediction Confidence Distribution by Condition',
+                       fontsize=13, fontweight='bold', y=1.02)
+        for ax, ds in zip(axes10, datasets):
+            sub = df_seed[df_seed['dataset'] == ds]
+            box_data, box_labels = [], []
+            for cond in conditions:
+                vals = sub[sub['condition'] == cond]['mean_confidence'].dropna()
+                if len(vals) > 0:
+                    box_data.append(vals.values)
+                    box_labels.append(cond)
+            if box_data:
+                bp = ax.boxplot(box_data, labels=box_labels, patch_artist=True,
+                                showmeans=True, meanprops=dict(marker='D',
+                                markerfacecolor='red', markersize=4))
+                for pi, patch in enumerate(bp['boxes']):
+                    patch.set_facecolor(cond_colors.get(box_labels[pi], '#cccccc'))
+                    patch.set_alpha(0.6)
+                ax.set_xticklabels(box_labels, rotation=30, ha='right', fontsize=8)
+            ax.set_title(ds_short.get(ds, ds), fontsize=10, fontweight='bold')
+            ax.set_ylim(0, 1.05)
+            ax.grid(axis='y', alpha=0.3, linestyle='--')
+            ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+        axes10[0].set_ylabel('Mean Confidence', fontsize=10)
+        fig10.tight_layout()
+        if save:
+            fig10.savefig(os.path.join(results_dir, 'dl_plot_confidence_dist.png'),
+                          dpi=150, bbox_inches='tight')
+            print(f"[vis] Saved dl_plot_confidence_dist.png")
+
+    # ================================================================
+    # PLOT 11: Best ranking table as figure
+    # ================================================================
+    fig11, ax11 = plt.subplots(figsize=(14, max(3, n_ds * 0.8 + 2)))
+    ax11.axis('off')
+    rank_cols = ['Dataset', 'Pipeline', 'Architecture', 'Condition',
+                 'Accuracy', 'F1w', 'Kappa', 'MCC', 'ECE']
+    rank_data = []
+    for ds in datasets:
+        sub = df_agg[df_agg['dataset'] == ds]
+        if len(sub) == 0:
+            continue
+        best = sub.loc[sub['accuracy_mean'].idxmax()]
+        rank_data.append([
+            ds_short.get(ds, ds),
+            pipe_short.get(best['pipeline'], best['pipeline']),
+            best['architecture'], best['condition'],
+            f"{best['accuracy_mean']:.4f}",
+            f"{best.get('f1_weighted_mean', 0):.4f}",
+            f"{best.get('cohen_kappa_mean', 0):.4f}",
+            f"{best.get('mcc_mean', 0):.4f}",
+            f"{best.get('ece_mean', 0):.4f}",
+        ])
+    tbl = ax11.table(cellText=rank_data, colLabels=rank_cols,
+                     loc='center', cellLoc='center')
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(9)
+    tbl.scale(1.0, 1.5)
+    for j in range(len(rank_cols)):
+        tbl[0, j].set_facecolor('#2d333b')
+        tbl[0, j].set_text_props(color='white', fontweight='bold')
+    for i in range(len(rank_data)):
+        color = '#f0f4f8' if i % 2 == 0 else 'white'
+        for j in range(len(rank_cols)):
+            tbl[i + 1, j].set_facecolor(color)
+    ax11.set_title('Best DL Configuration per Dataset', fontsize=14,
+                   fontweight='bold', pad=20)
+    fig11.tight_layout()
+    if save:
+        fig11.savefig(os.path.join(results_dir, 'dl_plot_best_ranking.png'),
+                      dpi=150, bbox_inches='tight')
+        print(f"[vis] Saved dl_plot_best_ranking.png")
+
+    # ================================================================
+    # PLOT 12: Log Loss by architecture (per dataset)
+    # ================================================================
+    if 'log_loss_mean' in df_agg.columns:
+        fig12, ax12 = plt.subplots(figsize=(max(8, n_ds * 2.5), 5))
+        fig12.suptitle('DL Log Loss by Architecture (lower = better)',
+                       fontsize=13, fontweight='bold')
+        bar_w12 = 0.8 / n_arch
+        for j, arch in enumerate(architectures):
+            x = np.arange(n_ds)
+            vals = []
+            for ds in datasets:
+                sub = df_agg[(df_agg['dataset'] == ds) & (df_agg['architecture'] == arch)]
+                vals.append(float(sub['log_loss_mean'].mean()) if len(sub) > 0 else 0)
+            ax12.bar(x + j * bar_w12, vals, bar_w12, label=arch,
+                     color=arch_colors[arch], edgecolor='white',
+                     linewidth=0.5, alpha=0.85)
+        ax12.set_xticks(np.arange(n_ds) + bar_w12 * (n_arch - 1) / 2)
+        ax12.set_xticklabels([ds_short.get(d, d) for d in datasets], fontsize=10)
+        ax12.set_ylabel('Log Loss (avg across conditions)', fontsize=10)
+        ax12.legend(fontsize=9)
+        ax12.grid(axis='y', alpha=0.3, linestyle='--')
+        ax12.spines['top'].set_visible(False); ax12.spines['right'].set_visible(False)
+        fig12.tight_layout()
+        if save:
+            fig12.savefig(os.path.join(results_dir, 'dl_plot_log_loss.png'),
+                          dpi=150, bbox_inches='tight')
+            print(f"[vis] Saved dl_plot_log_loss.png")
+
+    # ================================================================
+    # PLOT 13: Balanced Acc vs Accuracy scatter
+    # ================================================================
+    if 'balanced_accuracy_mean' in df_agg.columns:
+        fig13, ax13b = plt.subplots(figsize=(8, 6))
+        for _, row in df_agg.iterrows():
+            acc = row.get('accuracy_mean', np.nan)
+            bal = row.get('balanced_accuracy_mean', np.nan)
+            if pd.isna(acc) or pd.isna(bal):
+                continue
+            arch = row['architecture']
+            marker = markers_map.get(arch, 'o')
+            ax13b.scatter(acc, bal, c=[cond_colors[row['condition']]],
+                          marker=marker, s=70, alpha=0.8, edgecolors='black',
+                          linewidths=0.4)
+        ax13b.plot([0, 1], [0, 1], 'k--', alpha=0.3, linewidth=0.8)
+        ax13b.set_xlabel('Accuracy', fontsize=11)
+        ax13b.set_ylabel('Balanced Accuracy', fontsize=11)
+        ax13b.set_title('DL Class Imbalance: Balanced Acc vs Accuracy',
+                        fontsize=13, fontweight='bold')
+        ax13b.grid(alpha=0.3, linestyle='--')
+        ax13b.spines['top'].set_visible(False); ax13b.spines['right'].set_visible(False)
+        fig13.tight_layout()
+        if save:
+            fig13.savefig(os.path.join(results_dir, 'dl_plot_balanced_vs_accuracy.png'),
+                          dpi=150, bbox_inches='tight')
+            print(f"[vis] Saved dl_plot_balanced_vs_accuracy.png")
+
+    # ================================================================
+    # PLOT 14: Per-seed accuracy variance boxplots
+    # ================================================================
+    fig14, axes14 = plt.subplots(1, n_ds, figsize=(5 * n_ds, 4), sharey=True)
+    if n_ds == 1:
+        axes14 = [axes14]
+    fig14.suptitle('DL Per-Seed Accuracy Spread by Architecture',
+                   fontsize=13, fontweight='bold', y=1.02)
+    for ax, ds in zip(axes14, datasets):
+        sub = df_seed[df_seed['dataset'] == ds]
+        box_data, box_labels = [], []
+        for arch in architectures:
+            vals = sub[sub['architecture'] == arch]['accuracy'].dropna()
+            if len(vals) > 0:
+                box_data.append(vals.values)
+                box_labels.append(arch)
+        if box_data:
+            bp = ax.boxplot(box_data, labels=box_labels, patch_artist=True,
+                            showmeans=True, meanprops=dict(marker='D',
+                            markerfacecolor='red', markersize=4))
+            for pi, patch in enumerate(bp['boxes']):
+                patch.set_facecolor(arch_colors.get(box_labels[pi], '#cccccc'))
+                patch.set_alpha(0.6)
+            ax.set_xticklabels(box_labels, rotation=30, ha='right', fontsize=8)
+        ax.set_title(ds_short.get(ds, ds), fontsize=10, fontweight='bold')
+        ax.set_ylim(0, 1.05)
+        ax.grid(axis='y', alpha=0.3, linestyle='--')
+        ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    axes14[0].set_ylabel('Accuracy', fontsize=10)
+    fig14.tight_layout()
+    if save:
+        fig14.savefig(os.path.join(results_dir, 'dl_plot_accuracy_variance.png'),
+                      dpi=150, bbox_inches='tight')
+        print(f"[vis] Saved dl_plot_accuracy_variance.png")
+
+    # ================================================================
+    # PLOT 15: Full results table (all configurations)
+    # ================================================================
+    fig15, ax15t = plt.subplots(figsize=(18, max(4, len(df_agg) * 0.32 + 2)))
+    ax15t.axis('off')
+    tbl_cols = ['Dataset', 'Pipeline', 'Arch', 'Cond', 'Acc', 'BalAcc',
+                'F1w', 'Kappa', 'MCC', 'ECE', 'LogLoss']
+    tbl_data = []
+    for _, row in df_agg.iterrows():
+        tbl_data.append([
+            ds_short.get(row['dataset'], row['dataset']),
+            pipe_short.get(row['pipeline'], row['pipeline']),
+            row['architecture'], row['condition'],
+            f"{row.get('accuracy_mean', 0):.4f}",
+            f"{row.get('balanced_accuracy_mean', 0):.4f}",
+            f"{row.get('f1_weighted_mean', 0):.4f}",
+            f"{row.get('cohen_kappa_mean', 0):.4f}",
+            f"{row.get('mcc_mean', 0):.4f}",
+            f"{row.get('ece_mean', 0):.4f}",
+            f"{row.get('log_loss_mean', 0):.4f}",
+        ])
+    tbl15 = ax15t.table(cellText=tbl_data, colLabels=tbl_cols,
+                        loc='center', cellLoc='center')
+    tbl15.auto_set_font_size(False)
+    tbl15.set_fontsize(7)
+    tbl15.scale(1.0, 1.25)
+    for j in range(len(tbl_cols)):
+        tbl15[0, j].set_facecolor('#2d333b')
+        tbl15[0, j].set_text_props(color='white', fontweight='bold')
+    for i in range(len(tbl_data)):
+        color = '#f0f4f8' if i % 2 == 0 else 'white'
+        for j in range(len(tbl_cols)):
+            tbl15[i + 1, j].set_facecolor(color)
+    ax15t.set_title('Full DL Results Table (all configurations)',
+                    fontsize=14, fontweight='bold', pad=20)
+    fig15.tight_layout()
+    if save:
+        fig15.savefig(os.path.join(results_dir, 'dl_plot_full_results_table.png'),
+                      dpi=150, bbox_inches='tight')
+        print(f"[vis] Saved dl_plot_full_results_table.png")
+
+    # ================================================================
+    # PLOT 16: Metric correlation matrix
+    # ================================================================
+    corr_cols = [c for c in ['accuracy', 'f1_weighted', 'f1_macro',
+                              'cohen_kappa', 'mcc', 'ece', 'log_loss',
+                              'mean_confidence', 'mean_entropy']
+                 if c in df_seed.columns]
+    if len(corr_cols) >= 4:
+        fig16, ax16 = plt.subplots(figsize=(9, 7))
+        corr_matrix = df_seed[corr_cols].corr()
+        im16 = ax16.imshow(corr_matrix.values, cmap='RdBu_r', vmin=-1, vmax=1,
+                           aspect='auto')
+        n_corr = len(corr_cols)
+        short_labels = [c.replace('_', '\n').replace('weighted', 'w')
+                        .replace('confidence', 'conf')
+                        .replace('entropy', 'ent') for c in corr_cols]
+        ax16.set_xticks(np.arange(n_corr))
+        ax16.set_xticklabels(short_labels, rotation=45, ha='right', fontsize=8)
+        ax16.set_yticks(np.arange(n_corr))
+        ax16.set_yticklabels(short_labels, fontsize=8)
+        for ci in range(n_corr):
+            for cj in range(n_corr):
+                v = corr_matrix.values[ci, cj]
+                clr = 'white' if abs(v) > 0.5 else 'black'
+                ax16.text(cj, ci, f'{v:.2f}', ha='center', va='center',
+                         fontsize=7, fontweight='bold', color=clr)
+        plt.colorbar(im16, ax=ax16, label='Correlation', shrink=0.8)
+        ax16.set_title('DL Metric Correlation Matrix',
+                       fontsize=13, fontweight='bold')
+        fig16.tight_layout()
+        if save:
+            fig16.savefig(os.path.join(results_dir, 'dl_plot_metric_correlation.png'),
+                          dpi=150, bbox_inches='tight')
+            print(f"[vis] Saved dl_plot_metric_correlation.png")
+
+    # ================================================================
+    # Launch tabbed GUI with all figures
+    # ================================================================
+    tab_names = [
+        ('Accuracy by Arch x Cond', 'dl_plot_accuracy_arch_cond.png'),
+        ('Accuracy Heatmap', 'dl_plot_heatmap.png'),
+        ('Radar Metrics', 'dl_plot_radar_metrics.png'),
+        ('Condition Benefit', 'dl_plot_condition_benefit.png'),
+        ('F1 by Architecture', 'dl_plot_f1_architecture.png'),
+        ('Training Time', 'dl_plot_training_time.png'),
+        ('ECE vs Accuracy', 'dl_plot_ece_vs_accuracy.png'),
+        ('Pipeline Comparison', 'dl_plot_pipeline_comparison.png'),
+        ('MCC vs Kappa', 'dl_plot_mcc_vs_kappa.png'),
+        ('Confidence Dist', 'dl_plot_confidence_dist.png'),
+        ('Best Ranking', 'dl_plot_best_ranking.png'),
+        ('Log Loss', 'dl_plot_log_loss.png'),
+        ('Balanced vs Acc', 'dl_plot_balanced_vs_accuracy.png'),
+        ('Accuracy Variance', 'dl_plot_accuracy_variance.png'),
+        ('Full Results Table', 'dl_plot_full_results_table.png'),
+        ('Metric Correlation', 'dl_plot_metric_correlation.png'),
+    ]
+    gui = PlotGUI("DL Experiment Results", results_dir=results_dir)
+    open_figs = {fig.number: fig for fig in [plt.figure(n) for n in plt.get_fignums()]}
+    fig_list = list(open_figs.values())
+    for i, fig in enumerate(fig_list):
+        if i < len(tab_names):
+            name, fname = tab_names[i]
+        else:
+            name, fname = f"Plot {i+1}", f"dl_plot_{i+1}.png"
+        gui.add_plot(name, fig, fname)
+    print(f"\n[vis] Launching DL GUI with {len(fig_list)} plots...")
+    gui.show()
+
+
+if __name__ == '__main__':
+    import sys, os, argparse
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+    parser = argparse.ArgumentParser(description='DL Domain Adaptation Experiments')
+    parser.add_argument('--data-root', type=str,
+                        default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                             '..', '..', '..', 'wifi_sensing_data'),
+                        help='Root folder containing dataset subfolders')
+    parser.add_argument('--window', type=int, default=300, help='Window length')
+    parser.add_argument('--sr', type=int, default=150, help='Guaranteed sample rate')
+    parser.add_argument('--epochs', type=int, default=100, help='Training epochs')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
+    parser.add_argument('--model-size', type=str, default='small',
+                        choices=['small', 'mid', 'large'])
+    parser.add_argument('--n-seeds', type=int, default=3,
+                        help='Number of random seeds for multi-run (default: 3)')
+    parser.add_argument('--cv', action='store_true',
+                        help='Use temporal forward-chaining cross-validation')
+    parser.add_argument('--n-folds', type=int, default=None,
+                        help='Number of CV folds (auto if not set)')
+    parser.add_argument('--verbose', action='store_true')
+    parser.add_argument('--vis', action='store_true',
+                        help='Skip training — load saved CSV results and show plots/tables')
+    parser.add_argument('--results-dir', type=str, default=None,
+                        help='Directory containing result CSVs (default: ../results)')
+    args = parser.parse_args()
+
+    if args.vis:
+        visualize_dl_results(results_dir=args.results_dir, save=True)
+    else:
+        run_dl_experiment(
+            data_root=os.path.abspath(args.data_root),
+            window_len=args.window,
+            guaranteed_sr=args.sr,
+            epochs=args.epochs,
+            lr=args.lr,
+            model_size=args.model_size,
+            verbose=args.verbose,
+            n_seeds=args.n_seeds,
+            cv_mode=args.cv,
+            n_folds=args.n_folds,
+        )
