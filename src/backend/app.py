@@ -21,6 +21,8 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from typing import Dict, List, Optional, Any, Tuple
 from dotenv import load_dotenv
+import cv2
+import base64
 
 # Load environment variables
 load_dotenv()
@@ -50,12 +52,6 @@ from backend.config import Config, BUTTON_ACTIONS, SENSOR_CONFIG
 from backend.models import SensorReading, SystemStatus, ButtonConfig, UploadResult
 from backend.device_manager import DeviceManager
 from backend.auth_manager import AuthManager
-from backend.dependency_checker import check_and_install_dependencies, ensure_data_directory
-from sensors.sensor_discovery import SensorDiscovery, get_sensor_discovery, get_device_info as get_sensor_device_info
-
-# Auto-install missing dependencies and ensure data directory exists
-ensure_data_directory()
-check_and_install_dependencies()
 
 # Set up logging
 logging.basicConfig(
@@ -88,10 +84,36 @@ def log_response(response):
     logger.info(f"Response: {request.method} {request.path} - {response.status_code}")
     return response
 
+# Load user info from saved credentials before each request
+@app.before_request
+def load_user_from_saved_auth():
+    """If credentials were loaded at startup but session is empty, populate it."""
+    if 'username' not in session and auth_manager.is_authenticated() and auth_manager.user_info:
+        session['username'] = auth_manager.user_info.get('username')
+        session['user_id'] = auth_manager.user_info.get('user_id')
+        session['token'] = auth_manager.token
+
 # Add current date to all templates
 @app.context_processor
 def inject_now():
-    return {'now': datetime.utcnow()}
+    """Inject commonly used globals into every template."""
+    # Build user_info from session or auth manager
+    user_info = None
+    if 'username' in session:
+        user_info = {
+            'username': session.get('username'),
+            'user_id': session.get('user_id')
+        }
+    elif auth_manager.is_authenticated():
+        user_info = auth_manager.user_info
+    return {
+        'now': datetime.utcnow(),
+        'user_info': user_info,
+        'config': {
+            'app_name': Config.APP_NAME,
+            'version': Config.VERSION
+        }
+    }
 
 # Initialize scheduler
 device_scheduler = BackgroundScheduler()
@@ -367,7 +389,7 @@ def tail_sensor_data():
             time.sleep(5)
 
 def get_device_info() -> Dict[str, Any]:
-    """Get detailed information about the device including sensors."""
+    """Get detailed information about the device."""
     try:
         # Get network interfaces and MAC addresses
         interfaces = {}
@@ -377,20 +399,6 @@ def get_device_info() -> Dict[str, Any]:
                 mac = addrs[netifaces.AF_LINK][0].get('addr')
                 if mac and mac != '00:00:00:00:00:00':
                     interfaces[iface] = mac
-        
-        # Get sensor discovery information
-        try:
-            sensor_info = get_sensor_device_info()
-            device_type = sensor_info.get('device_type', 'unknown')
-            sensors = sensor_info.get('sensors', [])
-            is_raspberry_pi = sensor_info.get('is_raspberry_pi', False)
-            raspberry_pi_model = sensor_info.get('raspberry_pi_model')
-        except Exception as e:
-            logger.warning(f"Could not get sensor info: {e}")
-            device_type = 'unknown'
-            sensors = []
-            is_raspberry_pi = False
-            raspberry_pi_model = None
         
         # Get system information
         system_info = {
@@ -407,14 +415,7 @@ def get_device_info() -> Dict[str, Any]:
             'hostname': socket.gethostname(),
             'ip_address': socket.gethostbyname(socket.gethostname()),
             'python_version': platform.python_version(),
-            'boot_time': datetime.fromtimestamp(psutil.boot_time()).isoformat(),
-            # Enhanced device type detection
-            'device_type': device_type,
-            'is_raspberry_pi': is_raspberry_pi,
-            'raspberry_pi_model': raspberry_pi_model,
-            # Sensor information
-            'sensors': sensors,
-            'available_sensors': [s for s in sensors if s.get('available', False)]
+            'boot_time': datetime.fromtimestamp(psutil.boot_time()).isoformat()
         }
         return system_info
     except Exception as e:
@@ -1268,28 +1269,6 @@ def login():
     
     return redirect(url_for('login'))
 
-@app.route('/fl')
-def fl_page():
-    """Display the Federated Learning participation page."""
-    # Check if user is logged in
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('fl_page')))
-    
-    try:
-        # Get device information
-        device_info = device_manager.get_device_info()
-        
-        return render_template('fl_notification.html',
-                            device_id=device_info.get('device_id', ''),
-                            brain_server_url=Config.BRAIN_SERVER_URL,
-                            username=session.get('username'))
-    
-    except Exception as e:
-        logger.error(f"Error in FL page route: {str(e)}", exc_info=True)
-        flash('An error occurred while loading the FL page.', 'error')
-        return redirect(url_for('status'))
-
-
 @app.route('/status')
 def status():
     """Display the device status page."""
@@ -1356,6 +1335,7 @@ def logout():
         logger.error(f"Error updating device status on logout: {e}")
     
     # Clear the user's auth token so device registration stops
+    device_manager.stop_heartbeat()
     Config.USER_AUTH_TOKEN = None
     
     session.clear()
@@ -1506,445 +1486,86 @@ def sync_files_to_cloud():
         logger.error(f'Error syncing files: {str(e)}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+# ---------------------------------------------------------------------------
+# Camera capture API
+# ---------------------------------------------------------------------------
 
-# ============================================================================
-# SENSOR DISCOVERY AND DATA COLLECTION ENDPOINTS
-# ============================================================================
-
-@app.route('/api/sensors/discover', methods=['GET'])
-def discover_sensors():
-    """Discover all available sensors on this device."""
+@app.route('/api/camera/capture', methods=['GET'])
+def camera_capture():
+    """Capture an image from the default webcam and return as base64 data URI."""
     try:
-        discovery = get_sensor_discovery(Config.DATA_DIR)
-        device_info = discovery.get_device_info()
-        return jsonify({
-            'status': 'success',
-            'device_info': device_info.to_dict()
-        })
-    except Exception as e:
-        logger.error(f'Error discovering sensors: {str(e)}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-@app.route('/api/sensors/list', methods=['GET'])
-def list_sensors():
-    """List all detected sensors with their availability status."""
-    try:
-        discovery = get_sensor_discovery(Config.DATA_DIR)
-        device_info = discovery.get_device_info()
-        sensors = [s.to_dict() for s in device_info.sensors]
-        return jsonify({
-            'status': 'success',
-            'sensors': sensors,
-            'device_type': device_info.device_type
-        })
-    except Exception as e:
-        logger.error(f'Error listing sensors: {str(e)}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-@app.route('/api/sensors/collect', methods=['POST'])
-def start_sensor_collection():
-    """Start data collection for a specific sensor.
-    
-    Request body:
-    {
-        "sensor_type": "camera" | "microphone" | "imu" | "sense_hat",
-        "duration_minutes": 1 | 5 | 10,
-        "capture_mode": "video" | "image" | "timelapse" (for camera only)
-    }
-    
-    Data is saved to: thoth/data/ directory
-    - Camera video: cam_*.mp4
-    - Camera image: img_*.jpg
-    - Camera timelapse: timelapse_*/ (folder with images)
-    - Microphone: mic_*.wav
-    - IMU: imu_*.json
-    """
-    if 'username' not in session:
-        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
-    
-    try:
-        data = request.get_json()
-        sensor_type = data.get('sensor_type')
-        duration_minutes = data.get('duration_minutes', 1)
-        capture_mode = data.get('capture_mode', 'video')  # For camera: video, image, timelapse
-        
-        if not sensor_type:
-            return jsonify({'status': 'error', 'message': 'sensor_type is required'}), 400
-        
-        if duration_minutes not in [1, 5, 10]:
-            return jsonify({'status': 'error', 'message': 'duration_minutes must be 1, 5, or 10'}), 400
-        
-        if capture_mode not in ['video', 'image', 'timelapse']:
-            return jsonify({'status': 'error', 'message': 'capture_mode must be video, image, or timelapse'}), 400
-        
-        discovery = get_sensor_discovery(Config.DATA_DIR)
-        success, result = discovery.start_collection(sensor_type, duration_minutes, capture_mode)
-        
-        if success:
-            return jsonify({
-                'status': 'success',
-                'message': f'Collection started for {sensor_type}',
-                'filename': result,
-                'duration_minutes': duration_minutes,
-                'capture_mode': capture_mode,
-                'data_directory': Config.DATA_DIR
-            })
-        else:
-            return jsonify({'status': 'error', 'message': result}), 400
-            
-    except Exception as e:
-        logger.error(f'Error starting collection: {str(e)}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-@app.route('/api/sensors/collect/stop', methods=['POST'])
-def stop_sensor_collection():
-    """Stop data collection for a specific sensor."""
-    if 'username' not in session:
-        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
-    
-    try:
-        data = request.get_json()
-        sensor_type = data.get('sensor_type')
-        
-        if not sensor_type:
-            return jsonify({'status': 'error', 'message': 'sensor_type is required'}), 400
-        
-        discovery = get_sensor_discovery(Config.DATA_DIR)
-        success = discovery.stop_collection(sensor_type)
-        
-        if success:
-            return jsonify({
-                'status': 'success',
-                'message': f'Collection stopped for {sensor_type}'
-            })
-        else:
-            return jsonify({'status': 'error', 'message': 'No active collection found'}), 400
-            
-    except Exception as e:
-        logger.error(f'Error stopping collection: {str(e)}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-@app.route('/api/sensors/collect/status', methods=['GET'])
-def get_collection_status():
-    """Get the status of all sensor collections."""
-    try:
-        discovery = get_sensor_discovery(Config.DATA_DIR)
-        device_info = discovery.get_device_info()
-        
-        status = {}
-        for sensor in device_info.sensors:
-            status[sensor.sensor_type] = {
-                'available': sensor.available,
-                'collecting': discovery.is_collecting(sensor.sensor_type)
-            }
-        
-        return jsonify({
-            'status': 'success',
-            'collection_status': status
-        })
-    except Exception as e:
-        logger.error(f'Error getting collection status: {str(e)}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-@app.route('/api/camera/capture', methods=['POST'])
-def quick_camera_capture():
-    """Quickly capture a photo or short video and optionally upload to Brain.
-    
-    Request body:
-    {
-        "type": "photo" | "video",
-        "duration": 5,  // seconds, for video only (default 5, max 30)
-        "upload": true  // whether to upload to Brain cloud
-    }
-    """
-    if 'username' not in session:
-        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
-    
-    try:
-        import cv2
-        import base64
-        
-        data = request.get_json() or {}
-        capture_type = data.get('type', 'photo')
-        duration = min(data.get('duration', 5), 30)  # Max 30 seconds
-        should_upload = data.get('upload', True)
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
-            return jsonify({'status': 'error', 'message': 'Failed to open camera'}), 500
-        
-        # Allow camera to warm up
-        time.sleep(0.3)
-        
-        if capture_type == 'photo':
-            filename = f"photo_{timestamp}.jpg"
-            filepath = os.path.join(Config.DATA_DIR, filename)
-            
+            return jsonify({'status': 'error', 'message': 'Camera not available'}), 400
+        # Give the camera a moment to adjust
+        for _ in range(5):
+            cap.read()
+        ret, frame = cap.read()
+        cap.release()
+        if not ret:
+            return jsonify({'status': 'error', 'message': 'Failed to capture image'}), 500
+        ret, buffer = cv2.imencode('.jpg', frame)
+        if not ret:
+            return jsonify({'status': 'error', 'message': 'Failed to encode image'}), 500
+
+        # Save image to data directory
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        filename = f"img_{timestamp}.jpg"
+        file_path = os.path.join(Config.DATA_DIR, filename)
+        os.makedirs(Config.DATA_DIR, exist_ok=True)
+        cv2.imwrite(file_path, frame)
+
+        img_b64 = base64.b64encode(buffer).decode('utf-8')
+        data_uri = f'data:image/jpeg;base64,{img_b64}'
+        return jsonify({'status': 'success', 'image': data_uri, 'file': filename})
+    except Exception as e:
+        logger.error(f'Camera capture error: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# ---------------------------------------------------------------------------
+# Camera video recording API
+# ---------------------------------------------------------------------------
+
+@app.route('/api/camera/record', methods=['POST'])
+def camera_record():
+    """Record a video from the default webcam for the specified duration in seconds."""
+    try:
+        data = request.get_json(force=True) or {}
+        duration = int(data.get('duration', 5))
+        if duration <= 0 or duration > 30:
+            return jsonify({'status': 'error', 'message': 'Duration must be between 1 and 30 seconds'}), 400
+
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        filename = f"vid_{timestamp}.mp4"
+        file_path = os.path.join(Config.DATA_DIR, filename)
+        os.makedirs(Config.DATA_DIR, exist_ok=True)
+
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            return jsonify({'status': 'error', 'message': 'Camera not available'}), 400
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 640)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 480)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(file_path, fourcc, fps, (width, height))
+
+        start_time = time.time()
+        while time.time() - start_time < duration:
             ret, frame = cap.read()
-            cap.release()
-            
             if not ret:
-                return jsonify({'status': 'error', 'message': 'Failed to capture image'}), 500
-            
-            cv2.imwrite(filepath, frame)
-            content_type = 'image/jpeg'
-            
-            logger.info(f"Photo captured: {filename}")
-            
-        else:  # video
-            filename = f"video_{timestamp}.mp4"
-            filepath = os.path.join(Config.DATA_DIR, filename)
-            
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30
-            
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(filepath, fourcc, fps, (width, height))
-            
-            start_time = time.time()
-            frame_count = 0
-            while time.time() - start_time < duration:
-                ret, frame = cap.read()
-                if ret:
-                    out.write(frame)
-                    frame_count += 1
-                else:
-                    break
-            
-            cap.release()
-            out.release()
-            content_type = 'video/mp4'
-            
-            logger.info(f"Video captured: {filename} ({frame_count} frames, {duration}s)")
-        
-        result = {
-            'status': 'success',
-            'filename': filename,
-            'filepath': filepath,
-            'type': capture_type,
-            'timestamp': timestamp,
-            'uploaded': False
-        }
-        
-        # Upload to Brain if requested
-        if should_upload:
-            auth_token = getattr(Config, 'USER_AUTH_TOKEN', None)
-            if auth_token:
-                try:
-                    with open(filepath, 'rb') as f:
-                        content = f.read()
-                    
-                    content_b64 = base64.b64encode(content).decode('utf-8')
-                    device_id = getattr(Config, 'DEVICE_ID', None)
-                    
-                    brain_url = f"{Config.BRAIN_SERVER_URL}/file/upload"
-                    headers = {
-                        'Authorization': f'Bearer {auth_token}',
-                        'Content-Type': 'application/json'
-                    }
-                    
-                    payload = {
-                        'filename': filename,
-                        'content': content_b64,
-                        'is_base64': True,
-                        'device_id': device_id,
-                        'content_type': content_type
-                    }
-                    
-                    response = requests.post(brain_url, json=payload, headers=headers, timeout=120)
-                    
-                    if response.status_code in (200, 201):
-                        upload_result = response.json()
-                        result['uploaded'] = True
-                        result['cloud_file_id'] = upload_result.get('file_id')
-                        logger.info(f"Media uploaded to Brain: {filename}")
-                    else:
-                        logger.error(f"Upload failed: {response.status_code}")
-                        result['upload_error'] = f"Upload failed: {response.status_code}"
-                        
-                except Exception as e:
-                    logger.error(f"Error uploading to Brain: {e}")
-                    result['upload_error'] = str(e)
-            else:
-                result['upload_error'] = "Not authenticated with Brain server"
-        
-        return jsonify(result)
-        
-    except ImportError:
-        return jsonify({'status': 'error', 'message': 'OpenCV not installed'}), 500
+                break
+            out.write(frame)
+
+        cap.release()
+        out.release()
+
+        return jsonify({'status': 'success', 'file': filename})
     except Exception as e:
-        logger.error(f'Error in quick capture: {str(e)}')
+        logger.error(f'Camera record error: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-
-@app.route('/api/media/list', methods=['GET'])
-def list_media_files():
-    """List all captured media files (photos and videos)."""
-    try:
-        media_files = []
-        
-        if os.path.exists(Config.DATA_DIR):
-            for filename in os.listdir(Config.DATA_DIR):
-                filepath = os.path.join(Config.DATA_DIR, filename)
-                if os.path.isfile(filepath):
-                    ext = os.path.splitext(filename)[1].lower()
-                    if ext in ['.jpg', '.jpeg', '.png', '.mp4', '.avi', '.mov', '.wav', '.mp3']:
-                        stat = os.stat(filepath)
-                        media_type = 'image' if ext in ['.jpg', '.jpeg', '.png'] else 'video' if ext in ['.mp4', '.avi', '.mov'] else 'audio'
-                        media_files.append({
-                            'filename': filename,
-                            'type': media_type,
-                            'size': stat.st_size,
-                            'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
-                            'modified': datetime.fromtimestamp(stat.st_mtime).isoformat()
-                        })
-        
-        # Sort by modified time, newest first
-        media_files.sort(key=lambda x: x['modified'], reverse=True)
-        
-        return jsonify({
-            'status': 'success',
-            'files': media_files,
-            'count': len(media_files),
-            'data_directory': Config.DATA_DIR
-        })
-        
-    except Exception as e:
-        logger.error(f'Error listing media files: {str(e)}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-@app.route('/api/media/serve/<filename>', methods=['GET'])
-def serve_media_file(filename):
-    """Serve a media file for viewing/playback."""
-    try:
-        filepath = os.path.join(Config.DATA_DIR, filename)
-        
-        if not os.path.exists(filepath):
-            return jsonify({'status': 'error', 'message': 'File not found'}), 404
-        
-        # Determine content type
-        ext = os.path.splitext(filename)[1].lower()
-        content_types = {
-            '.jpg': 'image/jpeg',
-            '.jpeg': 'image/jpeg',
-            '.png': 'image/png',
-            '.mp4': 'video/mp4',
-            '.avi': 'video/x-msvideo',
-            '.mov': 'video/quicktime',
-            '.wav': 'audio/wav',
-            '.mp3': 'audio/mpeg'
-        }
-        content_type = content_types.get(ext, 'application/octet-stream')
-        
-        return send_from_directory(Config.DATA_DIR, filename, mimetype=content_type)
-        
-    except Exception as e:
-        logger.error(f'Error serving media file: {str(e)}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-@app.route('/api/media/upload/<filename>', methods=['POST'])
-def upload_media_to_cloud(filename):
-    """Upload a specific media file to Brain cloud."""
-    if 'username' not in session:
-        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
-    
-    try:
-        import base64
-        
-        filepath = os.path.join(Config.DATA_DIR, filename)
-        
-        if not os.path.exists(filepath):
-            return jsonify({'status': 'error', 'message': 'File not found'}), 404
-        
-        auth_token = getattr(Config, 'USER_AUTH_TOKEN', None)
-        if not auth_token:
-            return jsonify({'status': 'error', 'message': 'Not authenticated with Brain server'}), 401
-        
-        with open(filepath, 'rb') as f:
-            content = f.read()
-        
-        content_b64 = base64.b64encode(content).decode('utf-8')
-        device_id = getattr(Config, 'DEVICE_ID', None)
-        
-        ext = os.path.splitext(filename)[1].lower()
-        content_types = {
-            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
-            '.mp4': 'video/mp4', '.avi': 'video/x-msvideo', '.mov': 'video/quicktime',
-            '.wav': 'audio/wav', '.mp3': 'audio/mpeg'
-        }
-        content_type = content_types.get(ext, 'application/octet-stream')
-        
-        brain_url = f"{Config.BRAIN_SERVER_URL}/file/upload"
-        headers = {
-            'Authorization': f'Bearer {auth_token}',
-            'Content-Type': 'application/json'
-        }
-        
-        payload = {
-            'filename': filename,
-            'content': content_b64,
-            'is_base64': True,
-            'device_id': device_id,
-            'content_type': content_type
-        }
-        
-        response = requests.post(brain_url, json=payload, headers=headers, timeout=120)
-        
-        if response.status_code in (200, 201):
-            result = response.json()
-            logger.info(f"Media uploaded to Brain: {filename}")
-            return jsonify({
-                'status': 'success',
-                'message': 'File uploaded to cloud',
-                'cloud_file_id': result.get('file_id'),
-                'filename': filename
-            })
-        else:
-            return jsonify({
-                'status': 'error',
-                'message': f'Upload failed: {response.text}'
-            }), response.status_code
-            
-    except Exception as e:
-        logger.error(f'Error uploading media: {str(e)}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-@app.route('/api/media/delete/<filename>', methods=['DELETE'])
-def delete_media_file(filename):
-    """Delete a media file from local storage."""
-    if 'username' not in session:
-        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
-    
-    try:
-        filepath = os.path.join(Config.DATA_DIR, filename)
-        
-        if not os.path.exists(filepath):
-            return jsonify({'status': 'error', 'message': 'File not found'}), 404
-        
-        os.remove(filepath)
-        logger.info(f"Media file deleted: {filename}")
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'File deleted',
-            'filename': filename
-        })
-        
-    except Exception as e:
-        logger.error(f'Error deleting media file: {str(e)}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
+# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
     # Start the scheduler

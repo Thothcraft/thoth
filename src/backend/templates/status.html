@@ -145,6 +145,11 @@
                 {{ 'Start' if not system_status.collection_active else 'Stop' }} Collection
             </button>
             
+            <button onclick="capturePhoto()" class="btn btn-action">
+                <i class="fas fa-camera mr-2"></i>
+                Take Photo
+            </button>
+            
             <button onclick="restartService('thoth-collector')" class="btn btn-action">
                 <i class="fas fa-sync-alt mr-2"></i>
                 Restart Collector
@@ -247,6 +252,63 @@ async function shutdownDevice() {
     } catch (error) {
         console.error('Error shutting down:', error);
         alert('Failed to initiate shutdown: ' + error.message);
+    }
+}
+
+async function capturePhoto() {
+    try {
+        const btn = event.currentTarget;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Capturing...';
+        const resp = await fetch('/api/camera/capture');
+        if (!resp.ok) throw new Error('Capture failed');
+        const data = await resp.json();
+        if (data.status !== 'success') throw new Error(data.message || 'Capture failed');
+        const imgWindow = window.open('');
+        if (imgWindow && imgWindow.document) {
+            imgWindow.document.write(`<img src="${data.image}" alt="Captured photo" style="max-width:100%">`);
+        } else {
+            // Popup blocked; initiate download instead
+            const link = document.createElement('a');
+            link.href = data.image;
+            link.download = 'capture.jpg';
+            link.click();
+        }
+    } catch (err) {
+        alert(err.message);
+    } finally {
+        const btn = document.querySelector('button[onclick="capturePhoto()"]');
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-camera mr-2"></i>Take Photo';
+        }
+    }
+}
+
+async function captureVideo() {
+    try {
+        const seconds = parseInt(prompt('Record duration (seconds):', '5'));
+        if (isNaN(seconds) || seconds <= 0) return;
+        const btn = event.currentTarget;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Recording...';
+        const resp = await fetch('/api/camera/record', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ duration: seconds })
+        });
+        if (!resp.ok) throw new Error('Record failed');
+        const data = await resp.json();
+        if (data.status !== 'success') throw new Error(data.message || 'Record failed');
+        alert('Video saved to: ' + data.file);
+    } catch (err) {
+        alert(err.message);
+    } finally {
+        const btn = document.querySelector('button[onclick="captureVideo()"]');
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-video mr-2"></i>Record Video';
+        }
     }
 }
 
