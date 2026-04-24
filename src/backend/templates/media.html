@@ -1,630 +1,738 @@
 {% extends "base.html" %}
 
-{% block title %}Media - {{ super() }}{% endblock %}
+{% block title %}Media - Thoth Device{% endblock %}
 
 {% block extra_head %}
 <style>
-    .media-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-        gap: 1rem;
-    }
-    
-    .media-item {
-        position: relative;
-        aspect-ratio: 1;
-        border-radius: 0.75rem;
-        overflow: hidden;
-        background-color: #1e293b;
-        border: 1px solid #334155;
-        cursor: pointer;
-        transition: all 0.2s;
-    }
-    
-    .media-item:hover {
-        border-color: #6366f1;
-        transform: scale(1.02);
-    }
-    
-    .media-item img, .media-item video {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-    }
-    
-    .media-overlay {
-        position: absolute;
-        bottom: 0;
-        left: 0;
-        right: 0;
-        padding: 1rem;
-        background: linear-gradient(transparent, rgba(0,0,0,0.8));
-        opacity: 0;
-        transition: opacity 0.2s;
-    }
-    
-    .media-item:hover .media-overlay {
-        opacity: 1;
-    }
-    
-    .annotation-canvas {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        pointer-events: none;
-    }
-    
-    .annotation-mode .annotation-canvas {
-        pointer-events: auto;
-        cursor: crosshair;
-    }
-    
-    .modal {
-        display: none;
-        position: fixed;
-        inset: 0;
-        z-index: 100;
-        background-color: rgba(0, 0, 0, 0.9);
-        align-items: center;
-        justify-content: center;
-    }
-    
-    .modal.active {
-        display: flex;
-    }
-    
-    .modal-content {
-        max-width: 90vw;
-        max-height: 90vh;
-        position: relative;
-    }
-    
-    .annotation-toolbar {
-        position: absolute;
-        bottom: 1rem;
-        left: 50%;
-        transform: translateX(-50%);
-        display: flex;
-        gap: 0.5rem;
-        padding: 0.5rem;
-        background: rgba(30, 41, 59, 0.95);
-        border-radius: 0.5rem;
-        border: 1px solid #475569;
-    }
-    
-    .annotation-btn {
-        padding: 0.5rem 1rem;
-        border-radius: 0.375rem;
-        background-color: #334155;
-        color: #e2e8f0;
-        border: none;
-        cursor: pointer;
-        transition: all 0.2s;
-    }
-    
-    .annotation-btn:hover {
-        background-color: #475569;
-    }
-    
-    .annotation-btn.active {
-        background-color: #6366f1;
-    }
+    .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0.5rem; }
+    .media-item { position: relative; aspect-ratio: 1; border-radius: 0.5rem; overflow: hidden; cursor: pointer; background: #e5e7eb; transition: transform 0.2s; }
+    .dark .media-item { background: #334155; }
+    .media-item img { width: 100%; height: 100%; object-fit: cover; }
+    .media-item:hover { transform: scale(1.02); }
+    .media-item.selected { outline: 3px solid #6366f1; outline-offset: 2px; }
+    .media-item .cloud-badge { position: absolute; top: 4px; left: 4px; }
+    .media-item .select-check { position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; border-radius: 50%; border: 2px solid white; background: rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center; }
+    .media-item.selected .select-check { background: #6366f1; border-color: #6366f1; }
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 100; display: none; align-items: center; justify-content: center; padding: 1rem; overflow-y: auto; }
+    .modal-backdrop.active { display: flex; }
+    .tag { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; background: #e0e7ff; color: #4338ca; cursor: pointer; }
+    .dark .tag { background: #312e81; color: #a5b4fc; }
+    .cam-btn { padding: 0.5rem 0.75rem; border-radius: 0.375rem; border: 2px solid #e5e7eb; background: white; cursor: pointer; font-size: 0.875rem; }
+    .dark .cam-btn { border-color: #475569; background: #1e293b; color: #e2e8f0; }
+    .cam-btn.active { border-color: #6366f1; background: #eef2ff; }
+    .dark .cam-btn.active { border-color: #6366f1; background: #312e81; }
+    .batch-toolbar { position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); z-index: 50; }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="space-y-6">
-    <!-- Page Header -->
-    <div class="flex items-center justify-between flex-wrap gap-4">
-        <div>
-            <h2 class="text-2xl font-bold text-white">Media Gallery</h2>
-            <p class="text-slate-400 mt-1">Capture, view, and annotate photos and videos</p>
-        </div>
-        <div class="flex items-center gap-3">
-            <button onclick="refreshMedia()" class="btn btn-secondary flex items-center">
-                <i class="fas fa-sync-alt mr-2" id="refresh-icon"></i>
-                Refresh
+<div class="space-y-4">
+    <!-- Header -->
+    <div class="flex items-center justify-between">
+        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Media</h1>
+        <div class="flex gap-2">
+            <button onclick="toggleSelectMode()" class="btn btn-secondary text-sm" id="select-mode-btn">
+                <i class="fas fa-check-square mr-1"></i> Select
+            </button>
+            <button onclick="location.reload()" class="btn btn-secondary text-sm">
+                <i class="fas fa-sync-alt mr-1"></i> Refresh
             </button>
         </div>
     </div>
 
-    <!-- Capture Controls -->
-    <div class="card bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border-indigo-500/30">
-        <h3 class="text-lg font-semibold text-white mb-4 flex items-center">
-            <i class="fas fa-camera mr-2 text-indigo-400"></i>
-            Quick Capture
-        </h3>
-        <div class="flex flex-wrap gap-4">
-            <button onclick="capturePhoto()" class="btn btn-primary flex items-center" id="capture-photo-btn">
-                <i class="fas fa-camera mr-2"></i>
-                Take Photo
-            </button>
-            <button onclick="captureVideo(5)" class="btn flex items-center" style="background-color: #7c3aed; color: white;" id="capture-video-5-btn">
-                <i class="fas fa-video mr-2"></i>
-                Record 5s Video
-            </button>
-            <button onclick="captureVideo(10)" class="btn flex items-center" style="background-color: #db2777; color: white;" id="capture-video-10-btn">
-                <i class="fas fa-video mr-2"></i>
-                Record 10s Video
-            </button>
-        </div>
-        <div id="capture-status" class="mt-3 text-sm hidden">
-            <span class="text-amber-400 flex items-center">
-                <i class="fas fa-spinner fa-spin mr-2"></i>
-                <span id="capture-status-text">Capturing...</span>
-            </span>
+    <!-- Capture Card -->
+    <div class="card">
+        <div class="grid md:grid-cols-2 gap-4">
+            <div>
+                <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Camera <button onclick="refreshCameras()" class="text-xs text-indigo-500 ml-1"><i class="fas fa-sync-alt"></i></button>
+                </h3>
+                <div class="flex flex-wrap gap-2" id="camera-buttons">
+                    <span class="text-sm text-gray-400">Loading...</span>
+                </div>
+            </div>
+            <div>
+                <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Capture</h3>
+                <div class="flex flex-wrap gap-2">
+                    <button onclick="capturePhoto()" class="btn btn-primary text-sm" id="btn-photo">
+                        <i class="fas fa-camera mr-1"></i> Photo
+                    </button>
+                    <button onclick="captureVideo(5)" class="btn text-sm" style="background:#8b5cf6;color:white" id="btn-video-5">
+                        <i class="fas fa-video mr-1"></i> 5s
+                    </button>
+                    <button onclick="captureVideo(10)" class="btn text-sm" style="background:#ec4899;color:white" id="btn-video-10">
+                        <i class="fas fa-video mr-1"></i> 10s
+                    </button>
+                    <button onclick="captureAudio(5)" class="btn text-sm" style="background:#f59e0b;color:white" id="btn-audio-5">
+                        <i class="fas fa-microphone mr-1"></i> 5s
+                    </button>
+                    <button onclick="captureAudio(10)" class="btn text-sm" style="background:#ef4444;color:white" id="btn-audio-10">
+                        <i class="fas fa-microphone mr-1"></i> 10s
+                    </button>
+                </div>
+                <p id="capture-status" class="text-sm text-amber-600 mt-2 hidden">
+                    <i class="fas fa-spinner fa-spin mr-1"></i> <span id="status-text">Capturing...</span>
+                </p>
+            </div>
         </div>
     </div>
 
     <!-- Stats -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div class="card py-4">
-            <div class="flex items-center gap-3">
-                <div class="p-2 bg-blue-500/20 rounded-lg">
-                    <i class="fas fa-image text-blue-400"></i>
-                </div>
-                <div>
-                    <p class="text-2xl font-bold text-white" id="photo-count">{{ media_files|selectattr('type', 'equalto', 'image')|list|length }}</p>
-                    <p class="text-slate-400 text-sm">Photos</p>
-                </div>
-            </div>
+    <div class="grid grid-cols-4 gap-2 text-center text-sm">
+        <div class="card py-2">
+            <p class="text-lg font-bold text-gray-900 dark:text-white">{{ media_files|selectattr('type', 'equalto', 'image')|list|length }}</p>
+            <p class="text-xs text-gray-500">Photos</p>
         </div>
-        <div class="card py-4">
-            <div class="flex items-center gap-3">
-                <div class="p-2 bg-purple-500/20 rounded-lg">
-                    <i class="fas fa-video text-purple-400"></i>
-                </div>
-                <div>
-                    <p class="text-2xl font-bold text-white" id="video-count">{{ media_files|selectattr('type', 'equalto', 'video')|list|length }}</p>
-                    <p class="text-slate-400 text-sm">Videos</p>
-                </div>
-            </div>
+        <div class="card py-2">
+            <p class="text-lg font-bold text-gray-900 dark:text-white">{{ media_files|selectattr('type', 'equalto', 'video')|list|length }}</p>
+            <p class="text-xs text-gray-500">Videos</p>
         </div>
-        <div class="card py-4">
-            <div class="flex items-center gap-3">
-                <div class="p-2 bg-green-500/20 rounded-lg">
-                    <i class="fas fa-cloud text-green-400"></i>
-                </div>
-                <div>
-                    <p class="text-2xl font-bold text-white" id="cloud-count">{{ media_files|selectattr('on_cloud', 'equalto', true)|list|length }}</p>
-                    <p class="text-slate-400 text-sm">On Cloud</p>
-                </div>
-            </div>
+        <div class="card py-2">
+            <p class="text-lg font-bold text-green-600">{{ media_files|selectattr('on_cloud', 'equalto', true)|list|length }}</p>
+            <p class="text-xs text-gray-500">On Cloud</p>
         </div>
-        <div class="card py-4">
-            <div class="flex items-center gap-3">
-                <div class="p-2 bg-orange-500/20 rounded-lg">
-                    <i class="fas fa-hdd text-orange-400"></i>
-                </div>
-                <div>
-                    <p class="text-2xl font-bold text-white" id="local-count">{{ media_files|selectattr('on_cloud', 'equalto', false)|list|length }}</p>
-                    <p class="text-slate-400 text-sm">Local</p>
-                </div>
-            </div>
+        <div class="card py-2">
+            <p class="text-lg font-bold text-amber-600">{{ media_files|rejectattr('on_cloud', 'equalto', true)|list|length }}</p>
+            <p class="text-xs text-gray-500">Local Only</p>
         </div>
     </div>
 
-    <!-- Filter and Search -->
-    <div class="flex flex-wrap items-center gap-4">
-        <div class="relative flex-1 max-w-md">
-            <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
-            <input type="text" id="search-input" placeholder="Search files..." 
-                   class="form-input pl-10" onkeyup="filterMedia()">
-        </div>
-        <div class="flex items-center gap-2">
-            <span class="text-slate-400"><i class="fas fa-filter mr-2"></i></span>
-            <button onclick="setFilter('all')" class="filter-btn active" data-filter="all">All</button>
-            <button onclick="setFilter('image')" class="filter-btn" data-filter="image">Images</button>
-            <button onclick="setFilter('video')" class="filter-btn" data-filter="video">Videos</button>
-        </div>
+    <!-- Filter -->
+    <div class="flex gap-2">
+        <input type="text" id="search-input" placeholder="Search..." class="form-input flex-1 text-sm" oninput="filterMedia()">
+        <select id="type-filter" class="form-input w-auto text-sm" onchange="filterMedia()">
+            <option value="all">All</option>
+            <option value="image">Images</option>
+            <option value="video">Videos</option>
+            <option value="audio">Audio</option>
+            <option value="local">Local Only</option>
+            <option value="cloud">On Cloud</option>
+        </select>
     </div>
 
     <!-- Media Grid -->
     <div class="media-grid" id="media-grid">
         {% for file in media_files %}
-        <div class="media-item" data-type="{{ file.type }}" data-filename="{{ file.filename }}" onclick="openMedia('{{ file.filename }}', '{{ file.type }}')">
+        <div class="media-item" data-type="{{ file.type }}" data-name="{{ file.filename }}" data-cloud="{{ file.on_cloud|lower }}" data-labels="{{ file.labels|join(',') }}"
+             onclick="handleMediaClick(event, '{{ file.filename }}', '{{ file.type }}')">
             {% if file.type == 'image' %}
             <img src="/api/media/serve/{{ file.filename }}" alt="{{ file.filename }}" loading="lazy">
+            {% elif file.type == 'video' %}
+            <div class="w-full h-full flex items-center justify-center bg-purple-100 dark:bg-purple-900/30">
+                <i class="fas fa-play text-xl text-purple-500"></i>
+            </div>
+            {% elif file.type == 'audio' %}
+            <div class="w-full h-full flex items-center justify-center bg-amber-100 dark:bg-amber-900/30">
+                <i class="fas fa-music text-xl text-amber-500"></i>
+            </div>
             {% else %}
-            <div class="w-full h-full flex items-center justify-center bg-gradient-to-br from-purple-900/50 to-indigo-900/50">
-                <i class="fas fa-play text-4xl text-white/80"></i>
+            <div class="w-full h-full flex items-center justify-center bg-gray-100 dark:bg-gray-800">
+                <i class="fas fa-file text-xl text-gray-500"></i>
             </div>
             {% endif %}
-            <div class="media-overlay">
-                <p class="text-white text-sm font-medium truncate">{{ file.filename }}</p>
-                <div class="flex items-center gap-2 mt-1">
-                    <span class="text-slate-300 text-xs">{{ file.size_formatted }}</span>
-                    {% if file.on_cloud %}
-                    <i class="fas fa-cloud text-green-400 text-xs"></i>
-                    {% else %}
-                    <i class="fas fa-hdd text-orange-400 text-xs"></i>
+            <!-- Cloud/Local badge -->
+            {% if file.on_cloud %}
+            <span class="cloud-badge text-xs bg-green-500 text-white px-1 rounded" title="On Cloud">
+                <i class="fas fa-cloud"></i>
+            </span>
+            {% else %}
+            <span class="cloud-badge text-xs bg-amber-500 text-white px-1 rounded" title="Local Only">
+                <i class="fas fa-hdd"></i>
+            </span>
+            {% endif %}
+            <!-- Labels display -->
+            {% if file.labels and file.labels|length > 0 %}
+            <div class="absolute bottom-0 left-0 right-0 p-1 bg-gradient-to-t from-black/70 to-transparent">
+                <div class="flex flex-wrap gap-0.5">
+                    {% for label in file.labels %}
+                    {% if loop.index <= 3 %}
+                    <span class="text-[10px] bg-blue-500/90 text-white px-1 rounded">{{ label }}</span>
+                    {% endif %}
+                    {% endfor %}
+                    {% if file.labels|length > 3 %}
+                    <span class="text-[10px] text-white/80">+{{ file.labels|length - 3 }}</span>
                     {% endif %}
                 </div>
             </div>
-            {% if file.type == 'video' %}
-            <div class="absolute top-2 right-2 bg-purple-600 text-white text-xs px-2 py-0.5 rounded-full">
-                Video
-            </div>
             {% endif %}
+            <!-- Type badge -->
+            {% if file.type == 'video' %}
+            <span class="absolute top-1 right-1 text-xs bg-purple-500 text-white px-1 rounded">VID</span>
+            {% elif file.type == 'audio' %}
+            <span class="absolute top-1 right-1 text-xs bg-amber-500 text-white px-1 rounded">AUD</span>
+            {% endif %}
+            <!-- Selection checkbox -->
+            <div class="select-check hidden"><i class="fas fa-check text-white text-xs"></i></div>
         </div>
         {% else %}
-        <div class="col-span-full text-center py-16" id="empty-state">
-            <i class="fas fa-camera text-6xl text-slate-600 mb-4"></i>
-            <h3 class="text-xl font-semibold text-white mb-2">No media files yet</h3>
-            <p class="text-slate-400 mb-6">Capture photos or videos using the buttons above</p>
+        <div class="col-span-full text-center py-12 text-gray-500">
+            <i class="fas fa-camera text-4xl mb-2"></i>
+            <p>No media files yet</p>
         </div>
         {% endfor %}
     </div>
 </div>
 
-<!-- Media Preview Modal -->
-<div class="modal" id="media-modal">
-    <div class="modal-content">
-        <button onclick="closeModal()" class="absolute top-4 right-4 text-white hover:text-slate-300 z-10">
-            <i class="fas fa-times text-2xl"></i>
+<!-- Batch Action Toolbar (shown when items selected) -->
+<div class="batch-toolbar hidden" id="batch-toolbar">
+    <div class="bg-indigo-600 text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-3">
+        <span id="selected-count">0 selected</span>
+        <button onclick="batchUpload()" class="px-3 py-1 bg-white/20 rounded hover:bg-white/30">
+            <i class="fas fa-cloud-upload-alt mr-1"></i> Upload
         </button>
+        <button onclick="batchLabel()" class="px-3 py-1 bg-white/20 rounded hover:bg-white/30">
+            <i class="fas fa-tags mr-1"></i> Label
+        </button>
+        <button onclick="batchDelete()" class="px-3 py-1 bg-red-500 rounded hover:bg-red-600">
+            <i class="fas fa-trash mr-1"></i> Delete
+        </button>
+        <button onclick="clearSelection()" class="px-2 py-1 hover:bg-white/20 rounded">
+            <i class="fas fa-times"></i>
+        </button>
+    </div>
+</div>
+
+<!-- Single File Modal -->
+<div class="modal-backdrop" id="modal" onclick="if(event.target===this)closeModal()">
+    <div class="max-w-4xl w-full">
+        <div id="media-container" class="bg-black rounded-lg overflow-hidden mb-4"></div>
         
-        <div id="modal-media-container" class="relative">
-            <!-- Media will be inserted here -->
+        <!-- Labels Section -->
+        <div class="bg-white dark:bg-slate-800 rounded-lg p-4 mb-4">
+            <div class="flex items-center justify-between mb-3">
+                <h4 class="font-medium text-gray-900 dark:text-white">Labels</h4>
+                <button onclick="saveLabels()" class="btn btn-primary text-sm" id="save-btn">
+                    <i class="fas fa-save mr-1"></i> Save
+                </button>
+            </div>
+            <div id="labels-container" class="flex flex-wrap gap-2 mb-3 min-h-[2rem]"></div>
+            <div class="flex gap-2">
+                <input type="text" id="label-input" placeholder="Add label..." class="form-input flex-1 text-sm" 
+                       onkeydown="if(event.key==='Enter'){event.preventDefault();addLabel();}">
+                <button onclick="addLabel()" class="btn btn-secondary text-sm">Add</button>
+            </div>
+            <div class="flex flex-wrap gap-1 mt-3">
+                <span class="text-xs text-gray-500 mr-2">Quick:</span>
+                <button onclick="addQuickLabel('walking')" class="tag cursor-pointer hover:opacity-80">walking</button>
+                <button onclick="addQuickLabel('sitting')" class="tag cursor-pointer hover:opacity-80">sitting</button>
+                <button onclick="addQuickLabel('standing')" class="tag cursor-pointer hover:opacity-80">standing</button>
+                <button onclick="addQuickLabel('sleeping')" class="tag cursor-pointer hover:opacity-80">sleeping</button>
+                <button onclick="addQuickLabel('pet')" class="tag cursor-pointer hover:opacity-80">pet</button>
+                <button onclick="addQuickLabel('empty')" class="tag cursor-pointer hover:opacity-80">empty</button>
+            </div>
         </div>
         
-        <!-- Annotation Toolbar -->
-        <div class="annotation-toolbar" id="annotation-toolbar">
-            <button class="annotation-btn" onclick="toggleAnnotationMode()" id="annotate-btn">
-                <i class="fas fa-pen mr-2"></i>Annotate
-            </button>
-            <button class="annotation-btn" onclick="saveAnnotation()" id="save-annotation-btn" style="display: none;">
-                <i class="fas fa-save mr-2"></i>Save
-            </button>
-            <button class="annotation-btn" onclick="clearAnnotations()" id="clear-annotation-btn" style="display: none;">
-                <i class="fas fa-eraser mr-2"></i>Clear
-            </button>
-            <div class="h-6 w-px bg-slate-600 mx-2"></div>
-            <button class="annotation-btn" onclick="uploadToCloud()" id="upload-btn">
-                <i class="fas fa-cloud-upload-alt mr-2"></i>Upload
-            </button>
-            <button class="annotation-btn" onclick="downloadMedia()" id="download-btn">
-                <i class="fas fa-download mr-2"></i>Download
-            </button>
-            <button class="annotation-btn" onclick="deleteMedia()" style="background-color: #dc2626;">
-                <i class="fas fa-trash mr-2"></i>Delete
-            </button>
+        <!-- Rename -->
+        <div class="bg-white dark:bg-slate-800 rounded-lg p-4 mb-4">
+            <h4 class="font-medium text-gray-900 dark:text-white mb-2">Rename</h4>
+            <div class="flex gap-2">
+                <input type="text" id="rename-input" class="form-input flex-1 text-sm" placeholder="New filename...">
+                <button onclick="renameFile()" class="btn btn-secondary text-sm">Rename</button>
+            </div>
+        </div>
+        
+        <!-- Actions -->
+        <div class="flex justify-center gap-2 flex-wrap">
+            <button onclick="uploadToCloud()" class="btn btn-success text-sm"><i class="fas fa-cloud-upload-alt mr-1"></i> Upload to Cloud</button>
+            <button onclick="downloadMedia()" class="btn btn-secondary text-sm"><i class="fas fa-download mr-1"></i> Download</button>
+            <button onclick="deleteMedia()" class="btn btn-danger text-sm"><i class="fas fa-trash mr-1"></i> Delete</button>
+            <button onclick="closeModal()" class="btn btn-secondary text-sm"><i class="fas fa-times mr-1"></i> Close</button>
         </div>
     </div>
 </div>
 
-<style>
-    .filter-btn {
-        padding: 0.375rem 0.75rem;
-        border-radius: 0.5rem;
-        font-size: 0.875rem;
-        font-weight: 500;
-        background-color: #1e293b;
-        color: #94a3b8;
-        border: 1px solid #334155;
-        cursor: pointer;
-        transition: all 0.2s;
-    }
-    
-    .filter-btn:hover {
-        background-color: #334155;
-        color: #e2e8f0;
-    }
-    
-    .filter-btn.active {
-        background-color: #6366f1;
-        color: white;
-        border-color: #6366f1;
-    }
-</style>
+<!-- Batch Label Modal -->
+<div class="modal-backdrop" id="batch-label-modal" onclick="if(event.target===this)closeBatchLabelModal()">
+    <div class="bg-white dark:bg-slate-800 rounded-lg p-6 max-w-md w-full mx-4">
+        <h3 class="text-lg font-bold text-gray-900 dark:text-white mb-4">Add Labels to Selected Files</h3>
+        <div id="batch-labels-container" class="flex flex-wrap gap-2 mb-3 min-h-[2rem]"></div>
+        <div class="flex gap-2 mb-3">
+            <input type="text" id="batch-label-input" class="form-input flex-1" placeholder="Add label..." 
+                   onkeydown="if(event.key==='Enter'){event.preventDefault();addBatchLabel();}">
+            <button onclick="addBatchLabel()" class="btn btn-secondary">Add</button>
+        </div>
+        <div class="flex flex-wrap gap-1 mb-4">
+            <button onclick="addBatchQuickLabel('walking')" class="tag">walking</button>
+            <button onclick="addBatchQuickLabel('sitting')" class="tag">sitting</button>
+            <button onclick="addBatchQuickLabel('standing')" class="tag">standing</button>
+            <button onclick="addBatchQuickLabel('sleeping')" class="tag">sleeping</button>
+            <button onclick="addBatchQuickLabel('pet')" class="tag">pet</button>
+            <button onclick="addBatchQuickLabel('empty')" class="tag">empty</button>
+        </div>
+        <div class="flex gap-2">
+            <button onclick="saveBatchLabels()" class="btn btn-primary flex-1">Save to All Selected</button>
+            <button onclick="closeBatchLabelModal()" class="btn btn-secondary">Cancel</button>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-let currentFilter = 'all';
-let currentMedia = null;
-let annotationMode = false;
-let annotations = [];
+let selectedCamera = 0;
+let currentFile = null;
+let labels = [];
+let availableCameras = [];
+let selectMode = false;
+let selectedFiles = new Set();
+let batchLabels = [];
+let allLabels = new Set(['walking', 'sitting', 'standing', 'sleeping', 'pet', 'empty']); // Track all used labels
+
+document.addEventListener('DOMContentLoaded', refreshCameras);
+
+// === Camera Functions ===
+async function refreshCameras() {
+    const container = document.getElementById('camera-buttons');
+    container.innerHTML = '<span class="text-sm text-gray-400"><i class="fas fa-spinner fa-spin"></i></span>';
+    try {
+        const res = await fetch('/api/camera/list');
+        const data = await res.json();
+        if (data.status === 'success' && data.cameras.length > 0) {
+            availableCameras = data.cameras;
+            
+            // If only one camera, it's the MacBook. Otherwise use index-based naming
+            const isSingleCamera = data.cameras.length === 1;
+            selectedCamera = data.cameras[0].index;
+            
+            container.innerHTML = data.cameras.map((cam, idx) => {
+                // Smart naming: single camera = MacBook, multiple = index-based
+                let name, icon;
+                if (isSingleCamera) {
+                    name = 'MacBook';
+                    icon = 'fa-laptop';
+                } else {
+                    // Multiple cameras: 0=iPhone (Continuity), 1=MacBook, etc.
+                    const names = ['iPhone', 'MacBook', 'iPad', 'External'];
+                    const icons = ['fa-mobile-alt', 'fa-laptop', 'fa-tablet-alt', 'fa-video'];
+                    name = names[cam.index] || `Cam ${cam.index}`;
+                    icon = icons[cam.index] || 'fa-video';
+                }
+                const isActive = cam.index === selectedCamera;
+                return `<button class="cam-btn ${isActive ? 'active' : ''}" data-index="${cam.index}" onclick="selectCamera(${cam.index})">
+                    <i class="fas ${icon} mr-1"></i>${name} <span class="text-xs opacity-70">${cam.resolution}</span>
+                </button>`;
+            }).join('');
+        } else {
+            container.innerHTML = '<span class="text-sm text-red-500">No cameras</span>';
+        }
+    } catch (e) {
+        container.innerHTML = '<span class="text-sm text-red-500">Error</span>';
+    }
+}
+
+function selectCamera(index) {
+    selectedCamera = index;
+    document.querySelectorAll('.cam-btn').forEach(btn => {
+        btn.classList.toggle('active', parseInt(btn.dataset.index) === index);
+    });
+    const name = CAMERA_NAMES[index] || `Camera ${index}`;
+    showToast(`${name} selected`, 'info');
+}
+
+async function captureAudio(duration) {
+    const btn = document.getElementById(`btn-audio-${duration}`);
+    const status = document.getElementById('capture-status');
+    const text = document.getElementById('status-text');
+    btn.disabled = true;
+    status.classList.remove('hidden');
+    text.textContent = `Recording ${duration}s audio...`;
+    try {
+        const res = await fetch('/api/audio/record', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ duration })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast('Audio recorded!', 'success');
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            throw new Error(data.message || 'Failed');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+        status.classList.add('hidden');
+    }
+    btn.disabled = false;
+}
 
 async function capturePhoto() {
-    const btn = document.getElementById('capture-photo-btn');
+    const btn = document.getElementById('btn-photo');
     const status = document.getElementById('capture-status');
-    const statusText = document.getElementById('capture-status-text');
-    
+    const text = document.getElementById('status-text');
     btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Capturing...';
     status.classList.remove('hidden');
-    statusText.textContent = 'Taking photo...';
-    
+    text.textContent = 'Taking photo...';
     try {
-        const response = await fetch('/api/camera/capture');
-        const data = await response.json();
-        
+        const res = await fetch(`/api/camera/capture?camera_index=${selectedCamera}`);
+        const data = await res.json();
         if (data.status === 'success') {
-            statusText.textContent = 'Photo captured successfully!';
-            status.querySelector('span').classList.remove('text-amber-400');
-            status.querySelector('span').classList.add('text-green-400');
-            setTimeout(() => window.location.reload(), 1000);
+            showToast(`Photo captured! (${data.resolution})`, 'success');
+            setTimeout(() => location.reload(), 1000);
         } else {
-            throw new Error(data.message || 'Capture failed');
+            throw new Error(data.message || 'Failed');
         }
-    } catch (error) {
-        statusText.textContent = 'Error: ' + error.message;
-        status.querySelector('span').classList.remove('text-amber-400');
-        status.querySelector('span').classList.add('text-red-400');
-    } finally {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-camera mr-2"></i>Take Photo';
-        setTimeout(() => status.classList.add('hidden'), 3000);
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+        status.classList.add('hidden');
     }
+    btn.disabled = false;
 }
 
 async function captureVideo(duration) {
-    const btn = document.getElementById(`capture-video-${duration}-btn`);
+    const btn = document.getElementById(`btn-video-${duration}`);
     const status = document.getElementById('capture-status');
-    const statusText = document.getElementById('capture-status-text');
-    
+    const text = document.getElementById('status-text');
     btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Recording...';
     status.classList.remove('hidden');
-    statusText.textContent = `Recording ${duration}s video...`;
-    
+    text.textContent = `Recording ${duration}s...`;
     try {
-        const response = await fetch('/api/camera/record', {
+        const res = await fetch('/api/camera/record', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ duration: duration })
+            body: JSON.stringify({ duration, camera_index: selectedCamera })
         });
-        const data = await response.json();
-        
+        const data = await res.json();
         if (data.status === 'success') {
-            statusText.textContent = 'Video recorded successfully!';
-            status.querySelector('span').classList.remove('text-amber-400');
-            status.querySelector('span').classList.add('text-green-400');
-            setTimeout(() => window.location.reload(), 1000);
+            showToast('Video recorded!', 'success');
+            setTimeout(() => location.reload(), 1000);
         } else {
-            throw new Error(data.message || 'Recording failed');
+            throw new Error(data.message || 'Failed');
         }
-    } catch (error) {
-        statusText.textContent = 'Error: ' + error.message;
-        status.querySelector('span').classList.remove('text-amber-400');
-        status.querySelector('span').classList.add('text-red-400');
-    } finally {
-        btn.disabled = false;
-        btn.innerHTML = `<i class="fas fa-video mr-2"></i>Record ${duration}s Video`;
-        setTimeout(() => status.classList.add('hidden'), 3000);
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+        status.classList.add('hidden');
     }
+    btn.disabled = false;
 }
 
-function refreshMedia() {
-    const icon = document.getElementById('refresh-icon');
-    icon.classList.add('animate-spin');
-    window.location.reload();
-}
-
-function setFilter(filter) {
-    currentFilter = filter;
-    document.querySelectorAll('.filter-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.filter === filter);
-    });
-    filterMedia();
-}
-
+// === Filter & Selection ===
 function filterMedia() {
-    const searchTerm = document.getElementById('search-input').value.toLowerCase();
-    const items = document.querySelectorAll('.media-item');
-    
-    items.forEach(item => {
-        const type = item.dataset.type;
-        const filename = item.dataset.filename.toLowerCase();
-        
-        const matchesFilter = currentFilter === 'all' || type === currentFilter;
-        const matchesSearch = filename.includes(searchTerm);
-        
-        item.style.display = matchesFilter && matchesSearch ? 'block' : 'none';
+    const search = document.getElementById('search-input').value.toLowerCase();
+    const filter = document.getElementById('type-filter').value;
+    document.querySelectorAll('.media-item').forEach(item => {
+        let show = true;
+        if (filter === 'image') show = item.dataset.type === 'image';
+        else if (filter === 'video') show = item.dataset.type === 'video';
+        else if (filter === 'audio') show = item.dataset.type === 'audio';
+        else if (filter === 'local') show = item.dataset.cloud === 'false';
+        else if (filter === 'cloud') show = item.dataset.cloud === 'true';
+        if (show && search) show = item.dataset.name.toLowerCase().includes(search);
+        item.style.display = show ? '' : 'none';
     });
 }
 
-function openMedia(filename, type) {
-    currentMedia = { filename, type };
-    const modal = document.getElementById('media-modal');
-    const container = document.getElementById('modal-media-container');
-    
-    if (type === 'image') {
-        container.innerHTML = `
-            <img src="/api/media/serve/${filename}" alt="${filename}" 
-                 style="max-width: 80vw; max-height: 80vh; object-fit: contain;">
-            <canvas id="annotation-canvas" class="annotation-canvas"></canvas>
-        `;
-        document.getElementById('annotate-btn').style.display = 'inline-flex';
+function toggleSelectMode() {
+    selectMode = !selectMode;
+    const btn = document.getElementById('select-mode-btn');
+    btn.classList.toggle('btn-primary', selectMode);
+    btn.classList.toggle('btn-secondary', !selectMode);
+    document.querySelectorAll('.select-check').forEach(el => el.classList.toggle('hidden', !selectMode));
+    if (!selectMode) clearSelection();
+}
+
+function handleMediaClick(event, filename, type) {
+    if (selectMode) {
+        event.stopPropagation();
+        toggleFileSelection(filename);
     } else {
-        container.innerHTML = `
-            <video src="/api/media/serve/${filename}" controls autoplay
-                   style="max-width: 80vw; max-height: 80vh;">
-            </video>
-        `;
-        document.getElementById('annotate-btn').style.display = 'none';
+        openMedia(filename, type);
     }
-    
-    modal.classList.add('active');
+}
+
+function toggleFileSelection(filename) {
+    const item = document.querySelector(`[data-name="${filename}"]`);
+    if (selectedFiles.has(filename)) {
+        selectedFiles.delete(filename);
+        item.classList.remove('selected');
+    } else {
+        selectedFiles.add(filename);
+        item.classList.add('selected');
+    }
+    updateBatchToolbar();
+}
+
+function updateBatchToolbar() {
+    const toolbar = document.getElementById('batch-toolbar');
+    const count = document.getElementById('selected-count');
+    if (selectedFiles.size > 0) {
+        toolbar.classList.remove('hidden');
+        count.textContent = `${selectedFiles.size} selected`;
+    } else {
+        toolbar.classList.add('hidden');
+    }
+}
+
+function clearSelection() {
+    selectedFiles.clear();
+    document.querySelectorAll('.media-item.selected').forEach(el => el.classList.remove('selected'));
+    updateBatchToolbar();
+}
+
+// === Single File Modal ===
+function openMedia(filename, type) {
+    currentFile = { filename, type };
+    labels = [];
+    const container = document.getElementById('media-container');
+    if (type === 'image') {
+        container.innerHTML = `<img src="/api/media/serve/${filename}" class="max-h-[60vh] mx-auto">`;
+    } else if (type === 'video') {
+        container.innerHTML = `<video src="/api/media/serve/${filename}" controls class="max-h-[60vh] mx-auto"></video>`;
+    } else if (type === 'audio') {
+        container.innerHTML = `
+            <div class="flex flex-col items-center justify-center py-8">
+                <i class="fas fa-music text-6xl text-amber-500 mb-4"></i>
+                <p class="text-white mb-4">${filename}</p>
+                <audio src="/api/media/serve/${filename}" controls class="w-full max-w-md"></audio>
+            </div>`;
+    } else {
+        container.innerHTML = `<div class="text-center text-white py-8"><i class="fas fa-file text-4xl mb-2"></i><p>${filename}</p></div>`;
+    }
+    document.getElementById('rename-input').value = filename.replace(/\.[^.]+$/, '');
+    loadLabels(filename);
+    document.getElementById('modal').classList.add('active');
+    document.body.style.overflow = 'hidden';
 }
 
 function closeModal() {
-    const modal = document.getElementById('media-modal');
-    modal.classList.remove('active');
-    currentMedia = null;
-    annotationMode = false;
-    annotations = [];
+    document.getElementById('modal').classList.remove('active');
+    document.body.style.overflow = '';
+    currentFile = null;
+    labels = [];
 }
 
-function toggleAnnotationMode() {
-    annotationMode = !annotationMode;
-    const btn = document.getElementById('annotate-btn');
-    const saveBtn = document.getElementById('save-annotation-btn');
-    const clearBtn = document.getElementById('clear-annotation-btn');
-    const container = document.getElementById('modal-media-container');
-    
-    btn.classList.toggle('active', annotationMode);
-    saveBtn.style.display = annotationMode ? 'inline-flex' : 'none';
-    clearBtn.style.display = annotationMode ? 'inline-flex' : 'none';
-    container.classList.toggle('annotation-mode', annotationMode);
-    
-    if (annotationMode) {
-        initAnnotationCanvas();
-    }
-}
-
-function initAnnotationCanvas() {
-    const canvas = document.getElementById('annotation-canvas');
-    if (!canvas) return;
-    
-    const img = canvas.previousElementSibling;
-    canvas.width = img.naturalWidth || img.width;
-    canvas.height = img.naturalHeight || img.height;
-    
-    const ctx = canvas.getContext('2d');
-    let isDrawing = false;
-    let lastX = 0;
-    let lastY = 0;
-    
-    canvas.onmousedown = (e) => {
-        isDrawing = true;
-        const rect = canvas.getBoundingClientRect();
-        const scaleX = canvas.width / rect.width;
-        const scaleY = canvas.height / rect.height;
-        lastX = (e.clientX - rect.left) * scaleX;
-        lastY = (e.clientY - rect.top) * scaleY;
-    };
-    
-    canvas.onmousemove = (e) => {
-        if (!isDrawing) return;
-        const rect = canvas.getBoundingClientRect();
-        const scaleX = canvas.width / rect.width;
-        const scaleY = canvas.height / rect.height;
-        const x = (e.clientX - rect.left) * scaleX;
-        const y = (e.clientY - rect.top) * scaleY;
-        
-        ctx.beginPath();
-        ctx.moveTo(lastX, lastY);
-        ctx.lineTo(x, y);
-        ctx.strokeStyle = '#ef4444';
-        ctx.lineWidth = 3;
-        ctx.lineCap = 'round';
-        ctx.stroke();
-        
-        lastX = x;
-        lastY = y;
-    };
-    
-    canvas.onmouseup = () => isDrawing = false;
-    canvas.onmouseout = () => isDrawing = false;
-}
-
-function clearAnnotations() {
-    const canvas = document.getElementById('annotation-canvas');
-    if (canvas) {
-        const ctx = canvas.getContext('2d');
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-    }
-}
-
-async function saveAnnotation() {
-    if (!currentMedia) return;
-    
-    const canvas = document.getElementById('annotation-canvas');
-    const img = canvas.previousElementSibling;
-    
-    // Create a new canvas with the image and annotations
-    const mergedCanvas = document.createElement('canvas');
-    mergedCanvas.width = canvas.width;
-    mergedCanvas.height = canvas.height;
-    const ctx = mergedCanvas.getContext('2d');
-    
-    ctx.drawImage(img, 0, 0);
-    ctx.drawImage(canvas, 0, 0);
-    
-    // Convert to blob and upload
-    mergedCanvas.toBlob(async (blob) => {
-        const formData = new FormData();
-        formData.append('file', blob, `annotated_${currentMedia.filename}`);
-        
-        try {
-            const response = await fetch('/api/media/upload', {
-                method: 'POST',
-                body: formData
-            });
-            
-            if (response.ok) {
-                alert('Annotated image saved!');
-                window.location.reload();
-            } else {
-                throw new Error('Failed to save annotation');
-            }
-        } catch (error) {
-            alert('Error saving annotation: ' + error.message);
+async function loadLabels(filename) {
+    try {
+        const res = await fetch(`/api/media/labels/${filename}`);
+        if (res.ok) {
+            const data = await res.json();
+            labels = data.labels || [];
+            labels.forEach(l => allLabels.add(l));
+            renderLabels();
         }
-    }, 'image/jpeg', 0.9);
+    } catch (e) {
+        labels = [];
+        renderLabels();
+    }
+}
+
+function renderLabels() {
+    const container = document.getElementById('labels-container');
+    if (labels.length === 0) {
+        container.innerHTML = '<span class="text-sm text-gray-400">No labels</span>';
+    } else {
+        container.innerHTML = labels.map((l, i) => 
+            `<span class="tag">${l} <button onclick="removeLabel(${i})" class="ml-1 text-red-400">&times;</button></span>`
+        ).join('');
+    }
+}
+
+function addLabel() {
+    const input = document.getElementById('label-input');
+    const val = input.value.trim().toLowerCase();
+    if (val && !labels.includes(val)) {
+        labels.push(val);
+        allLabels.add(val);
+        renderLabels();
+    }
+    input.value = '';
+}
+
+function addQuickLabel(label) {
+    if (!labels.includes(label)) {
+        labels.push(label);
+        renderLabels();
+    }
+}
+
+function removeLabel(index) {
+    labels.splice(index, 1);
+    renderLabels();
+}
+
+async function saveLabels() {
+    if (!currentFile) return;
+    try {
+        const res = await fetch(`/api/media/labels/${currentFile.filename}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ labels })
+        });
+        if (res.ok) showToast('Labels saved!', 'success');
+        else throw new Error('Failed');
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function renameFile() {
+    if (!currentFile) return;
+    const newName = document.getElementById('rename-input').value.trim();
+    if (!newName) return;
+    const ext = currentFile.filename.split('.').pop();
+    const fullName = newName.includes('.') ? newName : `${newName}.${ext}`;
+    try {
+        const res = await fetch(`/api/media/rename/${currentFile.filename}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_name: fullName })
+        });
+        if (res.ok) {
+            showToast('Renamed!', 'success');
+            closeModal();
+            setTimeout(() => location.reload(), 500);
+        } else {
+            const data = await res.json();
+            throw new Error(data.error || 'Failed');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
 }
 
 async function uploadToCloud() {
-    if (!currentMedia) return;
-    
+    if (!currentFile) return;
+    showToast('Uploading...', 'info');
     try {
-        const response = await fetch(`/api/media/upload/${currentMedia.filename}`, {
-            method: 'POST'
-        });
-        
-        if (response.ok) {
-            alert('Uploaded to cloud successfully!');
-            window.location.reload();
+        const res = await fetch(`/api/media/upload/${currentFile.filename}`, { method: 'POST' });
+        const data = await res.json();
+        if (res.ok && data.status === 'success') {
+            showToast('Uploaded to cloud!', 'success');
+            setTimeout(() => location.reload(), 1000);
         } else {
-            throw new Error('Upload failed');
+            throw new Error(data.error || 'Upload failed');
         }
-    } catch (error) {
-        alert('Error uploading: ' + error.message);
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
     }
 }
 
 function downloadMedia() {
-    if (!currentMedia) return;
-    
-    const link = document.createElement('a');
-    link.href = `/api/media/serve/${currentMedia.filename}`;
-    link.download = currentMedia.filename;
-    link.click();
+    if (!currentFile) return;
+    const a = document.createElement('a');
+    a.href = `/api/media/serve/${currentFile.filename}`;
+    a.download = currentFile.filename;
+    a.click();
 }
 
 async function deleteMedia() {
-    if (!currentMedia) return;
-    
-    if (!confirm(`Delete ${currentMedia.filename}?`)) return;
-    
+    if (!currentFile || !confirm('Delete this file?')) return;
     try {
-        const response = await fetch(`/api/media/delete/${currentMedia.filename}`, {
-            method: 'DELETE'
-        });
-        
-        if (response.ok) {
+        const res = await fetch(`/api/media/delete/${currentFile.filename}`, { method: 'DELETE' });
+        if (res.ok) {
+            showToast('Deleted', 'success');
             closeModal();
-            window.location.reload();
-        } else {
-            throw new Error('Delete failed');
-        }
-    } catch (error) {
-        alert('Error deleting: ' + error.message);
+            setTimeout(() => location.reload(), 500);
+        } else throw new Error('Failed');
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
     }
 }
 
-// Close modal on escape key
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeModal();
-});
+// === Batch Operations ===
+async function batchUpload() {
+    if (selectedFiles.size === 0) return;
+    showToast(`Uploading ${selectedFiles.size} files...`, 'info');
+    let success = 0, failed = 0;
+    for (const filename of selectedFiles) {
+        try {
+            const res = await fetch(`/api/media/upload/${filename}`, { method: 'POST' });
+            if (res.ok) success++;
+            else failed++;
+        } catch (e) { failed++; }
+    }
+    showToast(`Uploaded: ${success}, Failed: ${failed}`, success > 0 ? 'success' : 'error');
+    if (success > 0) setTimeout(() => location.reload(), 1000);
+}
 
-// Close modal on background click
-document.getElementById('media-modal').addEventListener('click', (e) => {
-    if (e.target.id === 'media-modal') closeModal();
-});
+function batchLabel() {
+    if (selectedFiles.size === 0) return;
+    batchLabels = [];
+    renderBatchLabels();
+    document.getElementById('batch-label-modal').classList.add('active');
+}
+
+function closeBatchLabelModal() {
+    document.getElementById('batch-label-modal').classList.remove('active');
+    batchLabels = [];
+}
+
+function renderBatchLabels() {
+    const container = document.getElementById('batch-labels-container');
+    if (batchLabels.length === 0) {
+        container.innerHTML = '<span class="text-sm text-gray-400">No labels selected</span>';
+    } else {
+        container.innerHTML = batchLabels.map((l, i) => 
+            `<span class="tag">${l} <button onclick="removeBatchLabel(${i})" class="ml-1 text-red-400">&times;</button></span>`
+        ).join('');
+    }
+}
+
+function addBatchLabel() {
+    const input = document.getElementById('batch-label-input');
+    const val = input.value.trim().toLowerCase();
+    if (val && !batchLabels.includes(val)) {
+        batchLabels.push(val);
+        allLabels.add(val);
+        renderBatchLabels();
+    }
+    input.value = '';
+}
+
+function addBatchQuickLabel(label) {
+    if (!batchLabels.includes(label)) {
+        batchLabels.push(label);
+        renderBatchLabels();
+    }
+}
+
+function removeBatchLabel(index) {
+    batchLabels.splice(index, 1);
+    renderBatchLabels();
+}
+
+async function saveBatchLabels() {
+    if (selectedFiles.size === 0 || batchLabels.length === 0) return;
+    showToast(`Saving labels to ${selectedFiles.size} files...`, 'info');
+    let success = 0;
+    for (const filename of selectedFiles) {
+        try {
+            // Get existing labels first
+            const getRes = await fetch(`/api/media/labels/${filename}`);
+            let existing = [];
+            if (getRes.ok) {
+                const data = await getRes.json();
+                existing = data.labels || [];
+            }
+            // Merge with new labels
+            const merged = [...new Set([...existing, ...batchLabels])];
+            const res = await fetch(`/api/media/labels/${filename}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ labels: merged })
+            });
+            if (res.ok) success++;
+        } catch (e) {}
+    }
+    showToast(`Labels saved to ${success} files`, 'success');
+    closeBatchLabelModal();
+    clearSelection();
+}
+
+async function batchDelete() {
+    if (selectedFiles.size === 0) return;
+    if (!confirm(`Delete ${selectedFiles.size} files?`)) return;
+    let success = 0;
+    for (const filename of selectedFiles) {
+        try {
+            const res = await fetch(`/api/media/delete/${filename}`, { method: 'DELETE' });
+            if (res.ok) success++;
+        } catch (e) {}
+    }
+    showToast(`Deleted ${success} files`, 'success');
+    setTimeout(() => location.reload(), 500);
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeModal(); closeBatchLabelModal(); } });
 </script>
 {% endblock %}

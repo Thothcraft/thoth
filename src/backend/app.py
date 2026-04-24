@@ -1206,7 +1206,7 @@ def api_setup_login():
             return jsonify({
                 'status': 'success',
                 'message': 'Login successful',
-                'redirect': url_for('status')
+                'redirect': url_for('info_page')
             })
         else:
             return jsonify({'status': 'error', 'error': 'Invalid username or password'}), 401
@@ -1338,7 +1338,23 @@ def get_available_sensors():
 def get_media_files():
     """Get list of media files in the data directory."""
     media_files = []
-    media_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.mp4', '.avi', '.mov', '.webm'}
+    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
+    video_extensions = {'.mp4', '.avi', '.mov', '.webm', '.mkv'}
+    audio_extensions = {'.wav', '.mp3', '.m4a', '.aac', '.ogg', '.flac'}
+    media_extensions = image_extensions | video_extensions | audio_extensions
+    
+    # Labels directory
+    labels_dir = os.path.join(Config.DATA_DIR, 'labels')
+    
+    # Load cloud status
+    cloud_status = {}
+    cloud_status_file = os.path.join(Config.DATA_DIR, 'cloud_status.json')
+    if os.path.exists(cloud_status_file):
+        try:
+            with open(cloud_status_file, 'r') as f:
+                cloud_status = json.load(f)
+        except:
+            pass
     
     try:
         data_dir = Config.DATA_DIR
@@ -1350,10 +1366,14 @@ def get_media_files():
                     stat = os.stat(file_path)
                     
                     # Determine file type
-                    if ext in {'.jpg', '.jpeg', '.png', '.gif'}:
+                    if ext in image_extensions:
                         file_type = 'image'
-                    else:
+                    elif ext in video_extensions:
                         file_type = 'video'
+                    elif ext in audio_extensions:
+                        file_type = 'audio'
+                    else:
+                        file_type = 'other'
                     
                     # Format file size
                     size = stat.st_size
@@ -1364,13 +1384,30 @@ def get_media_files():
                     else:
                         size_formatted = f"{size / (1024 * 1024):.1f} MB"
                     
+                    # Load labels for this file
+                    labels = []
+                    base_name = os.path.splitext(filename)[0]
+                    labels_file = os.path.join(labels_dir, f"{base_name}.json")
+                    if os.path.exists(labels_file):
+                        try:
+                            with open(labels_file, 'r') as f:
+                                label_data = json.load(f)
+                                # Labels file is a dict with 'labels' key
+                                if isinstance(label_data, dict):
+                                    labels = label_data.get('labels', [])
+                                elif isinstance(label_data, list):
+                                    labels = label_data
+                        except:
+                            pass
+                    
                     media_files.append({
                         'filename': filename,
                         'type': file_type,
                         'size': size,
                         'size_formatted': size_formatted,
                         'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                        'on_cloud': False  # TODO: Check if file is synced to cloud
+                        'on_cloud': filename in cloud_status,
+                        'labels': labels
                     })
         
         # Sort by modification time, newest first
@@ -1475,7 +1512,7 @@ def api_media_serve(filename):
 
 @app.route('/api/media/delete/<filename>', methods=['DELETE'])
 def api_media_delete(filename):
-    """Delete a media file."""
+    """Delete a media file locally and from cloud."""
     if 'username' not in session:
         return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
     
@@ -1485,9 +1522,57 @@ def api_media_delete(filename):
             return jsonify({'status': 'error', 'error': 'Invalid filename'}), 400
         
         file_path = os.path.join(Config.DATA_DIR, filename)
+        cloud_deleted = False
+        
+        # Check if file is on cloud and delete from there too
+        cloud_status_file = os.path.join(Config.DATA_DIR, 'cloud_status.json')
+        cloud_status = {}
+        if os.path.exists(cloud_status_file):
+            try:
+                with open(cloud_status_file, 'r') as f:
+                    cloud_status = json.load(f)
+            except:
+                pass
+        
+        if filename in cloud_status:
+            # Try to delete from cloud
+            file_id = cloud_status[filename].get('file_id')
+            if file_id:
+                auth_token = session.get('token') or getattr(Config, 'USER_AUTH_TOKEN', None)
+                if auth_token:
+                    try:
+                        headers = {'Authorization': f'Bearer {auth_token}'}
+                        response = requests.delete(
+                            f"{Config.BRAIN_SERVER_URL}/file/{file_id}",
+                            headers=headers,
+                            timeout=30
+                        )
+                        if response.status_code in (200, 204):
+                            cloud_deleted = True
+                            logger.info(f"Deleted {filename} from cloud (file_id={file_id})")
+                        else:
+                            logger.warning(f"Failed to delete from cloud: {response.status_code}")
+                    except Exception as e:
+                        logger.warning(f"Error deleting from cloud: {e}")
+            
+            # Remove from cloud status
+            del cloud_status[filename]
+            with open(cloud_status_file, 'w') as f:
+                json.dump(cloud_status, f, indent=2)
+        
+        # Delete local file
         if os.path.exists(file_path):
             os.remove(file_path)
-            return jsonify({'status': 'success', 'message': f'Deleted {filename}'})
+            
+            # Also delete labels file if exists
+            labels_file = os.path.join(Config.DATA_DIR, 'labels', os.path.splitext(filename)[0] + '.json')
+            if os.path.exists(labels_file):
+                os.remove(labels_file)
+            
+            msg = f'Deleted {filename}'
+            if cloud_deleted:
+                msg += ' (also removed from cloud)'
+            return jsonify({'status': 'success', 'message': msg})
         else:
             return jsonify({'status': 'error', 'error': 'File not found'}), 404
     except Exception as e:
@@ -1523,7 +1608,7 @@ def api_media_upload():
 
 @app.route('/api/media/upload/<filename>', methods=['POST'])
 def api_media_upload_to_cloud(filename):
-    """Upload a specific media file to the cloud."""
+    """Upload a specific media file to the cloud using multipart form data."""
     if 'username' not in session:
         return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
     
@@ -1536,11 +1621,8 @@ def api_media_upload_to_cloud(filename):
         if not os.path.exists(file_path):
             return jsonify({'status': 'error', 'error': 'File not found'}), 404
         
-        # Read file and upload to Brain server
-        with open(file_path, 'rb') as f:
-            content = f.read()
-        
-        content_b64 = base64.b64encode(content).decode('utf-8')
+        file_size = os.path.getsize(file_path)
+        logger.info(f"Uploading {filename} ({file_size} bytes) to cloud")
         
         # Determine content type
         ext = os.path.splitext(filename)[1].lower()
@@ -1552,42 +1634,214 @@ def api_media_upload_to_cloud(filename):
             '.mp4': 'video/mp4',
             '.avi': 'video/avi',
             '.mov': 'video/quicktime',
-            '.webm': 'video/webm'
+            '.webm': 'video/webm',
+            '.wav': 'audio/wav',
+            '.mp3': 'audio/mpeg',
+            '.m4a': 'audio/mp4'
         }
         content_type = content_types.get(ext, 'application/octet-stream')
         
         # Get auth token
         auth_token = session.get('token') or getattr(Config, 'USER_AUTH_TOKEN', None)
         if not auth_token:
-            return jsonify({'status': 'error', 'error': 'Not authenticated'}), 401
+            return jsonify({'status': 'error', 'error': 'Not authenticated. Please log in again.'}), 401
         
-        # Upload to Brain
+        # Get device ID for the upload
+        device_id = device_manager.device_id if device_manager else None
+        
+        # Load labels for this file
+        labels = []
+        labels_dir = os.path.join(Config.DATA_DIR, 'labels')
+        base_name = os.path.splitext(filename)[0]
+        labels_file = os.path.join(labels_dir, f"{base_name}.json")
+        if os.path.exists(labels_file):
+            try:
+                with open(labels_file, 'r') as f:
+                    label_data = json.load(f)
+                    if isinstance(label_data, dict):
+                        labels = label_data.get('labels', [])
+                    elif isinstance(label_data, list):
+                        labels = label_data
+            except:
+                pass
+        
+        # Upload using multipart form data (more reliable for binary files)
         headers = {
-            'Authorization': f'Bearer {auth_token}',
-            'Content-Type': 'application/json'
+            'Authorization': f'Bearer {auth_token}'
         }
         
-        payload = {
-            'filename': filename,
-            'content': content_b64,
-            'is_base64': True,
-            'content_type': content_type
-        }
+        with open(file_path, 'rb') as f:
+            files = {
+                'file': (filename, f, content_type)
+            }
+            data = {}
+            if device_id:
+                data['device_id'] = device_id
+            if labels:
+                data['labels'] = json.dumps(labels)
+                logger.info(f"Including labels with upload: {labels}")
+            
+            logger.info(f"Sending multipart upload to {Config.BRAIN_SERVER_URL}/file/upload-multipart")
+            
+            response = requests.post(
+                f"{Config.BRAIN_SERVER_URL}/file/upload-multipart",
+                files=files,
+                data=data,
+                headers=headers,
+                timeout=120
+            )
         
-        response = requests.post(
-            f"{Config.BRAIN_SERVER_URL}/file/upload",
-            json=payload,
-            headers=headers,
-            timeout=120
-        )
+        logger.info(f"Upload response: {response.status_code}")
         
         if response.status_code in (200, 201):
-            return jsonify({'status': 'success', 'message': f'Uploaded {filename} to cloud'})
-        else:
-            return jsonify({'status': 'error', 'error': f'Upload failed: {response.status_code}'}), 500
+            result = response.json()
+            logger.info(f"Upload successful: {result}")
             
+            # Track that this file is now on cloud
+            cloud_status_file = os.path.join(Config.DATA_DIR, 'cloud_status.json')
+            cloud_status = {}
+            if os.path.exists(cloud_status_file):
+                try:
+                    with open(cloud_status_file, 'r') as f:
+                        cloud_status = json.load(f)
+                except:
+                    pass
+            cloud_status[filename] = {
+                'file_id': result.get('file_id'),
+                'uploaded_at': datetime.utcnow().isoformat()
+            }
+            with open(cloud_status_file, 'w') as f:
+                json.dump(cloud_status, f, indent=2)
+            
+            return jsonify({'status': 'success', 'message': f'Uploaded {filename} to cloud', 'file_id': result.get('file_id')})
+        elif response.status_code == 401:
+            logger.error(f"Upload auth failed - token may be expired")
+            return jsonify({'status': 'error', 'error': 'Authentication expired. Please log out and log in again.'}), 401
+        else:
+            error_detail = response.text
+            logger.error(f"Upload failed: {response.status_code} - {error_detail}")
+            return jsonify({'status': 'error', 'error': f'Upload failed: {response.status_code} - {error_detail[:200]}'}), 500
+            
+    except requests.exceptions.Timeout:
+        logger.error(f"Upload timeout for {filename}")
+        return jsonify({'status': 'error', 'error': 'Upload timed out. The file may be too large.'}), 500
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error uploading {filename}: {e}")
+        return jsonify({'status': 'error', 'error': 'Cannot connect to cloud server. Check your internet connection.'}), 500
     except Exception as e:
-        logger.error(f"Error uploading to cloud: {e}")
+        logger.error(f"Error uploading to cloud: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+
+# ============================================================================
+# Rename API Endpoint
+# ============================================================================
+
+@app.route('/api/media/rename/<filename>', methods=['POST'])
+def api_media_rename(filename):
+    """Rename a media file."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
+    
+    try:
+        # Security: prevent directory traversal
+        if '..' in filename or '/' in filename or '\\' in filename:
+            return jsonify({'status': 'error', 'error': 'Invalid filename'}), 400
+        
+        data = request.get_json()
+        new_name = data.get('new_name', '').strip()
+        
+        if not new_name:
+            return jsonify({'status': 'error', 'error': 'New name is required'}), 400
+        
+        # Security check on new name
+        if '..' in new_name or '/' in new_name or '\\' in new_name:
+            return jsonify({'status': 'error', 'error': 'Invalid new filename'}), 400
+        
+        old_path = os.path.join(Config.DATA_DIR, filename)
+        new_path = os.path.join(Config.DATA_DIR, new_name)
+        
+        if not os.path.exists(old_path):
+            return jsonify({'status': 'error', 'error': 'File not found'}), 404
+        
+        if os.path.exists(new_path):
+            return jsonify({'status': 'error', 'error': 'A file with that name already exists'}), 400
+        
+        # Rename the file
+        os.rename(old_path, new_path)
+        
+        # Also rename the labels file if it exists
+        old_labels = get_labels_file_path(filename)
+        if os.path.exists(old_labels):
+            new_labels = get_labels_file_path(new_name)
+            os.rename(old_labels, new_labels)
+        
+        logger.info(f"Renamed {filename} to {new_name}")
+        return jsonify({'status': 'success', 'message': f'Renamed to {new_name}', 'new_name': new_name})
+        
+    except Exception as e:
+        logger.error(f"Error renaming file: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+
+# ============================================================================
+# Labels API Endpoints
+# ============================================================================
+
+def get_labels_file_path(media_filename):
+    """Get the path to the labels JSON file for a media file."""
+    labels_dir = os.path.join(Config.DATA_DIR, 'labels')
+    os.makedirs(labels_dir, exist_ok=True)
+    base_name = os.path.splitext(media_filename)[0]
+    return os.path.join(labels_dir, f"{base_name}.json")
+
+
+@app.route('/api/media/labels/<filename>', methods=['GET'])
+def api_get_labels(filename):
+    """Get labels for a media file."""
+    try:
+        # Security: prevent directory traversal
+        if '..' in filename or '/' in filename or '\\' in filename:
+            return jsonify({'status': 'error', 'error': 'Invalid filename'}), 400
+        
+        labels_path = get_labels_file_path(filename)
+        if os.path.exists(labels_path):
+            with open(labels_path, 'r') as f:
+                data = json.load(f)
+            return jsonify({'status': 'success', 'labels': data.get('labels', [])})
+        else:
+            return jsonify({'status': 'success', 'labels': []})
+    except Exception as e:
+        logger.error(f"Error getting labels for {filename}: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+
+@app.route('/api/media/labels/<filename>', methods=['POST'])
+def api_save_labels(filename):
+    """Save labels for a media file."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
+    
+    try:
+        # Security: prevent directory traversal
+        if '..' in filename or '/' in filename or '\\' in filename:
+            return jsonify({'status': 'error', 'error': 'Invalid filename'}), 400
+        
+        data = request.get_json()
+        labels = data.get('labels', [])
+        
+        labels_path = get_labels_file_path(filename)
+        with open(labels_path, 'w') as f:
+            json.dump({
+                'filename': filename,
+                'labels': labels,
+                'updated_at': datetime.utcnow().isoformat(),
+                'updated_by': session.get('username')
+            }, f, indent=2)
+        
+        return jsonify({'status': 'success', 'message': 'Labels saved'})
+    except Exception as e:
+        logger.error(f"Error saving labels for {filename}: {e}")
         return jsonify({'status': 'error', 'error': str(e)}), 500
 
 
@@ -1649,7 +1903,7 @@ def status_old():
         return redirect(url_for('index'))
 
 @app.route('/logout')
-def logout():
+def do_logout():
     """Log out the current user."""
     # Update device status
     try:
@@ -1663,6 +1917,13 @@ def logout():
     # Clear the user's auth token so device registration stops
     device_manager.stop_heartbeat()
     Config.USER_AUTH_TOKEN = None
+    
+    # Clear auth manager's saved credentials (removes auth.json)
+    try:
+        auth_manager.logout()
+        logger.info("Auth manager logout completed")
+    except Exception as e:
+        logger.error(f"Error in auth_manager logout: {e}")
     
     session.clear()
     flash('You have been logged out.', 'info')
@@ -1816,20 +2077,65 @@ def sync_files_to_cloud():
 # Camera capture API
 # ---------------------------------------------------------------------------
 
+@app.route('/api/camera/list', methods=['GET'])
+def camera_list():
+    """List available cameras on the system."""
+    cameras = []
+    for i in range(5):  # Check first 5 indices
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            # Try to get camera name (not always available)
+            backend = cap.getBackendName()
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cameras.append({
+                'index': i,
+                'name': f'Camera {i}',
+                'backend': backend,
+                'resolution': f'{width}x{height}'
+            })
+            cap.release()
+    return jsonify({'status': 'success', 'cameras': cameras})
+
+
 @app.route('/api/camera/capture', methods=['GET'])
 def camera_capture():
-    """Capture an image from the default webcam and return as base64 data URI."""
+    """Capture an image from the selected camera and return as base64 data URI.
+    
+    Query params:
+        camera_index: Camera index. Default: 0
+    """
     try:
-        cap = cv2.VideoCapture(0)
+        camera_index = int(request.args.get('camera_index', 0))
+        
+        logger.info(f"Attempting to capture from camera index {camera_index}")
+        
+        cap = cv2.VideoCapture(camera_index)
         if not cap.isOpened():
-            return jsonify({'status': 'error', 'message': 'Camera not available'}), 400
+            return jsonify({
+                'status': 'error', 
+                'message': f'Camera {camera_index} not available. Try a different camera index.'
+            }), 400
+        
+        # Get camera info
+        backend = cap.getBackendName()
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        logger.info(f"Camera {camera_index}: backend={backend}, resolution={width}x{height}")
+        
         # Give the camera a moment to adjust
-        for _ in range(5):
+        for _ in range(10):
             cap.read()
+        
         ret, frame = cap.read()
         cap.release()
-        if not ret:
-            return jsonify({'status': 'error', 'message': 'Failed to capture image'}), 500
+        
+        if not ret or frame is None:
+            return jsonify({
+                'status': 'error', 
+                'message': f'Failed to capture from camera {camera_index}. Try a different camera.'
+            }), 500
+        
         ret, buffer = cv2.imencode('.jpg', frame)
         if not ret:
             return jsonify({'status': 'error', 'message': 'Failed to encode image'}), 500
@@ -1843,7 +2149,13 @@ def camera_capture():
 
         img_b64 = base64.b64encode(buffer).decode('utf-8')
         data_uri = f'data:image/jpeg;base64,{img_b64}'
-        return jsonify({'status': 'success', 'image': data_uri, 'file': filename})
+        return jsonify({
+            'status': 'success', 
+            'image': data_uri, 
+            'file': filename, 
+            'camera_index': camera_index,
+            'resolution': f'{width}x{height}'
+        })
     except Exception as e:
         logger.error(f'Camera capture error: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -1854,42 +2166,131 @@ def camera_capture():
 
 @app.route('/api/camera/record', methods=['POST'])
 def camera_record():
-    """Record a video from the default webcam for the specified duration in seconds."""
+    """Record a video from the selected camera for the specified duration.
+    
+    JSON body:
+        duration: Recording duration in seconds (1-30). Default: 5
+        camera_index: Camera index (0=MacBook, 1=iPhone, 2=iPad). Default: 0
+    """
     try:
         data = request.get_json(force=True) or {}
         duration = int(data.get('duration', 5))
+        camera_index = int(data.get('camera_index', 0))
+        camera_names = ['MacBook', 'iPhone', 'iPad']
+        camera_name = camera_names[camera_index] if camera_index < len(camera_names) else f'Camera {camera_index}'
+        
         if duration <= 0 or duration > 30:
             return jsonify({'status': 'error', 'message': 'Duration must be between 1 and 30 seconds'}), 400
+
+        logger.info(f"Recording {duration}s video from camera index {camera_index} ({camera_name})")
 
         timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
         filename = f"vid_{timestamp}.mp4"
         file_path = os.path.join(Config.DATA_DIR, filename)
         os.makedirs(Config.DATA_DIR, exist_ok=True)
 
-        cap = cv2.VideoCapture(0)
+        cap = cv2.VideoCapture(camera_index)
         if not cap.isOpened():
-            return jsonify({'status': 'error', 'message': 'Camera not available'}), 400
+            return jsonify({
+                'status': 'error', 
+                'message': f'{camera_name} camera not available. Make sure it is connected and not in use by another app.'
+            }), 400
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 640)
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 480)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        if fps <= 0:
+            fps = 30.0
+        
+        # Use avc1 codec for better browser compatibility
+        fourcc = cv2.VideoWriter_fourcc(*'avc1')
         out = cv2.VideoWriter(file_path, fourcc, fps, (width, height))
+        
+        # Fallback to mp4v if avc1 fails
+        if not out.isOpened():
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(file_path, fourcc, fps, (width, height))
 
+        frame_count = 0
         start_time = time.time()
         while time.time() - start_time < duration:
             ret, frame = cap.read()
             if not ret:
                 break
             out.write(frame)
+            frame_count += 1
 
         cap.release()
         out.release()
+        
+        logger.info(f"Recorded {frame_count} frames to {filename}")
 
-        return jsonify({'status': 'success', 'file': filename})
+        return jsonify({'status': 'success', 'file': filename, 'camera': camera_name, 'frames': frame_count})
     except Exception as e:
         logger.error(f'Camera record error: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# ---------------------------------------------------------------------------
+# Audio recording API
+# ---------------------------------------------------------------------------
+
+@app.route('/api/audio/record', methods=['POST'])
+def audio_record():
+    """Record audio from the microphone for the specified duration.
+    
+    JSON body:
+        duration: Recording duration in seconds (1-60). Default: 5
+    """
+    try:
+        data = request.get_json(force=True) or {}
+        duration = int(data.get('duration', 5))
+        
+        if duration <= 0 or duration > 60:
+            return jsonify({'status': 'error', 'message': 'Duration must be between 1 and 60 seconds'}), 400
+
+        logger.info(f"Recording {duration}s audio")
+
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        filename = f"audio_{timestamp}.wav"
+        file_path = os.path.join(Config.DATA_DIR, filename)
+        os.makedirs(Config.DATA_DIR, exist_ok=True)
+
+        # Use ffmpeg/sox for audio recording (more reliable than pyaudio)
+        try:
+            # Try using sox (rec command) first - works well on macOS
+            cmd = ['rec', '-q', file_path, 'trim', '0', str(duration)]
+            result = subprocess.run(cmd, capture_output=True, timeout=duration + 5)
+            if result.returncode != 0:
+                raise Exception("sox failed")
+        except Exception:
+            try:
+                # Fallback to ffmpeg
+                cmd = [
+                    'ffmpeg', '-y', '-f', 'avfoundation', '-i', ':0',
+                    '-t', str(duration), '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '1',
+                    file_path
+                ]
+                result = subprocess.run(cmd, capture_output=True, timeout=duration + 10)
+                if result.returncode != 0:
+                    raise Exception(f"ffmpeg failed: {result.stderr.decode()}")
+            except FileNotFoundError:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Audio recording requires sox or ffmpeg. Install with: brew install sox'
+                }), 500
+
+        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+            logger.info(f"Recorded audio to {filename}")
+            return jsonify({'status': 'success', 'file': filename})
+        else:
+            return jsonify({'status': 'error', 'message': 'Audio recording failed - no data captured'}), 500
+
+    except subprocess.TimeoutExpired:
+        return jsonify({'status': 'error', 'message': 'Recording timed out'}), 500
+    except Exception as e:
+        logger.error(f'Audio record error: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 # ---------------------------------------------------------------------------
 

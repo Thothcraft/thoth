@@ -3,136 +3,112 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}{{ config.get('app_name', 'Thoth Device') }}{% endblock %}</title>
-    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
-    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <title>{% block title %}Thoth Device{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+        // Initialize theme BEFORE page renders to prevent flash
+        (function() {
+            const theme = localStorage.getItem('thoth-theme') || 
+                         (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+            if (theme === 'dark') {
+                document.documentElement.classList.add('dark');
+            }
+        })();
+        
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
     <style>
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
-            -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-            min-height: 100vh;
-        }
-        
-        .btn {
-            padding-left: 1rem;
-            padding-right: 1rem;
-            padding-top: 0.5rem;
-            padding-bottom: 0.5rem;
-            border-radius: 0.375rem;
-            font-weight: 500;
-            transition-property: background-color, border-color, color, fill, stroke, opacity, box-shadow, transform;
-            transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-            transition-duration: 200ms;
-        }
-        .btn-primary {
-            background-color: #6366f1;
-            color: #ffffff;
-        }
-        .btn-primary:hover {
-            background-color: #4f46e5;
-        }
-        .btn-secondary {
-            background-color: #334155;
-            color: #e2e8f0;
-        }
-        .btn-secondary:hover {
-            background-color: #475569;
-        }
-        .form-input {
-            width: 100%;
-            padding-left: 0.75rem;
-            padding-right: 0.75rem;
-            padding-top: 0.5rem;
-            padding-bottom: 0.5rem;
-            border-width: 1px;
-            border-color: #475569;
-            border-radius: 0.375rem;
-            background-color: #1e293b;
-            color: #e2e8f0;
-            box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-        }
-        .form-input:focus {
-            outline: 2px solid transparent;
-            outline-offset: 2px;
-            border-color: #6366f1;
-            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
-        }
-        .card {
-            background-color: rgba(30, 41, 59, 0.8);
-            backdrop-filter: blur(10px);
-            border: 1px solid #334155;
-            border-radius: 0.75rem;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-        }
-        
-        .nav-tab {
-            padding: 0.75rem 1.5rem;
-            border-radius: 0.5rem;
-            font-weight: 500;
-            transition: all 0.2s;
-            color: #94a3b8;
-        }
-        .nav-tab:hover {
-            background-color: rgba(99, 102, 241, 0.1);
-            color: #e2e8f0;
-        }
-        .nav-tab.active {
-            background-color: #6366f1;
-            color: #ffffff;
-        }
+        body { font-family: 'Inter', system-ui, sans-serif; }
+        .btn { display: inline-flex; align-items: center; justify-content: center; padding: 0.625rem 1rem; border-radius: 0.5rem; font-weight: 500; transition: all 0.2s; cursor: pointer; border: none; }
+        .btn-primary { background: #6366f1; color: white; }
+        .btn-primary:hover { background: #4f46e5; }
+        .btn-secondary { background: #e2e8f0; color: #475569; }
+        .dark .btn-secondary { background: #334155; color: #e2e8f0; }
+        .btn-secondary:hover { background: #cbd5e1; }
+        .dark .btn-secondary:hover { background: #475569; }
+        .btn-danger { background: #ef4444; color: white; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn-success { background: #10b981; color: white; }
+        .btn-success:hover { background: #059669; }
+        .form-input { width: 100%; padding: 0.625rem 1rem; border-radius: 0.5rem; border: 1px solid #d1d5db; background: white; color: #1f2937; }
+        .dark .form-input { background: #1e293b; border-color: #475569; color: #f1f5f9; }
+        .form-input:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1); }
+        .card { background: white; border: 1px solid #e5e7eb; border-radius: 0.75rem; padding: 1.5rem; }
+        .dark .card { background: #1e293b; border-color: #334155; }
     </style>
     {% block extra_head %}{% endblock %}
 </head>
-<body>
-    <header class="bg-slate-900/80 backdrop-blur-md border-b border-slate-700 sticky top-0 z-50">
-        <div class="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
-            <div class="flex justify-between items-center mb-4">
-                <h1 class="text-2xl font-bold text-white flex items-center">
-                    <i class="fas fa-brain mr-2 text-indigo-400"></i>
-                    {{ config.get('app_name', 'Thoth Device') }}
-                    <span class="text-sm font-normal text-slate-400 ml-2">v{{ config.get('version', '1.0.0') }}</span>
-                </h1>
-                {% if user_info %}
-                <div class="flex items-center space-x-4">
-                    <span class="text-sm text-slate-300">
-                        <i class="fas fa-user-circle mr-1"></i>
-                        {{ user_info.get('username', 'User') }}
-                    </span>
-                    <a href="/logout" class="text-sm text-indigo-400 hover:text-indigo-300">
-                        <i class="fas fa-sign-out-alt mr-1"></i>
-                        Logout
-                    </a>
+<body class="bg-gray-50 dark:bg-slate-900 text-gray-900 dark:text-gray-100 min-h-screen flex flex-col">
+    <!-- Header -->
+    <header class="bg-white dark:bg-slate-800 border-b border-gray-200 dark:border-slate-700 sticky top-0 z-50">
+        <div class="max-w-6xl mx-auto px-4 py-3">
+            <div class="flex items-center justify-between">
+                <!-- Logo -->
+                <div class="flex items-center gap-3">
+                    <div class="w-9 h-9 bg-indigo-500 rounded-lg flex items-center justify-center">
+                        <i class="fas fa-brain text-white"></i>
+                    </div>
+                    <span class="text-lg font-bold text-gray-900 dark:text-white">Thoth</span>
                 </div>
-                {% endif %}
+                
+                <!-- Navigation Tabs -->
+                <nav class="flex items-center gap-1 bg-gray-100 dark:bg-slate-700 p-1 rounded-lg">
+                    <a href="{{ url_for('info_page') }}" 
+                       class="px-4 py-1.5 rounded-md text-sm font-medium transition-all
+                              {% if active_page == 'info' %}bg-white dark:bg-slate-600 text-indigo-600 dark:text-indigo-400 shadow-sm{% else %}text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white{% endif %}">
+                        Info
+                    </a>
+                    <a href="{{ url_for('media_page') }}" 
+                       class="px-4 py-1.5 rounded-md text-sm font-medium transition-all
+                              {% if active_page == 'media' %}bg-white dark:bg-slate-600 text-indigo-600 dark:text-indigo-400 shadow-sm{% else %}text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white{% endif %}">
+                        Media
+                    </a>
+                    <a href="{{ url_for('models_page') }}" 
+                       class="px-4 py-1.5 rounded-md text-sm font-medium transition-all
+                              {% if active_page == 'models' %}bg-white dark:bg-slate-600 text-indigo-600 dark:text-indigo-400 shadow-sm{% else %}text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white{% endif %}">
+                        Models
+                    </a>
+                </nav>
+                
+                <!-- Right side -->
+                <div class="flex items-center gap-2">
+                    <button onclick="toggleTheme()" class="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-slate-700" title="Toggle theme">
+                        <i class="fas fa-sun text-gray-500 dark:hidden"></i>
+                        <i class="fas fa-moon text-gray-400 hidden dark:block"></i>
+                    </button>
+                    
+                    {% if session.get('username') %}
+                    <span class="text-sm text-gray-600 dark:text-gray-400 hidden sm:block">{{ session.get('username') }}</span>
+                    <a href="{{ url_for('do_logout') }}" class="p-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 text-gray-400 hover:text-red-500" title="Logout">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </a>
+                    {% endif %}
+                </div>
             </div>
-            
-            <!-- Navigation Tabs -->
-            <nav class="flex space-x-2">
-                <a href="{{ url_for('info_page') }}" class="nav-tab {% if active_page == 'info' %}active{% endif %}">
-                    <i class="fas fa-info-circle mr-2"></i>Info
-                </a>
-                <a href="{{ url_for('media_page') }}" class="nav-tab {% if active_page == 'media' %}active{% endif %}">
-                    <i class="fas fa-camera mr-2"></i>Media
-                </a>
-                <a href="{{ url_for('models_page') }}" class="nav-tab {% if active_page == 'models' %}active{% endif %}">
-                    <i class="fas fa-cube mr-2"></i>Models
-                </a>
-            </nav>
         </div>
     </header>
 
-    <main class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
+    <!-- Main Content -->
+    <main class="flex-1 max-w-6xl mx-auto w-full px-4 py-6">
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 {% for category, message in messages %}
-                    <div class="mb-4 p-4 rounded-md {% if category == 'error' %}bg-red-100 text-red-700{% else %}bg-green-100 text-green-700{% endif %}">
-                        {{ message }}
-                    </div>
+                <div class="mb-4 p-3 rounded-lg flex items-center gap-2 text-sm
+                            {% if category == 'error' %}bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400{% else %}bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400{% endif %}">
+                    <i class="fas {% if category == 'error' %}fa-exclamation-circle{% else %}fa-check-circle{% endif %}"></i>
+                    {{ message }}
+                </div>
                 {% endfor %}
             {% endif %}
         {% endwith %}
@@ -140,40 +116,43 @@
         {% block content %}{% endblock %}
     </main>
 
-    <footer class="border-t border-slate-700 mt-8">
-        <div class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8 text-center text-sm text-slate-500">
-            <p>&copy; {{ now.year }} Thoth Device. All rights reserved.</p>
+    <!-- Footer -->
+    <footer class="border-t border-gray-200 dark:border-slate-700 py-4">
+        <div class="max-w-6xl mx-auto px-4 text-center text-sm text-gray-500 dark:text-gray-400">
+            Thoth Device &copy; 2024
         </div>
     </footer>
 
-    <script src="{{ url_for('static', filename='js/axios.min.js') }}"></script>
+    <!-- Toast Container -->
+    <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
     <script>
-        // CSRF protection for AJAX requests (disabled for now)
-        // const csrf_token = "";
-        
-        // Utility functions
-        function showAlert(message, type = 'success') {
-            const alertDiv = document.createElement('div');
-            alertDiv.className = `mb-4 p-4 rounded-md ${
-                type === 'error' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
-            }`;
-            alertDiv.textContent = message;
-            
-            const main = document.querySelector('main');
-            main.insertBefore(alertDiv, main.firstChild);
-            
-            setTimeout(() => {
-                alertDiv.remove();
-            }, 5000);
+        function toggleTheme() {
+            const isDark = document.documentElement.classList.toggle('dark');
+            localStorage.setItem('thoth-theme', isDark ? 'dark' : 'light');
         }
         
+        function showToast(message, type = 'info', duration = 3000) {
+            const container = document.getElementById('toast-container');
+            const colors = {
+                success: 'bg-green-500',
+                error: 'bg-red-500',
+                info: 'bg-blue-500'
+            };
+            const toast = document.createElement('div');
+            toast.className = `${colors[type] || colors.info} text-white px-4 py-2 rounded-lg shadow-lg text-sm flex items-center gap-2 animate-pulse`;
+            toast.innerHTML = `<i class="fas fa-${type === 'success' ? 'check' : type === 'error' ? 'times' : 'info'}-circle"></i>${message}`;
+            container.appendChild(toast);
+            setTimeout(() => toast.remove(), duration);
+        }
+        
+        function showAlert(message, type) { showToast(message, type); }
         function handleError(error) {
-            console.error('Error:', error);
-            const message = error.response?.data?.message || error.message || 'An error occurred';
-            showAlert(message, 'error');
+            const msg = error.response?.data?.error || error.response?.data?.message || error.message || 'Error';
+            showToast(msg, 'error');
         }
     </script>
-    
     {% block scripts %}{% endblock %}
 </body>
 </html>
