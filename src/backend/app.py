@@ -1271,10 +1271,336 @@ def login():
 
 @app.route('/status')
 def status():
-    """Display the device status page."""
+    """Display the device status page - redirects to info page."""
+    return redirect(url_for('info_page'))
+
+
+# ============================================================================
+# NEW THOTH WEB APP PAGES: Info, Media, Models
+# ============================================================================
+
+def get_available_sensors():
+    """Get list of available sensors on this device."""
+    sensors = []
+    
+    # Check for camera
+    try:
+        cap = cv2.VideoCapture(0)
+        camera_available = cap.isOpened()
+        cap.release()
+        sensors.append({
+            'sensor_type': 'camera',
+            'name': 'Camera',
+            'available': camera_available,
+            'error': None if camera_available else 'Camera not detected'
+        })
+    except Exception as e:
+        sensors.append({
+            'sensor_type': 'camera',
+            'name': 'Camera',
+            'available': False,
+            'error': str(e)
+        })
+    
+    # Check for Sense HAT / IMU
+    try:
+        from sense_hat import SenseHat
+        sense_available = True
+    except (ImportError, OSError):
+        sense_available = False
+    
+    sensors.append({
+        'sensor_type': 'sense_hat',
+        'name': 'Sense HAT (IMU)',
+        'available': sense_available,
+        'error': None if sense_available else 'Sense HAT not detected'
+    })
+    
+    # Check for microphone
+    try:
+        import pyaudio
+        p = pyaudio.PyAudio()
+        mic_available = p.get_device_count() > 0
+        p.terminate()
+    except Exception:
+        mic_available = False
+    
+    sensors.append({
+        'sensor_type': 'microphone',
+        'name': 'Microphone',
+        'available': mic_available,
+        'error': None if mic_available else 'Microphone not detected'
+    })
+    
+    return sensors
+
+
+def get_media_files():
+    """Get list of media files in the data directory."""
+    media_files = []
+    media_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.mp4', '.avi', '.mov', '.webm'}
+    
+    try:
+        data_dir = Config.DATA_DIR
+        if os.path.exists(data_dir):
+            for filename in os.listdir(data_dir):
+                ext = os.path.splitext(filename)[1].lower()
+                if ext in media_extensions:
+                    file_path = os.path.join(data_dir, filename)
+                    stat = os.stat(file_path)
+                    
+                    # Determine file type
+                    if ext in {'.jpg', '.jpeg', '.png', '.gif'}:
+                        file_type = 'image'
+                    else:
+                        file_type = 'video'
+                    
+                    # Format file size
+                    size = stat.st_size
+                    if size < 1024:
+                        size_formatted = f"{size} B"
+                    elif size < 1024 * 1024:
+                        size_formatted = f"{size / 1024:.1f} KB"
+                    else:
+                        size_formatted = f"{size / (1024 * 1024):.1f} MB"
+                    
+                    media_files.append({
+                        'filename': filename,
+                        'type': file_type,
+                        'size': size,
+                        'size_formatted': size_formatted,
+                        'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                        'on_cloud': False  # TODO: Check if file is synced to cloud
+                    })
+        
+        # Sort by modification time, newest first
+        media_files.sort(key=lambda x: x['modified'], reverse=True)
+    except Exception as e:
+        logger.error(f"Error getting media files: {e}")
+    
+    return media_files
+
+
+@app.route('/info')
+def info_page():
+    """Display the device info page."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('info_page')))
+    
+    try:
+        system_status = get_system_status()
+        device_info = device_manager.get_device_info()
+        hardware_info = get_device_info()
+        sensors = get_available_sensors()
+        
+        return render_template('info.html',
+                            active_page='info',
+                            system_status=system_status,
+                            device_info=device_info,
+                            hardware_info=hardware_info,
+                            sensors=sensors)
+    except Exception as e:
+        logger.error(f"Error in info page: {str(e)}", exc_info=True)
+        flash('An error occurred while loading the info page.', 'error')
+        return redirect(url_for('setup'))
+
+
+@app.route('/media')
+def media_page():
+    """Display the media gallery page."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('media_page')))
+    
+    try:
+        media_files = get_media_files()
+        
+        return render_template('media.html',
+                            active_page='media',
+                            media_files=media_files)
+    except Exception as e:
+        logger.error(f"Error in media page: {str(e)}", exc_info=True)
+        flash('An error occurred while loading the media page.', 'error')
+        return redirect(url_for('info_page'))
+
+
+@app.route('/models')
+def models_page():
+    """Display the deployed models page."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('models_page')))
+    
+    try:
+        # For now, return empty models list - to be implemented later
+        models = []
+        total_inferences = 0
+        
+        return render_template('models.html',
+                            active_page='models',
+                            models=models,
+                            total_inferences=total_inferences)
+    except Exception as e:
+        logger.error(f"Error in models page: {str(e)}", exc_info=True)
+        flash('An error occurred while loading the models page.', 'error')
+        return redirect(url_for('info_page'))
+
+
+# ============================================================================
+# Media API Endpoints
+# ============================================================================
+
+@app.route('/api/media/list', methods=['GET'])
+def api_media_list():
+    """Get list of media files."""
+    try:
+        media_files = get_media_files()
+        return jsonify({'status': 'success', 'files': media_files})
+    except Exception as e:
+        logger.error(f"Error listing media: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+
+@app.route('/api/media/serve/<filename>')
+def api_media_serve(filename):
+    """Serve a media file."""
+    try:
+        # Security: prevent directory traversal
+        if '..' in filename or '/' in filename or '\\' in filename:
+            return jsonify({'status': 'error', 'error': 'Invalid filename'}), 400
+        
+        return send_from_directory(Config.DATA_DIR, filename)
+    except Exception as e:
+        logger.error(f"Error serving media {filename}: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 404
+
+
+@app.route('/api/media/delete/<filename>', methods=['DELETE'])
+def api_media_delete(filename):
+    """Delete a media file."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
+    
+    try:
+        # Security: prevent directory traversal
+        if '..' in filename or '/' in filename or '\\' in filename:
+            return jsonify({'status': 'error', 'error': 'Invalid filename'}), 400
+        
+        file_path = os.path.join(Config.DATA_DIR, filename)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            return jsonify({'status': 'success', 'message': f'Deleted {filename}'})
+        else:
+            return jsonify({'status': 'error', 'error': 'File not found'}), 404
+    except Exception as e:
+        logger.error(f"Error deleting media {filename}: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+
+@app.route('/api/media/upload', methods=['POST'])
+def api_media_upload():
+    """Upload a media file (e.g., annotated image)."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
+    
+    try:
+        if 'file' not in request.files:
+            return jsonify({'status': 'error', 'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'status': 'error', 'error': 'No file selected'}), 400
+        
+        # Save the file
+        filename = file.filename
+        file_path = os.path.join(Config.DATA_DIR, filename)
+        os.makedirs(Config.DATA_DIR, exist_ok=True)
+        file.save(file_path)
+        
+        return jsonify({'status': 'success', 'filename': filename})
+    except Exception as e:
+        logger.error(f"Error uploading media: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+
+@app.route('/api/media/upload/<filename>', methods=['POST'])
+def api_media_upload_to_cloud(filename):
+    """Upload a specific media file to the cloud."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
+    
+    try:
+        # Security: prevent directory traversal
+        if '..' in filename or '/' in filename or '\\' in filename:
+            return jsonify({'status': 'error', 'error': 'Invalid filename'}), 400
+        
+        file_path = os.path.join(Config.DATA_DIR, filename)
+        if not os.path.exists(file_path):
+            return jsonify({'status': 'error', 'error': 'File not found'}), 404
+        
+        # Read file and upload to Brain server
+        with open(file_path, 'rb') as f:
+            content = f.read()
+        
+        content_b64 = base64.b64encode(content).decode('utf-8')
+        
+        # Determine content type
+        ext = os.path.splitext(filename)[1].lower()
+        content_types = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
+            '.mp4': 'video/mp4',
+            '.avi': 'video/avi',
+            '.mov': 'video/quicktime',
+            '.webm': 'video/webm'
+        }
+        content_type = content_types.get(ext, 'application/octet-stream')
+        
+        # Get auth token
+        auth_token = session.get('token') or getattr(Config, 'USER_AUTH_TOKEN', None)
+        if not auth_token:
+            return jsonify({'status': 'error', 'error': 'Not authenticated'}), 401
+        
+        # Upload to Brain
+        headers = {
+            'Authorization': f'Bearer {auth_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        payload = {
+            'filename': filename,
+            'content': content_b64,
+            'is_base64': True,
+            'content_type': content_type
+        }
+        
+        response = requests.post(
+            f"{Config.BRAIN_SERVER_URL}/file/upload",
+            json=payload,
+            headers=headers,
+            timeout=120
+        )
+        
+        if response.status_code in (200, 201):
+            return jsonify({'status': 'success', 'message': f'Uploaded {filename} to cloud'})
+        else:
+            return jsonify({'status': 'error', 'error': f'Upload failed: {response.status_code}'}), 500
+            
+    except Exception as e:
+        logger.error(f"Error uploading to cloud: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+
+# ============================================================================
+# Legacy status route (kept for backwards compatibility)
+# ============================================================================
+
+@app.route('/status_old')
+def status_old():
+    """Display the old device status page (legacy)."""
     # Check if user is logged in
     if 'username' not in session:
-        return redirect(url_for('login', next=url_for('status')))
+        return redirect(url_for('login', next=url_for('status_old')))
     
     try:
         # Get system status

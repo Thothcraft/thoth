@@ -1,0 +1,262 @@
+{% extends "base.html" %}
+
+{% block title %}Models - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <!-- Page Header -->
+    <div class="flex items-center justify-between">
+        <div>
+            <h2 class="text-2xl font-bold text-white">Deployed Models</h2>
+            <p class="text-slate-400 mt-1">Monitor and manage ML models running on this device</p>
+        </div>
+        <button onclick="refreshModels()" class="btn btn-secondary flex items-center">
+            <i class="fas fa-sync-alt mr-2" id="refresh-icon"></i>
+            Refresh
+        </button>
+    </div>
+
+    <!-- Stats Overview -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div class="card py-4">
+            <div class="flex items-center gap-3">
+                <div class="p-2 bg-indigo-500/20 rounded-lg">
+                    <i class="fas fa-cube text-indigo-400"></i>
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-white" id="total-models">{{ models|length }}</p>
+                    <p class="text-slate-400 text-sm">Total Models</p>
+                </div>
+            </div>
+        </div>
+        <div class="card py-4">
+            <div class="flex items-center gap-3">
+                <div class="p-2 bg-green-500/20 rounded-lg">
+                    <i class="fas fa-play text-green-400"></i>
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-white" id="active-models">{{ models|selectattr('status', 'equalto', 'running')|list|length }}</p>
+                    <p class="text-slate-400 text-sm">Active</p>
+                </div>
+            </div>
+        </div>
+        <div class="card py-4">
+            <div class="flex items-center gap-3">
+                <div class="p-2 bg-yellow-500/20 rounded-lg">
+                    <i class="fas fa-pause text-yellow-400"></i>
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-white" id="idle-models">{{ models|selectattr('status', 'equalto', 'idle')|list|length }}</p>
+                    <p class="text-slate-400 text-sm">Idle</p>
+                </div>
+            </div>
+        </div>
+        <div class="card py-4">
+            <div class="flex items-center gap-3">
+                <div class="p-2 bg-purple-500/20 rounded-lg">
+                    <i class="fas fa-chart-line text-purple-400"></i>
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-white" id="total-inferences">{{ total_inferences or 0 }}</p>
+                    <p class="text-slate-400 text-sm">Total Inferences</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Models List -->
+    {% if models %}
+    <div class="space-y-4">
+        {% for model in models %}
+        <div class="card">
+            <div class="flex items-start justify-between">
+                <div class="flex items-start gap-4">
+                    <div class="p-3 bg-slate-800 rounded-lg">
+                        {% if model.type == 'classification' %}
+                        <i class="fas fa-tags text-2xl text-blue-400"></i>
+                        {% elif model.type == 'detection' %}
+                        <i class="fas fa-search text-2xl text-green-400"></i>
+                        {% elif model.type == 'segmentation' %}
+                        <i class="fas fa-puzzle-piece text-2xl text-purple-400"></i>
+                        {% else %}
+                        <i class="fas fa-brain text-2xl text-indigo-400"></i>
+                        {% endif %}
+                    </div>
+                    <div>
+                        <h3 class="text-lg font-semibold text-white">{{ model.name }}</h3>
+                        <p class="text-slate-400 text-sm mt-1">{{ model.description or 'No description' }}</p>
+                        <div class="flex items-center gap-4 mt-3">
+                            <span class="text-xs text-slate-500">
+                                <i class="fas fa-code-branch mr-1"></i>v{{ model.version or '1.0' }}
+                            </span>
+                            <span class="text-xs text-slate-500">
+                                <i class="fas fa-database mr-1"></i>{{ model.size_mb or 'N/A' }} MB
+                            </span>
+                            <span class="text-xs text-slate-500">
+                                <i class="fas fa-clock mr-1"></i>{{ model.avg_inference_time or 'N/A' }} ms
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="px-3 py-1 rounded-full text-xs font-medium 
+                        {% if model.status == 'running' %}bg-green-500/20 text-green-400
+                        {% elif model.status == 'idle' %}bg-yellow-500/20 text-yellow-400
+                        {% else %}bg-slate-500/20 text-slate-400{% endif %}">
+                        {{ model.status|title }}
+                    </span>
+                    <button onclick="toggleModel('{{ model.id }}')" class="btn btn-secondary btn-sm">
+                        {% if model.status == 'running' %}
+                        <i class="fas fa-pause mr-1"></i>Pause
+                        {% else %}
+                        <i class="fas fa-play mr-1"></i>Start
+                        {% endif %}
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Model Metrics -->
+            {% if model.metrics %}
+            <div class="mt-4 pt-4 border-t border-slate-700">
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div>
+                        <p class="text-slate-500 text-xs">Accuracy</p>
+                        <p class="text-white font-medium">{{ model.metrics.accuracy or 'N/A' }}%</p>
+                    </div>
+                    <div>
+                        <p class="text-slate-500 text-xs">Inferences Today</p>
+                        <p class="text-white font-medium">{{ model.metrics.inferences_today or 0 }}</p>
+                    </div>
+                    <div>
+                        <p class="text-slate-500 text-xs">Avg Latency</p>
+                        <p class="text-white font-medium">{{ model.metrics.avg_latency or 'N/A' }} ms</p>
+                    </div>
+                    <div>
+                        <p class="text-slate-500 text-xs">Last Used</p>
+                        <p class="text-white font-medium">{{ model.metrics.last_used or 'Never' }}</p>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <!-- Empty State -->
+    <div class="card text-center py-16">
+        <div class="max-w-md mx-auto">
+            <div class="w-20 h-20 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-6">
+                <i class="fas fa-cube text-4xl text-slate-600"></i>
+            </div>
+            <h3 class="text-xl font-semibold text-white mb-2">No Models Deployed</h3>
+            <p class="text-slate-400 mb-6">
+                Deploy ML models from the Research Portal to start running inference on this device.
+            </p>
+            <div class="space-y-4">
+                <div class="bg-slate-800/50 rounded-lg p-4 text-left">
+                    <h4 class="text-white font-medium mb-2">
+                        <i class="fas fa-info-circle text-indigo-400 mr-2"></i>
+                        How to deploy models
+                    </h4>
+                    <ol class="text-slate-400 text-sm space-y-2 list-decimal list-inside">
+                        <li>Train a model in the Research Portal</li>
+                        <li>Export the model for edge deployment</li>
+                        <li>Select this device as the deployment target</li>
+                        <li>The model will appear here automatically</li>
+                    </ol>
+                </div>
+                
+                <div class="bg-slate-800/50 rounded-lg p-4 text-left">
+                    <h4 class="text-white font-medium mb-2">
+                        <i class="fas fa-rocket text-purple-400 mr-2"></i>
+                        Supported Model Types
+                    </h4>
+                    <div class="grid grid-cols-2 gap-2 text-sm">
+                        <div class="flex items-center text-slate-400">
+                            <i class="fas fa-check text-green-400 mr-2"></i>
+                            Image Classification
+                        </div>
+                        <div class="flex items-center text-slate-400">
+                            <i class="fas fa-check text-green-400 mr-2"></i>
+                            Object Detection
+                        </div>
+                        <div class="flex items-center text-slate-400">
+                            <i class="fas fa-check text-green-400 mr-2"></i>
+                            Activity Recognition
+                        </div>
+                        <div class="flex items-center text-slate-400">
+                            <i class="fas fa-check text-green-400 mr-2"></i>
+                            Anomaly Detection
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Coming Soon Features -->
+    <div class="card bg-gradient-to-r from-indigo-900/30 to-purple-900/30 border-indigo-500/30">
+        <div class="flex items-start gap-4">
+            <div class="p-3 bg-indigo-500/20 rounded-lg">
+                <i class="fas fa-flask text-2xl text-indigo-400"></i>
+            </div>
+            <div>
+                <h3 class="text-lg font-semibold text-white">Coming Soon</h3>
+                <p class="text-slate-400 mt-1">
+                    Advanced model management features are being developed:
+                </p>
+                <ul class="mt-3 space-y-2 text-sm text-slate-400">
+                    <li class="flex items-center">
+                        <i class="fas fa-circle text-xs text-indigo-400 mr-2"></i>
+                        Real-time inference monitoring dashboard
+                    </li>
+                    <li class="flex items-center">
+                        <i class="fas fa-circle text-xs text-indigo-400 mr-2"></i>
+                        Model version management and rollback
+                    </li>
+                    <li class="flex items-center">
+                        <i class="fas fa-circle text-xs text-indigo-400 mr-2"></i>
+                        A/B testing between model versions
+                    </li>
+                    <li class="flex items-center">
+                        <i class="fas fa-circle text-xs text-indigo-400 mr-2"></i>
+                        Federated learning participation status
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function refreshModels() {
+    const icon = document.getElementById('refresh-icon');
+    icon.classList.add('animate-spin');
+    window.location.reload();
+}
+
+async function toggleModel(modelId) {
+    try {
+        const response = await fetch(`/api/models/${modelId}/toggle`, {
+            method: 'POST'
+        });
+        
+        if (response.ok) {
+            window.location.reload();
+        } else {
+            throw new Error('Failed to toggle model');
+        }
+    } catch (error) {
+        alert('Error: ' + error.message);
+    }
+}
+
+// Auto-refresh every 30 seconds
+setInterval(() => {
+    window.location.reload();
+}, 30000);
+</script>
+{% endblock %}

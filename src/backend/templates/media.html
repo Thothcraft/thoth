@@ -1,0 +1,630 @@
+{% extends "base.html" %}
+
+{% block title %}Media - {{ super() }}{% endblock %}
+
+{% block extra_head %}
+<style>
+    .media-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 1rem;
+    }
+    
+    .media-item {
+        position: relative;
+        aspect-ratio: 1;
+        border-radius: 0.75rem;
+        overflow: hidden;
+        background-color: #1e293b;
+        border: 1px solid #334155;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    
+    .media-item:hover {
+        border-color: #6366f1;
+        transform: scale(1.02);
+    }
+    
+    .media-item img, .media-item video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
+    
+    .media-overlay {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        padding: 1rem;
+        background: linear-gradient(transparent, rgba(0,0,0,0.8));
+        opacity: 0;
+        transition: opacity 0.2s;
+    }
+    
+    .media-item:hover .media-overlay {
+        opacity: 1;
+    }
+    
+    .annotation-canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+    }
+    
+    .annotation-mode .annotation-canvas {
+        pointer-events: auto;
+        cursor: crosshair;
+    }
+    
+    .modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        background-color: rgba(0, 0, 0, 0.9);
+        align-items: center;
+        justify-content: center;
+    }
+    
+    .modal.active {
+        display: flex;
+    }
+    
+    .modal-content {
+        max-width: 90vw;
+        max-height: 90vh;
+        position: relative;
+    }
+    
+    .annotation-toolbar {
+        position: absolute;
+        bottom: 1rem;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 0.5rem;
+        padding: 0.5rem;
+        background: rgba(30, 41, 59, 0.95);
+        border-radius: 0.5rem;
+        border: 1px solid #475569;
+    }
+    
+    .annotation-btn {
+        padding: 0.5rem 1rem;
+        border-radius: 0.375rem;
+        background-color: #334155;
+        color: #e2e8f0;
+        border: none;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    
+    .annotation-btn:hover {
+        background-color: #475569;
+    }
+    
+    .annotation-btn.active {
+        background-color: #6366f1;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <!-- Page Header -->
+    <div class="flex items-center justify-between flex-wrap gap-4">
+        <div>
+            <h2 class="text-2xl font-bold text-white">Media Gallery</h2>
+            <p class="text-slate-400 mt-1">Capture, view, and annotate photos and videos</p>
+        </div>
+        <div class="flex items-center gap-3">
+            <button onclick="refreshMedia()" class="btn btn-secondary flex items-center">
+                <i class="fas fa-sync-alt mr-2" id="refresh-icon"></i>
+                Refresh
+            </button>
+        </div>
+    </div>
+
+    <!-- Capture Controls -->
+    <div class="card bg-gradient-to-r from-indigo-900/50 to-purple-900/50 border-indigo-500/30">
+        <h3 class="text-lg font-semibold text-white mb-4 flex items-center">
+            <i class="fas fa-camera mr-2 text-indigo-400"></i>
+            Quick Capture
+        </h3>
+        <div class="flex flex-wrap gap-4">
+            <button onclick="capturePhoto()" class="btn btn-primary flex items-center" id="capture-photo-btn">
+                <i class="fas fa-camera mr-2"></i>
+                Take Photo
+            </button>
+            <button onclick="captureVideo(5)" class="btn flex items-center" style="background-color: #7c3aed; color: white;" id="capture-video-5-btn">
+                <i class="fas fa-video mr-2"></i>
+                Record 5s Video
+            </button>
+            <button onclick="captureVideo(10)" class="btn flex items-center" style="background-color: #db2777; color: white;" id="capture-video-10-btn">
+                <i class="fas fa-video mr-2"></i>
+                Record 10s Video
+            </button>
+        </div>
+        <div id="capture-status" class="mt-3 text-sm hidden">
+            <span class="text-amber-400 flex items-center">
+                <i class="fas fa-spinner fa-spin mr-2"></i>
+                <span id="capture-status-text">Capturing...</span>
+            </span>
+        </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div class="card py-4">
+            <div class="flex items-center gap-3">
+                <div class="p-2 bg-blue-500/20 rounded-lg">
+                    <i class="fas fa-image text-blue-400"></i>
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-white" id="photo-count">{{ media_files|selectattr('type', 'equalto', 'image')|list|length }}</p>
+                    <p class="text-slate-400 text-sm">Photos</p>
+                </div>
+            </div>
+        </div>
+        <div class="card py-4">
+            <div class="flex items-center gap-3">
+                <div class="p-2 bg-purple-500/20 rounded-lg">
+                    <i class="fas fa-video text-purple-400"></i>
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-white" id="video-count">{{ media_files|selectattr('type', 'equalto', 'video')|list|length }}</p>
+                    <p class="text-slate-400 text-sm">Videos</p>
+                </div>
+            </div>
+        </div>
+        <div class="card py-4">
+            <div class="flex items-center gap-3">
+                <div class="p-2 bg-green-500/20 rounded-lg">
+                    <i class="fas fa-cloud text-green-400"></i>
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-white" id="cloud-count">{{ media_files|selectattr('on_cloud', 'equalto', true)|list|length }}</p>
+                    <p class="text-slate-400 text-sm">On Cloud</p>
+                </div>
+            </div>
+        </div>
+        <div class="card py-4">
+            <div class="flex items-center gap-3">
+                <div class="p-2 bg-orange-500/20 rounded-lg">
+                    <i class="fas fa-hdd text-orange-400"></i>
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-white" id="local-count">{{ media_files|selectattr('on_cloud', 'equalto', false)|list|length }}</p>
+                    <p class="text-slate-400 text-sm">Local</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filter and Search -->
+    <div class="flex flex-wrap items-center gap-4">
+        <div class="relative flex-1 max-w-md">
+            <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+            <input type="text" id="search-input" placeholder="Search files..." 
+                   class="form-input pl-10" onkeyup="filterMedia()">
+        </div>
+        <div class="flex items-center gap-2">
+            <span class="text-slate-400"><i class="fas fa-filter mr-2"></i></span>
+            <button onclick="setFilter('all')" class="filter-btn active" data-filter="all">All</button>
+            <button onclick="setFilter('image')" class="filter-btn" data-filter="image">Images</button>
+            <button onclick="setFilter('video')" class="filter-btn" data-filter="video">Videos</button>
+        </div>
+    </div>
+
+    <!-- Media Grid -->
+    <div class="media-grid" id="media-grid">
+        {% for file in media_files %}
+        <div class="media-item" data-type="{{ file.type }}" data-filename="{{ file.filename }}" onclick="openMedia('{{ file.filename }}', '{{ file.type }}')">
+            {% if file.type == 'image' %}
+            <img src="/api/media/serve/{{ file.filename }}" alt="{{ file.filename }}" loading="lazy">
+            {% else %}
+            <div class="w-full h-full flex items-center justify-center bg-gradient-to-br from-purple-900/50 to-indigo-900/50">
+                <i class="fas fa-play text-4xl text-white/80"></i>
+            </div>
+            {% endif %}
+            <div class="media-overlay">
+                <p class="text-white text-sm font-medium truncate">{{ file.filename }}</p>
+                <div class="flex items-center gap-2 mt-1">
+                    <span class="text-slate-300 text-xs">{{ file.size_formatted }}</span>
+                    {% if file.on_cloud %}
+                    <i class="fas fa-cloud text-green-400 text-xs"></i>
+                    {% else %}
+                    <i class="fas fa-hdd text-orange-400 text-xs"></i>
+                    {% endif %}
+                </div>
+            </div>
+            {% if file.type == 'video' %}
+            <div class="absolute top-2 right-2 bg-purple-600 text-white text-xs px-2 py-0.5 rounded-full">
+                Video
+            </div>
+            {% endif %}
+        </div>
+        {% else %}
+        <div class="col-span-full text-center py-16" id="empty-state">
+            <i class="fas fa-camera text-6xl text-slate-600 mb-4"></i>
+            <h3 class="text-xl font-semibold text-white mb-2">No media files yet</h3>
+            <p class="text-slate-400 mb-6">Capture photos or videos using the buttons above</p>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Media Preview Modal -->
+<div class="modal" id="media-modal">
+    <div class="modal-content">
+        <button onclick="closeModal()" class="absolute top-4 right-4 text-white hover:text-slate-300 z-10">
+            <i class="fas fa-times text-2xl"></i>
+        </button>
+        
+        <div id="modal-media-container" class="relative">
+            <!-- Media will be inserted here -->
+        </div>
+        
+        <!-- Annotation Toolbar -->
+        <div class="annotation-toolbar" id="annotation-toolbar">
+            <button class="annotation-btn" onclick="toggleAnnotationMode()" id="annotate-btn">
+                <i class="fas fa-pen mr-2"></i>Annotate
+            </button>
+            <button class="annotation-btn" onclick="saveAnnotation()" id="save-annotation-btn" style="display: none;">
+                <i class="fas fa-save mr-2"></i>Save
+            </button>
+            <button class="annotation-btn" onclick="clearAnnotations()" id="clear-annotation-btn" style="display: none;">
+                <i class="fas fa-eraser mr-2"></i>Clear
+            </button>
+            <div class="h-6 w-px bg-slate-600 mx-2"></div>
+            <button class="annotation-btn" onclick="uploadToCloud()" id="upload-btn">
+                <i class="fas fa-cloud-upload-alt mr-2"></i>Upload
+            </button>
+            <button class="annotation-btn" onclick="downloadMedia()" id="download-btn">
+                <i class="fas fa-download mr-2"></i>Download
+            </button>
+            <button class="annotation-btn" onclick="deleteMedia()" style="background-color: #dc2626;">
+                <i class="fas fa-trash mr-2"></i>Delete
+            </button>
+        </div>
+    </div>
+</div>
+
+<style>
+    .filter-btn {
+        padding: 0.375rem 0.75rem;
+        border-radius: 0.5rem;
+        font-size: 0.875rem;
+        font-weight: 500;
+        background-color: #1e293b;
+        color: #94a3b8;
+        border: 1px solid #334155;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    
+    .filter-btn:hover {
+        background-color: #334155;
+        color: #e2e8f0;
+    }
+    
+    .filter-btn.active {
+        background-color: #6366f1;
+        color: white;
+        border-color: #6366f1;
+    }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentFilter = 'all';
+let currentMedia = null;
+let annotationMode = false;
+let annotations = [];
+
+async function capturePhoto() {
+    const btn = document.getElementById('capture-photo-btn');
+    const status = document.getElementById('capture-status');
+    const statusText = document.getElementById('capture-status-text');
+    
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Capturing...';
+    status.classList.remove('hidden');
+    statusText.textContent = 'Taking photo...';
+    
+    try {
+        const response = await fetch('/api/camera/capture');
+        const data = await response.json();
+        
+        if (data.status === 'success') {
+            statusText.textContent = 'Photo captured successfully!';
+            status.querySelector('span').classList.remove('text-amber-400');
+            status.querySelector('span').classList.add('text-green-400');
+            setTimeout(() => window.location.reload(), 1000);
+        } else {
+            throw new Error(data.message || 'Capture failed');
+        }
+    } catch (error) {
+        statusText.textContent = 'Error: ' + error.message;
+        status.querySelector('span').classList.remove('text-amber-400');
+        status.querySelector('span').classList.add('text-red-400');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-camera mr-2"></i>Take Photo';
+        setTimeout(() => status.classList.add('hidden'), 3000);
+    }
+}
+
+async function captureVideo(duration) {
+    const btn = document.getElementById(`capture-video-${duration}-btn`);
+    const status = document.getElementById('capture-status');
+    const statusText = document.getElementById('capture-status-text');
+    
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Recording...';
+    status.classList.remove('hidden');
+    statusText.textContent = `Recording ${duration}s video...`;
+    
+    try {
+        const response = await fetch('/api/camera/record', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ duration: duration })
+        });
+        const data = await response.json();
+        
+        if (data.status === 'success') {
+            statusText.textContent = 'Video recorded successfully!';
+            status.querySelector('span').classList.remove('text-amber-400');
+            status.querySelector('span').classList.add('text-green-400');
+            setTimeout(() => window.location.reload(), 1000);
+        } else {
+            throw new Error(data.message || 'Recording failed');
+        }
+    } catch (error) {
+        statusText.textContent = 'Error: ' + error.message;
+        status.querySelector('span').classList.remove('text-amber-400');
+        status.querySelector('span').classList.add('text-red-400');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<i class="fas fa-video mr-2"></i>Record ${duration}s Video`;
+        setTimeout(() => status.classList.add('hidden'), 3000);
+    }
+}
+
+function refreshMedia() {
+    const icon = document.getElementById('refresh-icon');
+    icon.classList.add('animate-spin');
+    window.location.reload();
+}
+
+function setFilter(filter) {
+    currentFilter = filter;
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.filter === filter);
+    });
+    filterMedia();
+}
+
+function filterMedia() {
+    const searchTerm = document.getElementById('search-input').value.toLowerCase();
+    const items = document.querySelectorAll('.media-item');
+    
+    items.forEach(item => {
+        const type = item.dataset.type;
+        const filename = item.dataset.filename.toLowerCase();
+        
+        const matchesFilter = currentFilter === 'all' || type === currentFilter;
+        const matchesSearch = filename.includes(searchTerm);
+        
+        item.style.display = matchesFilter && matchesSearch ? 'block' : 'none';
+    });
+}
+
+function openMedia(filename, type) {
+    currentMedia = { filename, type };
+    const modal = document.getElementById('media-modal');
+    const container = document.getElementById('modal-media-container');
+    
+    if (type === 'image') {
+        container.innerHTML = `
+            <img src="/api/media/serve/${filename}" alt="${filename}" 
+                 style="max-width: 80vw; max-height: 80vh; object-fit: contain;">
+            <canvas id="annotation-canvas" class="annotation-canvas"></canvas>
+        `;
+        document.getElementById('annotate-btn').style.display = 'inline-flex';
+    } else {
+        container.innerHTML = `
+            <video src="/api/media/serve/${filename}" controls autoplay
+                   style="max-width: 80vw; max-height: 80vh;">
+            </video>
+        `;
+        document.getElementById('annotate-btn').style.display = 'none';
+    }
+    
+    modal.classList.add('active');
+}
+
+function closeModal() {
+    const modal = document.getElementById('media-modal');
+    modal.classList.remove('active');
+    currentMedia = null;
+    annotationMode = false;
+    annotations = [];
+}
+
+function toggleAnnotationMode() {
+    annotationMode = !annotationMode;
+    const btn = document.getElementById('annotate-btn');
+    const saveBtn = document.getElementById('save-annotation-btn');
+    const clearBtn = document.getElementById('clear-annotation-btn');
+    const container = document.getElementById('modal-media-container');
+    
+    btn.classList.toggle('active', annotationMode);
+    saveBtn.style.display = annotationMode ? 'inline-flex' : 'none';
+    clearBtn.style.display = annotationMode ? 'inline-flex' : 'none';
+    container.classList.toggle('annotation-mode', annotationMode);
+    
+    if (annotationMode) {
+        initAnnotationCanvas();
+    }
+}
+
+function initAnnotationCanvas() {
+    const canvas = document.getElementById('annotation-canvas');
+    if (!canvas) return;
+    
+    const img = canvas.previousElementSibling;
+    canvas.width = img.naturalWidth || img.width;
+    canvas.height = img.naturalHeight || img.height;
+    
+    const ctx = canvas.getContext('2d');
+    let isDrawing = false;
+    let lastX = 0;
+    let lastY = 0;
+    
+    canvas.onmousedown = (e) => {
+        isDrawing = true;
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        lastX = (e.clientX - rect.left) * scaleX;
+        lastY = (e.clientY - rect.top) * scaleY;
+    };
+    
+    canvas.onmousemove = (e) => {
+        if (!isDrawing) return;
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        const x = (e.clientX - rect.left) * scaleX;
+        const y = (e.clientY - rect.top) * scaleY;
+        
+        ctx.beginPath();
+        ctx.moveTo(lastX, lastY);
+        ctx.lineTo(x, y);
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+        
+        lastX = x;
+        lastY = y;
+    };
+    
+    canvas.onmouseup = () => isDrawing = false;
+    canvas.onmouseout = () => isDrawing = false;
+}
+
+function clearAnnotations() {
+    const canvas = document.getElementById('annotation-canvas');
+    if (canvas) {
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+}
+
+async function saveAnnotation() {
+    if (!currentMedia) return;
+    
+    const canvas = document.getElementById('annotation-canvas');
+    const img = canvas.previousElementSibling;
+    
+    // Create a new canvas with the image and annotations
+    const mergedCanvas = document.createElement('canvas');
+    mergedCanvas.width = canvas.width;
+    mergedCanvas.height = canvas.height;
+    const ctx = mergedCanvas.getContext('2d');
+    
+    ctx.drawImage(img, 0, 0);
+    ctx.drawImage(canvas, 0, 0);
+    
+    // Convert to blob and upload
+    mergedCanvas.toBlob(async (blob) => {
+        const formData = new FormData();
+        formData.append('file', blob, `annotated_${currentMedia.filename}`);
+        
+        try {
+            const response = await fetch('/api/media/upload', {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (response.ok) {
+                alert('Annotated image saved!');
+                window.location.reload();
+            } else {
+                throw new Error('Failed to save annotation');
+            }
+        } catch (error) {
+            alert('Error saving annotation: ' + error.message);
+        }
+    }, 'image/jpeg', 0.9);
+}
+
+async function uploadToCloud() {
+    if (!currentMedia) return;
+    
+    try {
+        const response = await fetch(`/api/media/upload/${currentMedia.filename}`, {
+            method: 'POST'
+        });
+        
+        if (response.ok) {
+            alert('Uploaded to cloud successfully!');
+            window.location.reload();
+        } else {
+            throw new Error('Upload failed');
+        }
+    } catch (error) {
+        alert('Error uploading: ' + error.message);
+    }
+}
+
+function downloadMedia() {
+    if (!currentMedia) return;
+    
+    const link = document.createElement('a');
+    link.href = `/api/media/serve/${currentMedia.filename}`;
+    link.download = currentMedia.filename;
+    link.click();
+}
+
+async function deleteMedia() {
+    if (!currentMedia) return;
+    
+    if (!confirm(`Delete ${currentMedia.filename}?`)) return;
+    
+    try {
+        const response = await fetch(`/api/media/delete/${currentMedia.filename}`, {
+            method: 'DELETE'
+        });
+        
+        if (response.ok) {
+            closeModal();
+            window.location.reload();
+        } else {
+            throw new Error('Delete failed');
+        }
+    } catch (error) {
+        alert('Error deleting: ' + error.message);
+    }
+}
+
+// Close modal on escape key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeModal();
+});
+
+// Close modal on background click
+document.getElementById('media-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'media-modal') closeModal();
+});
+</script>
+{% endblock %}
