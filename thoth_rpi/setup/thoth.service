@@ -1,0 +1,16 @@
+[Unit]
+Description=Thoth Smart Home Sensor Platform
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+ExecStart=__PYTHON__ __APP__
+WorkingDirectory=__WORKDIR__
+Environment=THOTH_ROOT=__THOTH_ROOT__
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

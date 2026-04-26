@@ -1,0 +1,3 @@
+# RPi-specific dependencies (on top of thoth_core/requirements.txt)
+picamera2
+RPi.GPIO

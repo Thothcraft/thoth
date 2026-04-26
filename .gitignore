@@ -21,7 +21,8 @@ wheels/
 *.egg
 MANIFEST
 
-# Virtual Environment
+# Virtual Environments (per-platform)
+.venv/
 venv/
 env/
 ENV/
@@ -49,23 +50,19 @@ Thumbs.db
 *.swo
 
 # Configuration files with sensitive data
-src/backend/button_config.json
-
-# Hardware-specific configs
-/etc/hostapd/
-/etc/dnsmasq.d/
-/tmp/thoth_*
+thoth_core/backend/button_config.json
 
 # Backup files
 *.backup
 *.bak
 
-# PiSugar configs
-/etc/pisugar/
-
 # Service logs
 *.service.log
+logs/
 
-
-# Wifi sensing
-# WS/data/
+# Build artifacts (py2app, PyInstaller, Inno Setup)
+build/
+dist/
+*.spec.bak
+*.iconset/
+thoth_win/icon.ico
