@@ -21,14 +21,9 @@ for root, dirs, files in os.walk('sensors'):
         rel_path = os.path.join(root, file)
         DATA_FILES.append(rel_path)
 
-# Include thoth_core
-for root, dirs, files in os.walk('../thoth_core'):
-    # Skip __pycache__ and .pyc files
-    dirs[:] = [d for d in dirs if d not in ['__pycache__', '.git', 'venv', '.venv']]
-    for file in files:
-        if file.endswith('.py'):
-            rel_path = os.path.join('thoth_core', os.path.relpath(os.path.join(root, file), '../thoth_core'))
-            DATA_FILES.append(rel_path)
+# Add thoth_core to Python path so py2app can find it
+THOTH_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, THOTH_ROOT)
 
 OPTIONS = {
     'argv_emulation': False,
@@ -50,6 +45,7 @@ OPTIONS = {
         'werkzeug',
         'requests',
         'apscheduler',
+        'thoth_core',
     ],
     'includes': [
         'rumps',
@@ -64,7 +60,6 @@ OPTIONS = {
         'PIL',
         'socketio',
         'engineio',
-        'thoth_core',
     ],
     'excludes': [
         'matplotlib',
