@@ -9,116 +9,47 @@ permissions:
   contents: write      # Allow creating releases
 
 jobs:
-  # ── macOS .dmg ─────────────────────────────────────────────────────────
+  # ── macOS archive ───────────────────────────────────────────────────────
   build-mac:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
+      - name: Create macOS archive
         run: |
-          python -m pip install --upgrade pip
-          pip install -r thoth_core/requirements.txt
-          pip install -r thoth_mac/requirements.txt
-          pip install py2app
-
-      - name: Build .app bundle
-        working-directory: thoth_mac
-        run: python setup_app.py py2app
-
-      - name: Generate .icns icon
-        working-directory: thoth_mac
-        run: |
-          mkdir -p Thoth.iconset
-          sips -z 16 16   icon.png --out Thoth.iconset/icon_16x16.png
-          sips -z 32 32   icon.png --out Thoth.iconset/icon_16x16@2x.png
-          sips -z 128 128 icon.png --out Thoth.iconset/icon_128x128.png
-          sips -z 256 256 icon.png --out Thoth.iconset/icon_128x128@2x.png
-          sips -z 256 256 icon.png --out Thoth.iconset/icon_256x256.png
-          sips -z 512 512 icon.png --out Thoth.iconset/icon_256x256@2x.png
-          sips -z 512 512 icon.png --out Thoth.iconset/icon_512x512.png
-          iconutil -c icns Thoth.iconset -o Thoth.icns || true
-          rm -rf Thoth.iconset
-
-      - name: Create DMG
-        working-directory: thoth_mac
-        run: |
-          if [ -d "dist/Thoth.app" ]; then
-            hdiutil create -volname Thoth -srcfolder dist/Thoth.app \
-              -ov -format UDZO dist/Thoth-macOS.dmg
-          else
-            echo "::warning::py2app build did not produce Thoth.app — creating source archive instead"
-            cd .. && tar czf thoth_mac/dist/Thoth-macOS.tar.gz \
-              thoth_core/ thoth_mac/ .env LICENSE README.md
-          fi
+          tar czf Thoth-macOS.tar.gz \
+            thoth_core/ thoth_mac/ .env LICENSE README.md
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-release
-          path: thoth_mac/dist/Thoth-macOS.*
+          path: Thoth-macOS.tar.gz
 
-  # ── Windows .exe ───────────────────────────────────────────────────────
+  # ── Windows archive ────────────────────────────────────────────────────
   build-win:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
+      - name: Create Windows archive
         run: |
-          python -m pip install --upgrade pip
-          pip install -r thoth_core/requirements.txt
-          pip install -r thoth_win/requirements.txt
-          pip install pyinstaller Pillow
-
-      - name: Convert icon
-        working-directory: thoth_win
-        run: |
-          python -c "from PIL import Image; img=Image.open('icon.png'); img.save('icon.ico', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
-
-      - name: Build with PyInstaller
-        working-directory: thoth_win
-        run: |
-          pyinstaller --name Thoth --icon icon.ico --noconsole `
-            --add-data "..\thoth_core\backend\templates;thoth_core\backend\templates" `
-            --add-data "..\thoth_core\backend\static;thoth_core\backend\static" `
-            --add-data "..\.env;." `
-            --add-data "icon.png;." `
-            --paths ".." `
-            --hidden-import "thoth_core.backend.app" `
-            --hidden-import "thoth_core.backend.routes.files" `
-            --hidden-import "thoth_core.sensors" `
-            --hidden-import "thoth_win.sensors" `
-            --hidden-import "engineio.async_drivers.threading" `
-            app.py
-
-      - name: Create ZIP
-        working-directory: thoth_win
-        run: Compress-Archive -Path dist\Thoth\* -DestinationPath dist\Thoth-Windows.zip
+          zip -r Thoth-Windows.zip \
+            thoth_core/ thoth_win/ .env LICENSE README.md
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-release
-          path: thoth_win/dist/Thoth-Windows.zip
+          path: Thoth-Windows.zip
 
-  # ── Raspberry Pi source archive ────────────────────────────────────────
+  # ── Raspberry Pi archive ───────────────────────────────────────────────
   build-rpi:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create RPi source archive
+      - name: Create RPi archive
         run: |
           tar czf Thoth-RPi.tar.gz \
             thoth_core/ thoth_rpi/ .env LICENSE README.md
@@ -159,8 +90,8 @@ jobs:
 
             | Platform | File | Install |
             |----------|------|---------|
-            | **macOS** | `Thoth-macOS.dmg` | Open DMG → drag to Applications |
-            | **Windows** | `Thoth-Windows.zip` | Extract → run `Thoth.exe` |
+            | **macOS** | `Thoth-macOS.tar.gz` | Extract → `cd thoth_mac && ./install.sh` |
+            | **Windows** | `Thoth-Windows.zip` | Extract → `cd thoth_win && powershell -ExecutionPolicy Bypass -File install.ps1` |
             | **Raspberry Pi** | `Thoth-RPi.tar.gz` | Extract → `sudo ./thoth_rpi/setup/install.sh` |
 
             ### What's New
