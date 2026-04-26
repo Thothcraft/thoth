@@ -75,12 +75,14 @@ def log_response(response):
 
 # Load user info from saved credentials before each request
 @app.before_request
-def load_user_from_saved_auth():
+def populate_session_if_auth_manager_has_credentials():
     """If credentials were loaded at startup but session is empty, populate it."""
-    if 'username' not in session and auth_manager.is_authenticated() and auth_manager.user_info:
-        session['username'] = auth_manager.user_info.get('username')
-        session['user_id'] = auth_manager.user_info.get('user_id')
-        session['token'] = auth_manager.token
+    # Disabled: require explicit login on first run
+    # if 'username' not in session and auth_manager.is_authenticated() and auth_manager.user_info:
+    #     session['username'] = auth_manager.user_info.get('username')
+    #     session['user_id'] = auth_manager.user_info.get('user_id')
+    #     session['token'] = auth_manager.token
+    pass
 
 # Add current date to all templates
 @app.context_processor
