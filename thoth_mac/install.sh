@@ -7,8 +7,9 @@
 # What it does:
 #   1. Creates a Python virtual-environment in thoth_mac/.venv
 #   2. Installs core + macOS dependencies
-#   3. Copies the LaunchAgent plist to ~/Library/LaunchAgents/
-#   4. Loads the agent so Thoth starts on every login
+#   3. Removes any pre-saved authentication data (ensures logged out on first run)
+#   4. Copies the LaunchAgent plist to ~/Library/LaunchAgents/
+#   5. Loads the agent so Thoth starts on every login
 # ============================================================================
 
 set -euo pipefail
@@ -39,7 +40,16 @@ pip install -r "$THOTH_ROOT/thoth_core/requirements.txt" -q
 echo "➤ Installing macOS dependencies …"
 pip install -r "$SCRIPT_DIR/requirements.txt" -q
 
-# --- 2. Generate LaunchAgent plist with correct paths ---
+# --- 2. Remove any pre-saved auth data (ensure logged out on first run) ---
+echo "➤ Clearing any pre-saved authentication data …"
+AUTH_DATA_DIR="$THOTH_ROOT/thoth_core/data/config"
+AUTH_FILE="$AUTH_DATA_DIR/auth.json"
+if [ -f "$AUTH_FILE" ]; then
+    rm -f "$AUTH_FILE"
+    echo "  ✓ Removed existing auth.json"
+fi
+
+# --- 3. Generate LaunchAgent plist with correct paths ---
 echo "➤ Configuring LaunchAgent …"
 PYTHON_BIN="$VENV_DIR/bin/python"
 APP_SCRIPT="$SCRIPT_DIR/app.py"
