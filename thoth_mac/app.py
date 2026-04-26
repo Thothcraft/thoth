@@ -36,7 +36,12 @@ logger = logging.getLogger("thoth_mac")
 DASHBOARD_URL = f"http://localhost:{Config.PORT}"
 
 # Resolve icon path (works both from source and inside .app bundle)
-_ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_ICON_PATH = os.path.join(_SCRIPT_DIR, "icon.png")
+
+# Also check parent directory in case running from extracted archive
+if not os.path.exists(_ICON_PATH):
+    _ICON_PATH = os.path.join(os.path.dirname(_SCRIPT_DIR), "thoth_mac", "icon.png")
 
 
 class ThothStatusBarApp(rumps.App):
@@ -44,6 +49,10 @@ class ThothStatusBarApp(rumps.App):
 
     def __init__(self):
         icon_file = _ICON_PATH if os.path.exists(_ICON_PATH) else None
+        if icon_file:
+            logger.info(f"Loading icon from: {icon_file}")
+        else:
+            logger.warning(f"Icon not found at: {_ICON_PATH}, using text fallback")
         super().__init__(
             name="Thoth",
             title=None if icon_file else "𓁟",
