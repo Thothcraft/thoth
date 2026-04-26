@@ -20,9 +20,10 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install py2app
+      - name: Install dependencies
         run: |
-          cd thoth_mac
+          pip install -r thoth_core/requirements.txt
+          pip install -r thoth_mac/requirements.txt
           pip install py2app
 
       - name: Build .app bundle

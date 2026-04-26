@@ -21,6 +21,15 @@ for root, dirs, files in os.walk('sensors'):
         rel_path = os.path.join(root, file)
         DATA_FILES.append(rel_path)
 
+# Include thoth_core
+for root, dirs, files in os.walk('../thoth_core'):
+    # Skip __pycache__ and .pyc files
+    dirs[:] = [d for d in dirs if d not in ['__pycache__', '.git', 'venv', '.venv']]
+    for file in files:
+        if file.endswith('.py'):
+            rel_path = os.path.join('thoth_core', os.path.relpath(os.path.join(root, file), '../thoth_core'))
+            DATA_FILES.append(rel_path)
+
 OPTIONS = {
     'argv_emulation': False,
     'iconfile': 'Thoth.icns',
@@ -41,11 +50,16 @@ OPTIONS = {
         'werkzeug',
         'requests',
         'apscheduler',
-        'opencv-python',
+        'cv2',
         'numpy',
         'PIL',
         'sounddevice',
         'pyaudio',
+        'socketio',
+        'engineio',
+        'eventlet',
+        'gevent',
+        'geventwebsocket',
     ],
     'includes': [
         'rumps',
@@ -62,6 +76,10 @@ OPTIONS = {
         'pyaudio',
         'socketio',
         'engineio',
+        'eventlet',
+        'gevent',
+        'geventwebsocket',
+        'thoth_core',
     ],
     'excludes': [
         'matplotlib',
