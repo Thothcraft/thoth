@@ -1,0 +1,342 @@
+{% extends "base.html" %}
+{% set active_page = 'predictions' %}
+
+{% block content %}
+<div class="space-y-6">
+    <!-- Header -->
+    <div class="flex items-center justify-between">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Predictions & Triggers</h1>
+            <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Manage deployed models, configure triggers, and view prediction history</p>
+        </div>
+        <button onclick="refreshModels()" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium flex items-center gap-2">
+            <i class="fas fa-sync-alt"></i> Refresh
+        </button>
+    </div>
+
+    <!-- Stats Overview -->
+    <div class="grid grid-cols-4 gap-4">
+        <div class="bg-white dark:bg-slate-800 rounded-xl p-4 border border-gray-200 dark:border-slate-700">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 bg-indigo-500/20 rounded-lg flex items-center justify-center">
+                    <i class="fas fa-brain text-indigo-500"></i>
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-gray-900 dark:text-white" id="total-models">{{ models|length }}</p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">Deployed Models</p>
+                </div>
+            </div>
+        </div>
+        <div class="bg-white dark:bg-slate-800 rounded-xl p-4 border border-gray-200 dark:border-slate-700">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 bg-green-500/20 rounded-lg flex items-center justify-center">
+                    <i class="fas fa-play text-green-500"></i>
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-gray-900 dark:text-white" id="running-models">{{ models|selectattr('status', 'equalto', 'running')|list|length }}</p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">Active</p>
+                </div>
+            </div>
+        </div>
+        <div class="bg-white dark:bg-slate-800 rounded-xl p-4 border border-gray-200 dark:border-slate-700">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 bg-purple-500/20 rounded-lg flex items-center justify-center">
+                    <i class="fas fa-bolt text-purple-500"></i>
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-gray-900 dark:text-white" id="total-triggers">{{ models|sum(attribute='triggers')|int if models else 0 }}</p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">Triggers</p>
+                </div>
+            </div>
+        </div>
+        <div class="bg-white dark:bg-slate-800 rounded-xl p-4 border border-gray-200 dark:border-slate-700">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 bg-blue-500/20 rounded-lg flex items-center justify-center">
+                    <i class="fas fa-chart-line text-blue-500"></i>
+                </div>
+                <div>
+                    <p class="text-2xl font-bold text-gray-900 dark:text-white" id="total-predictions">{{ models|sum(attribute='predictions_count') }}</p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">Total Predictions</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Deployed Models -->
+    <div class="bg-white dark:bg-slate-800 rounded-xl border border-gray-200 dark:border-slate-700" id="models-container">
+        {% if models %}
+        {% for model in models %}
+        <div class="p-4 {% if not loop.last %}border-b border-gray-200 dark:border-slate-700{% endif %}" id="model-{{ model.deployment_id }}">
+            <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 rounded-lg flex items-center justify-center
+                                {% if model.status == 'running' %}bg-green-500/20{% elif model.status == 'ready' %}bg-yellow-500/20{% else %}bg-gray-500/20{% endif %}">
+                        <i class="fas {% if model.status == 'running' %}fa-play text-green-500{% elif model.status == 'ready' %}fa-pause text-yellow-500{% else %}fa-stop text-gray-500{% endif %}"></i>
+                    </div>
+                    <div>
+                        <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ model.model_name }}</h3>
+                        <p class="text-xs text-gray-500 dark:text-gray-400">{{ model.model_type|upper }} · Deployed {{ model.deployed_at[:10] if model.deployed_at else 'Unknown' }}</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="px-2 py-1 rounded-full text-xs font-medium
+                                 {% if model.status == 'running' %}bg-green-500/20 text-green-600 dark:text-green-400{% elif model.status == 'ready' %}bg-yellow-500/20 text-yellow-600 dark:text-yellow-400{% else %}bg-gray-500/20 text-gray-600 dark:text-gray-400{% endif %}">
+                        {{ model.status|title }}
+                    </span>
+                    <button onclick="toggleModel('{{ model.deployment_id }}')" class="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors
+                                    {% if model.status == 'running' %}border-red-300 dark:border-red-500/30 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20{% else %}border-green-300 dark:border-green-500/30 text-green-600 dark:text-green-400 hover:bg-green-50 dark:hover:bg-green-900/20{% endif %}">
+                        {% if model.status == 'running' %}Stop{% else %}Start{% endif %}
+                    </button>
+                    <button onclick="openTriggers('{{ model.deployment_id }}', '{{ model.model_name }}')" class="px-3 py-1.5 rounded-lg text-xs font-medium border border-purple-300 dark:border-purple-500/30 text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20">
+                        <i class="fas fa-bolt mr-1"></i>Triggers
+                    </button>
+                    <button onclick="deleteModel('{{ model.deployment_id }}')" class="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-300 dark:border-slate-600 text-gray-500 dark:text-gray-400 hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-500">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+            <!-- Model Stats -->
+            <div class="flex items-center gap-6 text-xs text-gray-500 dark:text-gray-400">
+                <span><i class="fas fa-chart-bar mr-1"></i>{{ model.predictions_count }} predictions</span>
+                {% if model.last_prediction %}
+                <span><i class="fas fa-clock mr-1"></i>Last: {{ model.last_prediction }}</span>
+                {% endif %}
+                {% if model.get('triggers', [])|length > 0 %}
+                <span><i class="fas fa-bolt mr-1"></i>{{ model.triggers|length }} trigger(s) active</span>
+                {% endif %}
+                {% if model.get('config', {}).get('class_names') %}
+                <span><i class="fas fa-tags mr-1"></i>Classes: {{ model.config.class_names|join(', ') }}</span>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+        {% else %}
+        <div class="p-12 text-center">
+            <div class="w-16 h-16 bg-gray-100 dark:bg-slate-700 rounded-full flex items-center justify-center mx-auto mb-4">
+                <i class="fas fa-brain text-3xl text-gray-400 dark:text-gray-500"></i>
+            </div>
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">No Models Deployed</h3>
+            <p class="text-sm text-gray-500 dark:text-gray-400 max-w-md mx-auto">
+                Deploy a model from the <strong>Research Portal</strong> to this device to start making predictions.
+                Go to Training → Models → Deploy to get started.
+            </p>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Trigger Configuration Info -->
+    <div class="bg-white dark:bg-slate-800 rounded-xl border border-gray-200 dark:border-slate-700 p-6">
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+            <i class="fas fa-info-circle text-indigo-500 mr-2"></i>How Triggers Work
+        </h2>
+        <div class="grid grid-cols-3 gap-6 text-sm">
+            <div>
+                <div class="flex items-center gap-2 mb-2">
+                    <div class="w-8 h-8 bg-blue-500/20 rounded-lg flex items-center justify-center">
+                        <i class="fas fa-home text-blue-500"></i>
+                    </div>
+                    <h3 class="font-medium text-gray-900 dark:text-white">Home Assistant</h3>
+                </div>
+                <p class="text-gray-500 dark:text-gray-400">
+                    Send predictions to Home Assistant via REST API. Control lights, switches, and automations based on detected activities.
+                </p>
+            </div>
+            <div>
+                <div class="flex items-center gap-2 mb-2">
+                    <div class="w-8 h-8 bg-green-500/20 rounded-lg flex items-center justify-center">
+                        <i class="fas fa-bell text-green-500"></i>
+                    </div>
+                    <h3 class="font-medium text-gray-900 dark:text-white">Notifications</h3>
+                </div>
+                <p class="text-gray-500 dark:text-gray-400">
+                    Get desktop or push notifications when specific activities are detected or prediction confidence exceeds a threshold.
+                </p>
+            </div>
+            <div>
+                <div class="flex items-center gap-2 mb-2">
+                    <div class="w-8 h-8 bg-purple-500/20 rounded-lg flex items-center justify-center">
+                        <i class="fas fa-code text-purple-500"></i>
+                    </div>
+                    <h3 class="font-medium text-gray-900 dark:text-white">Webhook</h3>
+                </div>
+                <p class="text-gray-500 dark:text-gray-400">
+                    POST prediction results to any HTTP endpoint. Integrate with IFTTT, Zapier, or your custom services.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Trigger Configuration Modal -->
+<div id="trigger-modal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+    <div class="bg-white dark:bg-slate-900 rounded-xl p-6 w-full max-w-lg border border-gray-200 dark:border-slate-700 max-h-[80vh] overflow-y-auto">
+        <h3 class="text-xl font-semibold text-gray-900 dark:text-white mb-4">Configure Triggers</h3>
+        <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">Model: <span id="trigger-model-name" class="text-gray-900 dark:text-white font-medium"></span></p>
+        
+        <div id="triggers-list" class="space-y-3 mb-4"></div>
+        
+        <button onclick="addTrigger()" class="w-full px-4 py-2 border-2 border-dashed border-gray-300 dark:border-slate-600 rounded-lg text-sm text-gray-500 dark:text-gray-400 hover:border-indigo-400 hover:text-indigo-500 transition-colors">
+            <i class="fas fa-plus mr-1"></i> Add Trigger
+        </button>
+        
+        <div class="flex gap-3 mt-6">
+            <button onclick="saveTriggers()" class="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium">Save</button>
+            <button onclick="closeTriggerModal()" class="flex-1 px-4 py-2 bg-gray-200 dark:bg-slate-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300 dark:hover:bg-slate-600 text-sm font-medium">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentDeploymentId = null;
+let currentTriggers = [];
+
+function refreshModels() {
+    window.location.reload();
+}
+
+async function toggleModel(deploymentId) {
+    try {
+        const resp = await fetch(`/api/models/${deploymentId}/toggle`, { method: 'POST' });
+        const data = await resp.json();
+        if (data.status === 'success') {
+            window.location.reload();
+        } else {
+            showToast(data.error || 'Failed to toggle model', 'error');
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    }
+}
+
+async function deleteModel(deploymentId) {
+    if (!confirm('Remove this deployed model? This cannot be undone.')) return;
+    try {
+        const resp = await fetch(`/api/models/${deploymentId}/delete`, { method: 'DELETE' });
+        const data = await resp.json();
+        if (data.status === 'success') {
+            document.getElementById(`model-${deploymentId}`)?.remove();
+            showToast(data.message, 'success');
+        } else {
+            showToast(data.error || 'Failed to delete', 'error');
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    }
+}
+
+async function openTriggers(deploymentId, modelName) {
+    currentDeploymentId = deploymentId;
+    document.getElementById('trigger-model-name').textContent = modelName;
+    
+    try {
+        const resp = await fetch(`/api/models/${deploymentId}/triggers`);
+        const data = await resp.json();
+        currentTriggers = data.triggers || [];
+    } catch (e) {
+        currentTriggers = [];
+    }
+    
+    renderTriggers();
+    document.getElementById('trigger-modal').classList.remove('hidden');
+}
+
+function closeTriggerModal() {
+    document.getElementById('trigger-modal').classList.add('hidden');
+    currentDeploymentId = null;
+    currentTriggers = [];
+}
+
+function addTrigger() {
+    currentTriggers.push({
+        type: 'notification',
+        class_name: '',
+        min_confidence: 0.8,
+        action: {},
+    });
+    renderTriggers();
+}
+
+function removeTrigger(idx) {
+    currentTriggers.splice(idx, 1);
+    renderTriggers();
+}
+
+function renderTriggers() {
+    const container = document.getElementById('triggers-list');
+    if (currentTriggers.length === 0) {
+        container.innerHTML = '<p class="text-sm text-gray-500 dark:text-gray-400 text-center py-4">No triggers configured. Add one below.</p>';
+        return;
+    }
+    
+    container.innerHTML = currentTriggers.map((t, i) => `
+        <div class="p-3 bg-gray-50 dark:bg-slate-800 rounded-lg border border-gray-200 dark:border-slate-700">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-xs font-medium text-gray-500 dark:text-gray-400">Trigger ${i + 1}</span>
+                <button onclick="removeTrigger(${i})" class="text-xs text-red-500 hover:text-red-700"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+                <div>
+                    <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Type</label>
+                    <select onchange="currentTriggers[${i}].type=this.value;renderTriggers()" class="w-full px-2 py-1.5 bg-white dark:bg-slate-700 border border-gray-300 dark:border-slate-600 rounded text-sm text-gray-900 dark:text-white">
+                        <option value="notification" ${t.type === 'notification' ? 'selected' : ''}>Notification</option>
+                        <option value="home_assistant" ${t.type === 'home_assistant' ? 'selected' : ''}>Home Assistant</option>
+                        <option value="webhook" ${t.type === 'webhook' ? 'selected' : ''}>Webhook</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">When class is</label>
+                    <input type="text" value="${t.class_name || ''}" onchange="currentTriggers[${i}].class_name=this.value"
+                           placeholder="e.g., walking" class="w-full px-2 py-1.5 bg-white dark:bg-slate-700 border border-gray-300 dark:border-slate-600 rounded text-sm text-gray-900 dark:text-white" />
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Min Confidence</label>
+                    <input type="number" value="${t.min_confidence || 0.8}" min="0" max="1" step="0.05"
+                           onchange="currentTriggers[${i}].min_confidence=parseFloat(this.value)"
+                           class="w-full px-2 py-1.5 bg-white dark:bg-slate-700 border border-gray-300 dark:border-slate-600 rounded text-sm text-gray-900 dark:text-white" />
+                </div>
+                ${t.type === 'home_assistant' ? `
+                <div>
+                    <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">HA Entity</label>
+                    <input type="text" value="${t.action?.entity_id || ''}" onchange="currentTriggers[${i}].action={...currentTriggers[${i}].action,entity_id:this.value}"
+                           placeholder="light.living_room" class="w-full px-2 py-1.5 bg-white dark:bg-slate-700 border border-gray-300 dark:border-slate-600 rounded text-sm text-gray-900 dark:text-white" />
+                </div>
+                ` : t.type === 'webhook' ? `
+                <div>
+                    <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">URL</label>
+                    <input type="url" value="${t.action?.url || ''}" onchange="currentTriggers[${i}].action={...currentTriggers[${i}].action,url:this.value}"
+                           placeholder="https://..." class="w-full px-2 py-1.5 bg-white dark:bg-slate-700 border border-gray-300 dark:border-slate-600 rounded text-sm text-gray-900 dark:text-white" />
+                </div>
+                ` : `
+                <div>
+                    <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Message</label>
+                    <input type="text" value="${t.action?.message || ''}" onchange="currentTriggers[${i}].action={...currentTriggers[${i}].action,message:this.value}"
+                           placeholder="Activity detected!" class="w-full px-2 py-1.5 bg-white dark:bg-slate-700 border border-gray-300 dark:border-slate-600 rounded text-sm text-gray-900 dark:text-white" />
+                </div>
+                `}
+            </div>
+        </div>
+    `).join('');
+}
+
+async function saveTriggers() {
+    if (!currentDeploymentId) return;
+    try {
+        const resp = await fetch(`/api/models/${currentDeploymentId}/triggers`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ triggers: currentTriggers })
+        });
+        const data = await resp.json();
+        if (data.status === 'success') {
+            showToast('Triggers saved', 'success');
+            closeTriggerModal();
+            window.location.reload();
+        } else {
+            showToast(data.error || 'Failed to save', 'error');
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    }
+}
+</script>
+{% endblock %}

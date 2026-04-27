@@ -1237,6 +1237,162 @@ def audio_record():
 
 
 # ============================================================================
+# Model Deployment & Predictions
+# ============================================================================
+
+# In-memory store for deployed models (persisted to disk)
+deployed_models = {}
+model_predictions_log = []
+
+MODELS_DIR = os.path.join(Config.DATA_DIR, 'models')
+MODELS_INDEX_FILE = os.path.join(MODELS_DIR, 'deployed_models.json')
+
+
+def _load_deployed_models():
+    """Load deployed models index from disk."""
+    global deployed_models
+    try:
+        if os.path.exists(MODELS_INDEX_FILE):
+            with open(MODELS_INDEX_FILE, 'r') as f:
+                deployed_models = json.load(f)
+    except Exception:
+        deployed_models = {}
+
+
+def _save_deployed_models():
+    """Persist deployed models index to disk."""
+    try:
+        os.makedirs(MODELS_DIR, exist_ok=True)
+        with open(MODELS_INDEX_FILE, 'w') as f:
+            json.dump(deployed_models, f, indent=2)
+    except Exception as e:
+        logging.error(f"Failed to save deployed models: {e}")
+
+
+_load_deployed_models()
+
+
+@app.route('/api/deploy-model', methods=['POST'])
+def api_receive_deployed_model():
+    """Receive a model pushed from the Brain server."""
+    import base64
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'status': 'error', 'error': 'No data'}), 400
+
+        deployment_id = data.get('deployment_id')
+        model_name = data.get('model_name', 'unknown')
+        model_type = data.get('model_type', 'unknown')
+        model_b64 = data.get('model_data')
+        config = data.get('config', {})
+
+        if not model_b64:
+            return jsonify({'status': 'error', 'error': 'No model data'}), 400
+
+        # Save model weights to disk
+        os.makedirs(MODELS_DIR, exist_ok=True)
+        safe_name = model_name.replace('/', '_').replace('..', '_')
+        ext = '.pkl' if model_type in ('knn', 'svc', 'adaboost', 'xgboost', 'random_forest') else '.pth'
+        model_path = os.path.join(MODELS_DIR, f"{safe_name}{ext}")
+
+        model_bytes = base64.b64decode(model_b64)
+        with open(model_path, 'wb') as f:
+            f.write(model_bytes)
+
+        # Register in index
+        deployed_models[deployment_id] = {
+            'deployment_id': deployment_id,
+            'model_name': model_name,
+            'model_type': model_type,
+            'model_path': model_path,
+            'config': config,
+            'status': 'ready',
+            'deployed_at': config.get('deployed_at', datetime.utcnow().isoformat()),
+            'predictions_count': 0,
+            'last_prediction': None,
+            'triggers': config.get('triggers', []),
+        }
+        _save_deployed_models()
+
+        logging.info(f"Model deployed: {model_name} ({deployment_id})")
+        return jsonify({'status': 'success', 'deployment_id': deployment_id, 'model_name': model_name})
+    except Exception as e:
+        logging.error(f"Deploy model error: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+
+@app.route('/api/models/deployed', methods=['GET'])
+def api_list_deployed_models():
+    """List all deployed models on this device."""
+    models_list = []
+    for did, info in deployed_models.items():
+        models_list.append({
+            'deployment_id': info['deployment_id'],
+            'model_name': info['model_name'],
+            'model_type': info['model_type'],
+            'status': info.get('status', 'unknown'),
+            'deployed_at': info.get('deployed_at'),
+            'predictions_count': info.get('predictions_count', 0),
+            'last_prediction': info.get('last_prediction'),
+            'triggers': info.get('triggers', []),
+            'class_names': info.get('config', {}).get('class_names', []),
+        })
+    return jsonify({'status': 'success', 'models': models_list})
+
+
+@app.route('/api/models/<deployment_id>/toggle', methods=['POST'])
+def api_toggle_model(deployment_id):
+    """Start or stop a deployed model."""
+    if deployment_id not in deployed_models:
+        return jsonify({'status': 'error', 'error': 'Model not found'}), 404
+    model = deployed_models[deployment_id]
+    model['status'] = 'stopped' if model.get('status') == 'running' else 'running'
+    _save_deployed_models()
+    return jsonify({'status': 'success', 'model_status': model['status']})
+
+
+@app.route('/api/models/<deployment_id>/triggers', methods=['GET', 'POST'])
+def api_model_triggers(deployment_id):
+    """Get or update triggers for a deployed model."""
+    if deployment_id not in deployed_models:
+        return jsonify({'status': 'error', 'error': 'Model not found'}), 404
+    model = deployed_models[deployment_id]
+
+    if request.method == 'GET':
+        return jsonify({'status': 'success', 'triggers': model.get('triggers', [])})
+
+    data = request.get_json() or {}
+    triggers = data.get('triggers', [])
+    model['triggers'] = triggers
+    _save_deployed_models()
+    return jsonify({'status': 'success', 'triggers': triggers})
+
+
+@app.route('/api/models/<deployment_id>/delete', methods=['DELETE'])
+def api_delete_deployed_model(deployment_id):
+    """Remove a deployed model from this device."""
+    if deployment_id not in deployed_models:
+        return jsonify({'status': 'error', 'error': 'Model not found'}), 404
+    model = deployed_models.pop(deployment_id)
+    try:
+        if os.path.exists(model.get('model_path', '')):
+            os.remove(model['model_path'])
+    except Exception:
+        pass
+    _save_deployed_models()
+    return jsonify({'status': 'success', 'message': f"Model '{model['model_name']}' removed"})
+
+
+@app.route('/predictions')
+def predictions_page():
+    """Predictions & Triggers management page."""
+    return render_template('predictions.html',
+                           models=list(deployed_models.values()),
+                           active_tab='predictions')
+
+
+# ============================================================================
 
 def run_server(host=None, port=None, debug=False):
     """Start the Flask-SocketIO server (called by platform entry points)."""
