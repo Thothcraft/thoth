@@ -1400,6 +1400,87 @@ def api_delete_deployed_model(deployment_id):
     return jsonify({'status': 'success', 'message': f"Model '{model['model_name']}' removed"})
 
 
+@app.route('/api/pending-deployments', methods=['GET'])
+def api_pending_deployments():
+    """Get pending model deployments awaiting confirmation."""
+    _load_deployed_models()
+    pending = []
+    for did, info in deployed_models.items():
+        if info.get('status') == 'pending_confirmation':
+            pending.append({
+                'deployment_id': info['deployment_id'],
+                'model_name': info['model_name'],
+                'model_type': info['model_type'],
+                'deployed_at': info.get('deployed_at'),
+                'config': info.get('config', {}),
+            })
+    return jsonify({'status': 'success', 'pending_deployments': pending})
+
+
+@app.route('/api/pending-deployments/<deployment_id>/confirm', methods=['POST'])
+def api_confirm_deployment(deployment_id):
+    """Confirm and activate a pending deployment."""
+    if deployment_id not in deployed_models:
+        return jsonify({'status': 'error', 'error': 'Deployment not found'}), 404
+    
+    model = deployed_models[deployment_id]
+    if model.get('status') != 'pending_confirmation':
+        return jsonify({'status': 'error', 'error': 'Deployment is not pending confirmation'}), 400
+    
+    # Update status to ready
+    model['status'] = 'ready'
+    _save_deployed_models()
+    
+    # Notify Brain server that deployment was accepted
+    try:
+        auth_token = session.get('token') or getattr(Config, 'USER_AUTH_TOKEN', None)
+        if auth_token and Config.BRAIN_SERVER_URL:
+            headers = {'Authorization': f'Bearer {auth_token}'}
+            ack_url = f"{Config.BRAIN_SERVER_URL}/device/{device_manager.device_id}/deployment/{deployment_id}/ack"
+            requests.post(ack_url, json={"status": "delivered"}, headers=headers, timeout=10)
+            logger.info(f"Deployment {deployment_id} confirmed and acknowledged to Brain")
+    except Exception as e:
+        logger.warning(f"Failed to acknowledge deployment to Brain: {e}")
+    
+    return jsonify({'status': 'success', 'message': f"Deployment '{model['model_name']}' confirmed"})
+
+
+@app.route('/api/pending-deployments/<deployment_id>/decline', methods=['POST'])
+def api_decline_deployment(deployment_id):
+    """Decline and remove a pending deployment."""
+    if deployment_id not in deployed_models:
+        return jsonify({'status': 'error', 'error': 'Deployment not found'}), 404
+    
+    model = deployed_models[deployment_id]
+    if model.get('status') != 'pending_confirmation':
+        return jsonify({'status': 'error', 'error': 'Deployment is not pending confirmation'}), 400
+    
+    model_name = model['model_name']
+    
+    # Notify Brain server that deployment was declined
+    try:
+        auth_token = session.get('token') or getattr(Config, 'USER_AUTH_TOKEN', None)
+        if auth_token and Config.BRAIN_SERVER_URL:
+            headers = {'Authorization': f'Bearer {auth_token}'}
+            ack_url = f"{Config.BRAIN_SERVER_URL}/device/{device_manager.device_id}/deployment/{deployment_id}/ack"
+            requests.post(ack_url, json={"status": "declined"}, headers=headers, timeout=10)
+            logger.info(f"Deployment {deployment_id} declined and acknowledged to Brain")
+    except Exception as e:
+        logger.warning(f"Failed to acknowledge declined deployment to Brain: {e}")
+    
+    # Remove model file and entry
+    try:
+        if os.path.exists(model.get('model_path', '')):
+            os.remove(model['model_path'])
+    except Exception:
+        pass
+    
+    deployed_models.pop(deployment_id)
+    _save_deployed_models()
+    
+    return jsonify({'status': 'success', 'message': f"Deployment '{model_name}' declined"})
+
+
 @app.route('/predictions')
 def predictions_page():
     """Predictions & Triggers management page."""

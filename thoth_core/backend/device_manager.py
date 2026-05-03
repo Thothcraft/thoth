@@ -334,8 +334,8 @@ class DeviceManager:
     def _process_deployment(self, payload: Dict[str, Any]) -> bool:
         """Receive a queued model deployment from the Brain server.
 
-        Saves the model weights to disk, updates the local deployed_models index,
-        and acknowledges receipt so the Brain won't resend it.
+        Saves the model weights to disk as pending_confirmation, updates the local 
+        deployed_models index, and acknowledges receipt so the Brain won't resend it.
         """
         import base64
         deployment_id = payload.get('deployment_id')
@@ -359,7 +359,7 @@ class DeviceManager:
             model_bytes = base64.b64decode(model_b64)
             with open(model_path, 'wb') as f:
                 f.write(model_bytes)
-            logger.info(f"Model '{model_name}' saved to {model_path}")
+            logger.info(f"Model '{model_name}' saved to {model_path} as pending_confirmation")
 
             # Update the deployed_models index used by app.py
             index_file = os.path.join(models_dir, 'deployed_models.json')
@@ -378,7 +378,7 @@ class DeviceManager:
                 'model_type': model_type,
                 'model_path': model_path,
                 'config': config,
-                'status': 'ready',
+                'status': 'pending_confirmation',
                 'deployed_at': config.get('deployed_at', datetime.utcnow().isoformat()),
                 'predictions_count': 0,
                 'last_prediction': None,
@@ -391,7 +391,7 @@ class DeviceManager:
             try:
                 ack_url = f"{self.config.BRAIN_SERVER_URL}/device/{self.device_id}/deployment/{deployment_id}/ack"
                 self.session.post(ack_url, json={}, timeout=5)
-                logger.info(f"Deployment {deployment_id} acknowledged")
+                logger.info(f"Deployment {deployment_id} acknowledged as pending_confirmation")
             except Exception as e:
                 logger.warning(f"Failed to ack deployment {deployment_id}: {e}")
 

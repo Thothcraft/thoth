@@ -64,6 +64,25 @@
         </div>
     </div>
 
+    <!-- Pending Deployments -->
+    <div id="pending-deployments-section" class="hidden">
+        <div class="card bg-yellow-900/20 border-yellow-500/30 mb-6">
+            <div class="flex items-center gap-3">
+                <div class="p-2 bg-yellow-500/20 rounded-lg">
+                    <i class="fas fa-exclamation-triangle text-yellow-400 animate-pulse"></i>
+                </div>
+                <div>
+                    <h3 class="text-lg font-semibold text-white">Pending Model Deployments</h3>
+                    <p class="text-slate-400 text-sm">New models are waiting for your confirmation</p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="space-y-4" id="pending-deployments-list">
+            <!-- Pending deployments will be loaded here -->
+        </div>
+    </div>
+
     <!-- Models List -->
     {% if models %}
     <div class="space-y-4" id="models-list">
@@ -226,6 +245,98 @@ async function toggleModel(modelId) {
     }
 }
 
+// Poll for pending deployments every 5 seconds
+async function checkPendingDeployments() {
+    try {
+        const res = await fetch('/api/pending-deployments');
+        if (!res.ok) return;
+        const data = await res.json();
+        const pending = data.pending_deployments || [];
+        
+        if (pending.length > 0) {
+            showPendingDeployments(pending);
+        } else {
+            hidePendingDeployments();
+        }
+    } catch (_) {}
+}
+
+function showPendingDeployments(pending) {
+    const section = document.getElementById('pending-deployments-section');
+    const list = document.getElementById('pending-deployments-list');
+    
+    section.classList.remove('hidden');
+    
+    list.innerHTML = pending.map(deployment => `
+        <div class="card bg-yellow-900/10 border-yellow-500/20">
+            <div class="flex items-start justify-between">
+                <div class="flex items-start gap-4">
+                    <div class="p-3 bg-yellow-800/50 rounded-lg">
+                        <i class="fas fa-download text-2xl text-yellow-400"></i>
+                    </div>
+                    <div>
+                        <h3 class="text-lg font-semibold text-white">${deployment.model_name}</h3>
+                        <p class="text-slate-400 text-sm">Type: ${deployment.model_type}</p>
+                        <div class="flex items-center gap-4 mt-3">
+                            <span class="text-xs text-slate-500">
+                                <i class="fas fa-clock mr-1"></i>${deployment.deployed_at ? new Date(deployment.deployed_at).toLocaleString() : 'Unknown'}
+                            </span>
+                            <span class="text-xs text-yellow-400">
+                                <i class="fas fa-exclamation-triangle mr-1"></i>Awaiting confirmation
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3">
+                    <button onclick="confirmDeployment('${deployment.deployment_id}')" class="btn btn-primary btn-sm">
+                        <i class="fas fa-check mr-1"></i>Accept
+                    </button>
+                    <button onclick="declineDeployment('${deployment.deployment_id}')" class="btn btn-secondary btn-sm">
+                        <i class="fas fa-times mr-1"></i>Decline
+                    </button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function hidePendingDeployments() {
+    const section = document.getElementById('pending-deployments-section');
+    section.classList.add('hidden');
+}
+
+async function confirmDeployment(deploymentId) {
+    try {
+        const res = await fetch(`/api/pending-deployments/${deploymentId}/confirm`, { method: 'POST' });
+        if (res.ok) {
+            showToast('Model deployment confirmed!', 'success');
+            window.location.reload();
+        } else {
+            const error = await res.json();
+            showToast('Failed to confirm: ' + (error.error || 'Unknown error'), 'error');
+        }
+    } catch (error) {
+        showToast('Error: ' + error.message, 'error');
+    }
+}
+
+async function declineDeployment(deploymentId) {
+    if (!confirm('Are you sure you want to decline this model deployment?')) return;
+    
+    try {
+        const res = await fetch(`/api/pending-deployments/${deploymentId}/decline`, { method: 'POST' });
+        if (res.ok) {
+            showToast('Model deployment declined', 'info');
+            checkPendingDeployments(); // Refresh pending list
+        } else {
+            const error = await res.json();
+            showToast('Failed to decline: ' + (error.error || 'Unknown error'), 'error');
+        }
+    } catch (error) {
+        showToast('Error: ' + error.message, 'error');
+    }
+}
+
 // Poll for new deployments every 5 s; show a banner + toast and reload when one arrives
 let _knownModelCount = {{ models|length }};
 setInterval(async () => {
@@ -250,5 +361,10 @@ setInterval(async () => {
         _knownModelCount = newCount;
     } catch (_) {}
 }, 5000);
+
+// Check for pending deployments every 3 seconds
+setInterval(checkPendingDeployments, 3000);
+// Initial check
+checkPendingDeployments();
 </script>
 {% endblock %}
