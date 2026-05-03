@@ -539,8 +539,20 @@ class DeviceManager:
         self.heartbeat_thread.start()
         logger.info(f"Started heartbeat thread (interval: {interval}s)")
     
+    def send_offline_signal(self) -> None:
+        """Tell the Brain server this device is going offline immediately."""
+        if not self.device_id or not self.config.BRAIN_SERVER_URL:
+            return
+        try:
+            url = f"{self.config.BRAIN_SERVER_URL}/device/{self.device_id}/offline"
+            self.session.post(url, json={}, timeout=3)
+            logger.info("Sent offline signal to Brain server")
+        except Exception as e:
+            logger.warning(f"Could not send offline signal: {e}")
+
     def stop_heartbeat(self) -> None:
-        """Stop the periodic status updates."""
+        """Stop the periodic status updates and mark device offline."""
+        self.send_offline_signal()
         if self.heartbeat_thread and self.heartbeat_thread.is_alive():
             self.stop_event.set()
             self.heartbeat_thread.join(timeout=5)
