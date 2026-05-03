@@ -1325,6 +1325,7 @@ def api_receive_deployed_model():
 @app.route('/api/models/deployed', methods=['GET'])
 def api_list_deployed_models():
     """List all deployed models on this device."""
+    _load_deployed_models()  # always fresh — device_manager may have written new entries
     models_list = []
     for did, info in deployed_models.items():
         models_list.append({

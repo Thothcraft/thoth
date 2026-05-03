@@ -224,6 +224,13 @@ class DeviceManager:
                 
                 # Save registration info
                 self._save_registration_info(data, user_token)
+
+                # Process any pending model deployments queued for this device
+                pending_deployments = result.get('pending_deployments', [])
+                if pending_deployments:
+                    logger.info(f"Processing {len(pending_deployments)} pending deployment(s)")
+                    for deploy_payload in pending_deployments:
+                        self._process_deployment(deploy_payload)
                 
                 logger.info(f"Device registered successfully: {self.device_id}")
                 return True, "Device registered successfully"
@@ -324,6 +331,76 @@ class DeviceManager:
         
         return files_list
     
+    def _process_deployment(self, payload: Dict[str, Any]) -> bool:
+        """Receive a queued model deployment from the Brain server.
+
+        Saves the model weights to disk, updates the local deployed_models index,
+        and acknowledges receipt so the Brain won't resend it.
+        """
+        import base64
+        deployment_id = payload.get('deployment_id')
+        model_name = payload.get('model_name', 'unknown')
+        model_type = payload.get('model_type', 'unknown')
+        model_b64 = payload.get('model_data')
+        config = payload.get('config', {})
+
+        if not deployment_id or not model_b64:
+            logger.warning(f"Skipping incomplete deployment payload: {deployment_id}")
+            return False
+
+        try:
+            models_dir = os.path.join(self.config.DATA_DIR, 'models')
+            os.makedirs(models_dir, exist_ok=True)
+
+            safe_name = model_name.replace('/', '_').replace('..', '_')
+            ext = '.pkl' if model_type in ('knn', 'svc', 'adaboost', 'xgboost', 'random_forest') else '.pth'
+            model_path = os.path.join(models_dir, f"{safe_name}{ext}")
+
+            model_bytes = base64.b64decode(model_b64)
+            with open(model_path, 'wb') as f:
+                f.write(model_bytes)
+            logger.info(f"Model '{model_name}' saved to {model_path}")
+
+            # Update the deployed_models index used by app.py
+            index_file = os.path.join(models_dir, 'deployed_models.json')
+            try:
+                if os.path.exists(index_file):
+                    with open(index_file, 'r') as f:
+                        index = json.load(f)
+                else:
+                    index = {}
+            except Exception:
+                index = {}
+
+            index[deployment_id] = {
+                'deployment_id': deployment_id,
+                'model_name': model_name,
+                'model_type': model_type,
+                'model_path': model_path,
+                'config': config,
+                'status': 'ready',
+                'deployed_at': config.get('deployed_at', datetime.utcnow().isoformat()),
+                'predictions_count': 0,
+                'last_prediction': None,
+                'triggers': config.get('triggers', []),
+            }
+            with open(index_file, 'w') as f:
+                json.dump(index, f, indent=2)
+
+            # Acknowledge receipt to Brain so it won't resend
+            try:
+                ack_url = f"{self.config.BRAIN_SERVER_URL}/device/{self.device_id}/deployment/{deployment_id}/ack"
+                self.session.post(ack_url, json={}, timeout=5)
+                logger.info(f"Deployment {deployment_id} acknowledged")
+            except Exception as e:
+                logger.warning(f"Failed to ack deployment {deployment_id}: {e}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to process deployment {deployment_id}: {e}", exc_info=True)
+            return False
+
     def _save_registration_info(self, device_info: Dict[str, Any], auth_token: str) -> None:
         """Save device registration information to disk."""
         try:
