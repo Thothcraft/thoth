@@ -1427,8 +1427,8 @@ def api_confirm_deployment(deployment_id):
     if model.get('status') != 'pending_confirmation':
         return jsonify({'status': 'error', 'error': 'Deployment is not pending confirmation'}), 400
     
-    # Update status to ready
-    model['status'] = 'ready'
+    # Update status to running
+    model['status'] = 'running'
     _save_deployed_models()
     
     # Notify Brain server that deployment was accepted
@@ -1479,6 +1479,38 @@ def api_decline_deployment(deployment_id):
     _save_deployed_models()
     
     return jsonify({'status': 'success', 'message': f"Deployment '{model_name}' declined"})
+
+
+@app.route('/api/models/<deployment_id>/predict', methods=['POST'])
+def api_make_prediction(deployment_id):
+    """Make a prediction with a deployed model."""
+    global deployed_models
+    
+    if deployment_id not in deployed_models:
+        return jsonify({'status': 'error', 'error': 'Model not found'}), 404
+    
+    model = deployed_models[deployment_id]
+    if model.get('status') not in ['ready', 'running']:
+        return jsonify({'status': 'error', 'error': 'Model is not ready for predictions'}), 400
+    
+    # Simulate a prediction
+    import random
+    class_names = model.get('config', {}).get('class_names', ['class_0', 'class_1'])
+    prediction = {
+        'class': random.choice(class_names),
+        'confidence': round(random.uniform(0.7, 0.99), 3),
+        'timestamp': datetime.utcnow().isoformat()
+    }
+    
+    # Update prediction stats
+    model['predictions_count'] = model.get('predictions_count', 0) + 1
+    model['last_prediction'] = prediction['timestamp']
+    _save_deployed_models()
+    
+    return jsonify({
+        'status': 'success',
+        'prediction': prediction
+    })
 
 
 @app.route('/predictions')

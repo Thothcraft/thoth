@@ -227,10 +227,16 @@ class DeviceManager:
 
                 # Process any pending model deployments queued for this device
                 pending_deployments = result.get('pending_deployments', [])
+                logger.info(f"Received {len(pending_deployments)} pending deployments from Brain server")
                 if pending_deployments:
                     logger.info(f"Processing {len(pending_deployments)} pending deployment(s)")
-                    for deploy_payload in pending_deployments:
-                        self._process_deployment(deploy_payload)
+                    logger.debug(f"Pending deployments: {pending_deployments}")
+                    for i, deploy_payload in enumerate(pending_deployments):
+                        logger.info(f"Processing deployment {i+1}/{len(pending_deployments)}: {deploy_payload.get('deployment_id', 'unknown')}")
+                        success = self._process_deployment(deploy_payload)
+                        logger.info(f"Deployment {deploy_payload.get('deployment_id', 'unknown')} processing result: {success}")
+                else:
+                    logger.info("No pending deployments to process")
                 
                 logger.info(f"Device registered successfully: {self.device_id}")
                 return True, "Device registered successfully"
@@ -338,14 +344,17 @@ class DeviceManager:
         deployed_models index, and acknowledges receipt so the Brain won't resend it.
         """
         import base64
+        logger.info(f"_process_deployment called with payload keys: {list(payload.keys())}")
         deployment_id = payload.get('deployment_id')
         model_name = payload.get('model_name', 'unknown')
         model_type = payload.get('model_type', 'unknown')
         model_b64 = payload.get('model_data')
         config = payload.get('config', {})
 
+        logger.info(f"Deployment details: id={deployment_id}, name={model_name}, type={model_type}, has_model_data={bool(model_b64)}")
+
         if not deployment_id or not model_b64:
-            logger.warning(f"Skipping incomplete deployment payload: {deployment_id}")
+            logger.warning(f"Skipping incomplete deployment payload: {deployment_id}, has_model_data={bool(model_b64)}")
             return False
 
         try:
@@ -390,7 +399,7 @@ class DeviceManager:
             # Acknowledge receipt to Brain so it won't resend
             try:
                 ack_url = f"{self.config.BRAIN_SERVER_URL}/device/{self.device_id}/deployment/{deployment_id}/ack"
-                self.session.post(ack_url, json={}, timeout=5)
+                self.session.post(ack_url, json={"status": "pending_confirmation"}, timeout=5)
                 logger.info(f"Deployment {deployment_id} acknowledged as pending_confirmation")
             except Exception as e:
                 logger.warning(f"Failed to ack deployment {deployment_id}: {e}")
