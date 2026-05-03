@@ -14,6 +14,10 @@ Get-Process -Name "python*" -ErrorAction SilentlyContinue | Where-Object {
 # Remove scheduled task
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
+# Remove registry Run key fallback (if install used that method instead)
+$RegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+Remove-ItemProperty -Path $RegPath -Name $TaskName -ErrorAction SilentlyContinue
+
 Write-Host "  Thoth has been uninstalled."
 Write-Host ""
 

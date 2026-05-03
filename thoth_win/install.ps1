@@ -6,8 +6,19 @@
 # What it does:
 #   1. Creates a Python venv in thoth_win\.venv
 #   2. Installs core + Windows dependencies
-#   3. Creates a Scheduled Task so Thoth starts on every login
+#   3. Registers Thoth to start on login (Scheduled Task if admin, registry Run key otherwise)
 # ============================================================================
+
+# --- Self-elevate to Administrator if not already running elevated ---
+$IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+)
+if (-not $IsAdmin) {
+    Write-Host "Requesting administrator privileges ..."
+    $Args = "-ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`""
+    Start-Process powershell -Verb RunAs -ArgumentList $Args
+    exit
+}
 
 $ErrorActionPreference = "Stop"
 
@@ -36,17 +47,42 @@ Write-Host "> Installing core dependencies ..."
 Write-Host "> Installing Windows dependencies ..."
 & $PythonBin -m pip install -r "$ScriptDir\requirements.txt" -q
 
-# --- 2. Create Scheduled Task (run at logon) ---
+# --- 2. Register startup (Scheduled Task preferred; registry Run key as fallback) ---
 Write-Host "> Registering startup task ..."
 
-# Remove existing task if present
-Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+$StartupRegistered = $false
 
-$Action  = New-ScheduledTaskAction -Execute $PythonBin -Argument "`"$AppScript`"" -WorkingDirectory $ScriptDir
-$Trigger = New-ScheduledTaskTrigger -AtLogon
-$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+# Try Scheduled Task first (requires admin — we should have it, but guard anyway)
+try {
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
-Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Description "Thoth Smart Home Sensor Platform" | Out-Null
+    $Action   = New-ScheduledTaskAction -Execute $PythonBin -Argument "`"$AppScript`"" -WorkingDirectory $ScriptDir
+    $Trigger  = New-ScheduledTaskTrigger -AtLogon
+    $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+    $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+
+    Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings `
+        -Principal $Principal -Description "Thoth Smart Home Sensor Platform" | Out-Null
+
+    Write-Host "  [OK] Scheduled Task registered (runs at login, elevated)."
+    $StartupRegistered = $true
+} catch {
+    Write-Host "  [WARN] Could not register Scheduled Task: $($_.Exception.Message)"
+}
+
+# Fallback: HKCU Run registry key (no admin needed, current user only)
+if (-not $StartupRegistered) {
+    try {
+        $RegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+        Set-ItemProperty -Path $RegPath -Name $TaskName -Value "`"$PythonBin`" `"$AppScript`"" -Force
+        Write-Host "  [OK] Startup registered via registry Run key (current user)."
+        $StartupRegistered = $true
+    } catch {
+        Write-Host "  [WARN] Could not register startup entry: $($_.Exception.Message)"
+        Write-Host "  Thoth will NOT start automatically at login."
+        Write-Host "  You can start it manually: & '$PythonBin' '$AppScript'"
+    }
+}
 
 # --- 3. Create logs dir ---
 New-Item -ItemType Directory -Force -Path "$ThothRoot\logs" | Out-Null
