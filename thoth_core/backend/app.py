@@ -736,12 +736,27 @@ def models_page():
     if 'username' not in session:
         return redirect(url_for('login', next=url_for('models_page')))
     try:
+        _load_deployed_models()
         models = []
         total_inferences = 0
+        for did, info in deployed_models.items():
+            total_inferences += info.get('predictions_count', 0)
+            models.append({
+                'id': did,
+                'name': info.get('model_name', 'Unknown'),
+                'type': info.get('model_type', 'unknown'),
+                'status': info.get('status', 'ready'),
+                'description': f"Type: {info.get('model_type', 'unknown')}",
+                'deployed_at': info.get('deployed_at', ''),
+                'predictions_count': info.get('predictions_count', 0),
+                'last_prediction': info.get('last_prediction'),
+                'class_names': info.get('config', {}).get('class_names', []),
+                'config': info.get('config', {}),
+            })
         return render_template('models.html',
-                            active_page='models',
-                            models=models,
-                            total_inferences=total_inferences)
+                               active_page='models',
+                               models=models,
+                               total_inferences=total_inferences)
     except Exception as e:
         logger.error(f"Error in models page: {str(e)}", exc_info=True)
         flash('An error occurred while loading the models page.', 'error')

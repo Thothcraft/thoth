@@ -66,42 +66,36 @@
 
     <!-- Models List -->
     {% if models %}
-    <div class="space-y-4">
+    <div class="space-y-4" id="models-list">
         {% for model in models %}
         <div class="card">
             <div class="flex items-start justify-between">
                 <div class="flex items-start gap-4">
                     <div class="p-3 bg-slate-800 rounded-lg">
-                        {% if model.type == 'classification' %}
-                        <i class="fas fa-tags text-2xl text-blue-400"></i>
-                        {% elif model.type == 'detection' %}
-                        <i class="fas fa-search text-2xl text-green-400"></i>
-                        {% elif model.type == 'segmentation' %}
-                        <i class="fas fa-puzzle-piece text-2xl text-purple-400"></i>
-                        {% else %}
                         <i class="fas fa-brain text-2xl text-indigo-400"></i>
-                        {% endif %}
                     </div>
                     <div>
                         <h3 class="text-lg font-semibold text-white">{{ model.name }}</h3>
-                        <p class="text-slate-400 text-sm mt-1">{{ model.description or 'No description' }}</p>
+                        <p class="text-slate-400 text-sm mt-1">Architecture: {{ model.type }}</p>
                         <div class="flex items-center gap-4 mt-3">
                             <span class="text-xs text-slate-500">
-                                <i class="fas fa-code-branch mr-1"></i>v{{ model.version or '1.0' }}
+                                <i class="fas fa-chart-bar mr-1"></i>{{ model.predictions_count }} inferences
                             </span>
                             <span class="text-xs text-slate-500">
-                                <i class="fas fa-database mr-1"></i>{{ model.size_mb or 'N/A' }} MB
+                                <i class="fas fa-clock mr-1"></i>{{ model.deployed_at[:19] if model.deployed_at else 'Unknown' }}
                             </span>
+                            {% if model.class_names %}
                             <span class="text-xs text-slate-500">
-                                <i class="fas fa-clock mr-1"></i>{{ model.avg_inference_time or 'N/A' }} ms
+                                <i class="fas fa-tags mr-1"></i>{{ model.class_names|join(', ') }}
                             </span>
+                            {% endif %}
                         </div>
                     </div>
                 </div>
                 <div class="flex items-center gap-3">
-                    <span class="px-3 py-1 rounded-full text-xs font-medium 
+                    <span class="px-3 py-1 rounded-full text-xs font-medium
                         {% if model.status == 'running' %}bg-green-500/20 text-green-400
-                        {% elif model.status == 'idle' %}bg-yellow-500/20 text-yellow-400
+                        {% elif model.status == 'ready' %}bg-blue-500/20 text-blue-400
                         {% else %}bg-slate-500/20 text-slate-400{% endif %}">
                         {{ model.status|title }}
                     </span>
@@ -114,28 +108,9 @@
                     </button>
                 </div>
             </div>
-            
-            <!-- Model Metrics -->
-            {% if model.metrics %}
+            {% if model.last_prediction %}
             <div class="mt-4 pt-4 border-t border-slate-700">
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <div>
-                        <p class="text-slate-500 text-xs">Accuracy</p>
-                        <p class="text-white font-medium">{{ model.metrics.accuracy or 'N/A' }}%</p>
-                    </div>
-                    <div>
-                        <p class="text-slate-500 text-xs">Inferences Today</p>
-                        <p class="text-white font-medium">{{ model.metrics.inferences_today or 0 }}</p>
-                    </div>
-                    <div>
-                        <p class="text-slate-500 text-xs">Avg Latency</p>
-                        <p class="text-white font-medium">{{ model.metrics.avg_latency or 'N/A' }} ms</p>
-                    </div>
-                    <div>
-                        <p class="text-slate-500 text-xs">Last Used</p>
-                        <p class="text-white font-medium">{{ model.metrics.last_used or 'Never' }}</p>
-                    </div>
-                </div>
+                <p class="text-xs text-slate-500"><i class="fas fa-history mr-1"></i>Last prediction: {{ model.last_prediction }}</p>
             </div>
             {% endif %}
         </div>
@@ -240,23 +215,40 @@ function refreshModels() {
 
 async function toggleModel(modelId) {
     try {
-        const response = await fetch(`/api/models/${modelId}/toggle`, {
-            method: 'POST'
-        });
-        
+        const response = await fetch(`/api/models/${modelId}/toggle`, { method: 'POST' });
         if (response.ok) {
             window.location.reload();
         } else {
             throw new Error('Failed to toggle model');
         }
     } catch (error) {
-        alert('Error: ' + error.message);
+        showToast('Error: ' + error.message, 'error');
     }
 }
 
-// Auto-refresh every 30 seconds
-setInterval(() => {
-    window.location.reload();
-}, 30000);
+// Poll for new deployments every 5 s; show a banner + toast and reload when one arrives
+let _knownModelCount = {{ models|length }};
+setInterval(async () => {
+    try {
+        const res = await fetch('/api/models/deployed');
+        if (!res.ok) return;
+        const data = await res.json();
+        const newCount = (data.models || []).length;
+        if (newCount > _knownModelCount) {
+            const added = newCount - _knownModelCount;
+            showToast(`🎉 ${added} new model${added > 1 ? 's' : ''} deployed from Research Portal!`, 'success', 6000);
+            // Show a persistent banner
+            const banner = document.createElement('div');
+            banner.id = 'new-model-banner';
+            banner.className = 'mb-4 p-4 rounded-lg bg-indigo-900/40 border border-indigo-500/50 flex items-center justify-between text-sm';
+            banner.innerHTML = `
+                <span class="text-indigo-300"><i class="fas fa-download mr-2"></i>New model deployed — reloading…</span>
+                <button onclick="window.location.reload()" class="btn btn-primary btn-sm">Reload now</button>`;
+            document.querySelector('main').prepend(banner);
+            setTimeout(() => window.location.reload(), 3000);
+        }
+        _knownModelCount = newCount;
+    } catch (_) {}
+}, 5000);
 </script>
 {% endblock %}
