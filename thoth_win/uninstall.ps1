@@ -37,6 +37,16 @@ Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Silent
 $RegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 Remove-ItemProperty -Path $RegPath -Name $TaskName -ErrorAction SilentlyContinue
 
+# Remove from Programs & Features registry
+Write-Host "  Removing from Programs & Features..."
+Remove-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Thoth" -Recurse -ErrorAction SilentlyContinue
+Remove-Item -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Thoth" -Recurse -ErrorAction SilentlyContinue
+
+# Remove shortcuts
+Write-Host "  Removing shortcuts..."
+Remove-Item -Path "$env:USERPROFILE\Desktop\Thoth.lnk" -ErrorAction SilentlyContinue
+Remove-Item -Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Thoth" -Recurse -ErrorAction SilentlyContinue
+
 Write-Host "  Thoth has been uninstalled."
 Write-Host ""
 

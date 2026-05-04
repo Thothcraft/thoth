@@ -87,7 +87,11 @@ if (-not $StartupRegistered) {
 # --- 3. Create logs dir ---
 New-Item -ItemType Directory -Force -Path "$ThothRoot\logs" | Out-Null
 
-# --- 4. Start Thoth now ---
+# --- 4. Register in Programs & Features ---
+Write-Host "> Registering in Programs & Features..."
+& "$ScriptDir\install_registry.ps1"
+
+# --- 5. Start Thoth now ---
 Write-Host "> Starting Thoth ..."
 Start-Process -FilePath $PythonBin -ArgumentList "`"$AppScript`"" -WindowStyle Hidden
 
@@ -95,5 +99,8 @@ Write-Host "`n  Thoth installed and running!"
 Write-Host "  Dashboard:  http://localhost:8000"
 Write-Host "  System tray: look for the Thoth icon"
 Write-Host ""
-Write-Host "To uninstall, run:  .\uninstall.ps1"
+Write-Host "To uninstall, you can:"
+Write-Host "  1. Right-click the Thoth system tray icon and select 'Uninstall Thoth'"
+Write-Host "  2. Go to Settings > Apps > Apps & features and uninstall 'Thoth'"
+Write-Host "  3. Run: .\uninstall.ps1"
 Read-Host "Press Enter to close"

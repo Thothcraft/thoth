@@ -72,6 +72,26 @@ def _quit_app(icon, item):
     icon.stop()
 
 
+def _uninstall_app(icon, item):
+    """Run the uninstall script."""
+    import subprocess
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    uninstall_script = os.path.join(script_dir, "uninstall.ps1")
+    
+    if os.path.exists(uninstall_script):
+        logger.info("Starting uninstallation...")
+        # Run uninstall script in a new PowerShell window
+        subprocess.Popen([
+            "powershell", "-ExecutionPolicy", "Bypass", 
+            "-File", uninstall_script
+        ], cwd=script_dir)
+        icon.stop()
+    else:
+        logger.error("Uninstall script not found")
+        # Fallback: just quit
+        icon.stop()
+
+
 def _collection_label(item):
     return "Stop Collection" if _collecting else "Start Collection"
 
@@ -108,6 +128,7 @@ def main():
             pystray.MenuItem("Open Dashboard", _open_dashboard, default=True),
             pystray.MenuItem(_collection_label, _toggle_collection),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Uninstall Thoth", _uninstall_app),
             pystray.MenuItem("Quit Thoth", _quit_app),
         ),
     )
