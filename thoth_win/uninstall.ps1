@@ -1,5 +1,5 @@
 # ============================================================================
-# Thoth Windows — Uninstaller
+# Thoth Windows - Uninstaller
 # ============================================================================
 
 $TaskName = "ThothStartup"
@@ -21,7 +21,7 @@ if (Test-Path $ConfigFile) {
             Write-Host "  Sent offline signal to Brain server."
         }
     } catch {
-        Write-Host "  (Could not send offline signal — continuing uninstall)"
+        Write-Host "  (Could not send offline signal - continuing uninstall)"
     }
 }
 
