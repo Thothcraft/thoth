@@ -27,6 +27,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          lfs: true
 
       # -----------------------------------------------------------------------
       # 2. Resolve version string
@@ -68,17 +69,33 @@ jobs:
           pip install -r thoth_win/requirements.txt
 
       # -----------------------------------------------------------------------
-      # 5. Convert icon PNG -> ICO
+      # 5. Convert icon PNG -> ICO (with programmatic fallback if PNG is missing)
       # -----------------------------------------------------------------------
       - name: Convert icon
         shell: pwsh
         run: |
-          python -c "
-          from PIL import Image
-          img = Image.open('thoth_win/icon.png')
-          img.save('thoth_win/icon.ico', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])
-          print('icon.ico created')
-          "
+          @"
+          import os, sys
+          from PIL import Image, ImageDraw
+
+          src = 'thoth_win/icon.png'
+          dst = 'thoth_win/icon.ico'
+          sizes = [(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)]
+
+          try:
+              img = Image.open(src).convert('RGBA')
+              print(f'Opened {src} ({img.size})')
+          except Exception as e:
+              print(f'Warning: could not open {src}: {e}')
+              print('Generating a programmatic fallback icon...')
+              img = Image.new('RGBA', (256, 256), (102, 126, 234, 255))
+              draw = ImageDraw.Draw(img)
+              draw.rectangle([24, 24, 232, 64], fill='white')
+              draw.rectangle([108, 24, 148, 232], fill='white')
+
+          img.save(dst, format='ICO', sizes=sizes)
+          print(f'icon.ico written to {dst}')
+          "@ | python
 
       # -----------------------------------------------------------------------
       # 6. Build Thoth.exe with PyInstaller
