@@ -1,0 +1,189 @@
+name: Build Windows Installer
+
+on:
+  push:
+    tags:
+      - "v*.*.*"          # Trigger on version tags: v1.0.0, v1.2.3, etc.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version number (e.g. 1.2.3)"
+        required: false
+        default: "0.0.0-dev"
+
+permissions:
+  contents: write   # needed to create GitHub Releases
+
+jobs:
+  build:
+    name: Build & Package
+    runs-on: windows-latest
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # -----------------------------------------------------------------------
+      # 2. Resolve version string
+      #    - From tag:             refs/tags/v1.2.3  ->  1.2.3
+      #    - From manual dispatch: use the input value
+      # -----------------------------------------------------------------------
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like "refs/tags/v*") {
+            $ver = $env:GITHUB_REF -replace "refs/tags/v", ""
+          } elseif ("${{ github.event.inputs.version }}" -ne "") {
+            $ver = "${{ github.event.inputs.version }}"
+          } else {
+            $ver = "0.0.0-dev"
+          }
+          Write-Host "Version: $ver"
+          echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
+
+      # -----------------------------------------------------------------------
+      # 3. Set up Python
+      # -----------------------------------------------------------------------
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # -----------------------------------------------------------------------
+      # 4. Install Python dependencies
+      # -----------------------------------------------------------------------
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pillow
+          pip install -r thoth_core/requirements.txt
+          pip install -r thoth_win/requirements.txt
+
+      # -----------------------------------------------------------------------
+      # 5. Convert icon PNG -> ICO
+      # -----------------------------------------------------------------------
+      - name: Convert icon
+        shell: pwsh
+        run: |
+          python -c "
+          from PIL import Image
+          img = Image.open('thoth_win/icon.png')
+          img.save('thoth_win/icon.ico', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])
+          print('icon.ico created')
+          "
+
+      # -----------------------------------------------------------------------
+      # 6. Build Thoth.exe with PyInstaller
+      # -----------------------------------------------------------------------
+      - name: Build Thoth.exe
+        shell: pwsh
+        run: |
+          $root    = (Resolve-Path ".").Path
+          $winDir  = Join-Path $root "thoth_win"
+          $distDir = Join-Path $winDir "dist"
+
+          pyinstaller `
+            --name "Thoth" `
+            --icon "$winDir\icon.ico" `
+            --noconsole `
+            --add-data "$root\thoth_core\backend\templates;thoth_core\backend\templates" `
+            --add-data "$root\thoth_core\backend\static;thoth_core\backend\static" `
+            --add-data "$root\.env;." `
+            --add-data "$winDir\icon.png;." `
+            --paths "$root" `
+            --hidden-import "thoth_core.backend.app" `
+            --hidden-import "thoth_core.backend.routes.files" `
+            --hidden-import "thoth_core.sensors" `
+            --hidden-import "thoth_win.sensors" `
+            --hidden-import "engineio.async_drivers.threading" `
+            --distpath "$distDir" `
+            --workpath "$winDir\build" `
+            --specpath "$winDir" `
+            "$winDir\app.py"
+
+          if (-not (Test-Path "$distDir\Thoth\Thoth.exe")) {
+            Write-Error "PyInstaller build failed - Thoth.exe not found"
+            exit 1
+          }
+          Write-Host "Thoth.exe built successfully"
+
+      # -----------------------------------------------------------------------
+      # 7. Install Inno Setup 6 via Chocolatey
+      # -----------------------------------------------------------------------
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      # -----------------------------------------------------------------------
+      # 8. Build the GUI installer with Inno Setup
+      # -----------------------------------------------------------------------
+      - name: Build installer
+        shell: pwsh
+        id: build_installer
+        run: |
+          $ver     = "${{ steps.version.outputs.VERSION }}"
+          $issFile = "thoth_win\thoth_installer.iss"
+          $iscc    = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+
+          & $iscc "/DMyAppVersion=$ver" $issFile
+
+          $versioned = "thoth_win\dist\Thoth-Setup-$ver.exe"
+          if (-not (Test-Path $versioned)) {
+            Write-Error "Installer not found at $versioned"
+            exit 1
+          }
+
+          # Stable filename so /releases/latest/download/Thoth-Setup.exe always resolves
+          $stable = "thoth_win\dist\Thoth-Setup.exe"
+          Copy-Item $versioned $stable
+
+          Write-Host "Installer built:  $versioned"
+          Write-Host "Stable copy:      $stable"
+
+      # -----------------------------------------------------------------------
+      # 9. Upload installer as workflow artifact (available on every run)
+      # -----------------------------------------------------------------------
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Thoth-Setup-${{ steps.version.outputs.VERSION }}
+          path: |
+            thoth_win/dist/Thoth-Setup-*.exe
+            thoth_win/dist/Thoth-Setup.exe
+          retention-days: 30
+
+      # -----------------------------------------------------------------------
+      # 10. Create GitHub Release (only on tag pushes)
+      # -----------------------------------------------------------------------
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Thoth ${{ steps.version.outputs.VERSION }}"
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
+          body: |
+            ## Thoth ${{ steps.version.outputs.VERSION }}
+
+            ### Installation
+            1. Download **Thoth-Setup-${{ steps.version.outputs.VERSION }}.exe** below
+            2. Run it - the wizard will guide you through installation
+            3. A desktop shortcut and system tray icon will be created
+            4. Open the dashboard at **http://localhost:8000**
+
+            ### Uninstalling
+            - Right-click the **Thoth tray icon** -> **Uninstall Thoth**, or
+            - **Settings -> Apps -> Thoth -> Uninstall**, or
+            - **Start Menu -> Thoth -> Uninstall Thoth**
+          files: |
+            thoth_win/dist/Thoth-Setup-*.exe
+            thoth_win/dist/Thoth-Setup.exe
