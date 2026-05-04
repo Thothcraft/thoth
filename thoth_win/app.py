@@ -73,23 +73,29 @@ def _quit_app(icon, item):
 
 
 def _uninstall_app(icon, item):
-    """Run the uninstall script."""
+    """Launch the uninstaller and quit the tray."""
     import subprocess
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    uninstall_script = os.path.join(script_dir, "uninstall.ps1")
-    
-    if os.path.exists(uninstall_script):
-        logger.info("Starting uninstallation...")
-        # Run uninstall script in a new PowerShell window
+
+    app_dir = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
+
+    # Prefer the Inno Setup uninstaller (present when installed via the GUI installer)
+    inno_uninstaller = os.path.join(app_dir, "unins000.exe")
+
+    # Fallback: PowerShell uninstall script (dev / raw install)
+    ps_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uninstall.ps1")
+
+    icon.stop()   # hide tray icon first so the uninstaller can proceed cleanly
+
+    if os.path.exists(inno_uninstaller):
+        logger.info("Launching Inno Setup uninstaller: %s", inno_uninstaller)
+        subprocess.Popen([inno_uninstaller])
+    elif os.path.exists(ps_script):
+        logger.info("Launching PowerShell uninstaller: %s", ps_script)
         subprocess.Popen([
-            "powershell", "-ExecutionPolicy", "Bypass", 
-            "-File", uninstall_script
-        ], cwd=script_dir)
-        icon.stop()
+            "powershell", "-ExecutionPolicy", "Bypass", "-File", ps_script
+        ])
     else:
-        logger.error("Uninstall script not found")
-        # Fallback: just quit
-        icon.stop()
+        logger.error("No uninstaller found — please uninstall via Settings > Apps")
 
 
 def _collection_label(item):
