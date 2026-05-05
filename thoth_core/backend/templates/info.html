@@ -25,13 +25,26 @@
             </h3>
             
             <div class="space-y-3">
+                <!-- Editable device name -->
                 <div class="flex justify-between items-center py-2 border-b border-slate-700">
                     <span class="text-slate-400">Device Name</span>
-                    <span class="font-medium text-white">{{ device_info.device_name or 'Thoth Device' }}</span>
+                    <div class="flex items-center gap-2" id="name-display">
+                        <span class="font-medium text-white" id="device-name-text">{{ device_info.device_name or 'Thoth Device' }}</span>
+                        <button onclick="startEditName()" class="text-slate-500 hover:text-indigo-400 transition-colors" title="Edit name">
+                            <i class="fas fa-pencil-alt text-xs"></i>
+                        </button>
+                    </div>
+                    <div class="hidden flex items-center gap-2" id="name-edit">
+                        <input id="name-input" type="text" value="{{ device_info.device_name or 'Thoth Device' }}"
+                               class="form-input py-1 px-2 text-sm w-40" maxlength="64"
+                               onkeydown="if(event.key==='Enter')saveDeviceName();if(event.key==='Escape')cancelEditName()">
+                        <button onclick="saveDeviceName()" class="btn btn-success py-1 px-2 text-xs">Save</button>
+                        <button onclick="cancelEditName()" class="btn btn-secondary py-1 px-2 text-xs">Cancel</button>
+                    </div>
                 </div>
                 <div class="flex justify-between items-center py-2 border-b border-slate-700">
                     <span class="text-slate-400">Device ID</span>
-                    <span class="font-mono text-sm text-slate-300">{{ device_info.device_id[:16] }}...</span>
+                    <span class="font-mono text-xs text-slate-300" title="{{ device_info.device_id }}">{{ device_info.device_id }}</span>
                 </div>
                 <div class="flex justify-between items-center py-2 border-b border-slate-700">
                     <span class="text-slate-400">Status</span>
@@ -224,5 +237,143 @@ async function refreshStatus() {
 setInterval(() => {
     window.location.reload();
 }, 30000);
+
+// ── Editable Device Name ──────────────────────────────────────────────────────
+function startEditName() {
+    document.getElementById('name-display').classList.add('hidden');
+    document.getElementById('name-edit').classList.remove('hidden');
+    document.getElementById('name-input').focus();
+    document.getElementById('name-input').select();
+}
+
+function cancelEditName() {
+    document.getElementById('name-edit').classList.add('hidden');
+    document.getElementById('name-display').classList.remove('hidden');
+}
+
+async function saveDeviceName() {
+    const input = document.getElementById('name-input');
+    const newName = input.value.trim();
+    if (!newName) { showToast('Name cannot be empty', 'error'); return; }
+    try {
+        const resp = await fetch('/api/device/name', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: newName })
+        });
+        const data = await resp.json();
+        if (data.status === 'success') {
+            document.getElementById('device-name-text').textContent = newName;
+            cancelEditName();
+            showToast('Device name updated', 'success');
+        } else {
+            showToast(data.error || 'Failed to save name', 'error');
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    }
+}
+
+// ── Deployment Confirmation Modal ─────────────────────────────────────────────
+let _deploymentPolling = null;
+let _seenDeployments = new Set();
+
+document.addEventListener('DOMContentLoaded', function () {
+    checkPendingDeployments();
+    _deploymentPolling = setInterval(checkPendingDeployments, 10000);
+});
+
+async function checkPendingDeployments() {
+    try {
+        const resp = await fetch('/api/pending-deployments');
+        const data = await resp.json();
+        if (data.status === 'success' && data.pending_deployments.length > 0) {
+            for (const dep of data.pending_deployments) {
+                if (!_seenDeployments.has(dep.deployment_id)) {
+                    _seenDeployments.add(dep.deployment_id);
+                    showDeploymentModal(dep);
+                    break;
+                }
+            }
+        }
+    } catch (e) { /* silent */ }
+}
+
+function showDeploymentModal(dep) {
+    document.getElementById('deploy-modal-name').textContent = dep.model_name;
+    document.getElementById('deploy-modal-type').textContent = dep.model_type;
+    document.getElementById('deploy-modal-date').textContent = dep.deployed_at ? new Date(dep.deployed_at).toLocaleString() : '—';
+    document.getElementById('deploy-modal').dataset.deploymentId = dep.deployment_id;
+    document.getElementById('deploy-modal').classList.remove('hidden');
+}
+
+async function respondDeployment(confirm) {
+    const modal = document.getElementById('deploy-modal');
+    const deploymentId = modal.dataset.deploymentId;
+    const action = confirm ? 'confirm' : 'decline';
+    const btn = document.getElementById(confirm ? 'btn-confirm-deploy' : 'btn-decline-deploy');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Processing...';
+    try {
+        const resp = await fetch(`/api/pending-deployments/${deploymentId}/${action}`, { method: 'POST' });
+        const data = await resp.json();
+        if (data.status === 'success') {
+            modal.classList.add('hidden');
+            showToast(confirm ? 'Model activated successfully' : 'Deployment declined', confirm ? 'success' : 'info');
+        } else {
+            showToast(data.error || 'Request failed', 'error');
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = confirm
+            ? '<i class="fas fa-check mr-2"></i>Activate'
+            : '<i class="fas fa-times mr-2"></i>Decline';
+    }
+}
 </script>
+
+<!-- Deployment Confirmation Modal -->
+<div id="deploy-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+    <div class="bg-slate-800 border border-slate-600 rounded-2xl shadow-2xl w-full max-w-sm mx-4 p-6">
+        <div class="text-center mb-5">
+            <div class="w-14 h-14 mx-auto bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center mb-3">
+                <i class="fas fa-rocket text-white text-xl"></i>
+            </div>
+            <h3 class="text-xl font-bold text-white">New Model Deployed</h3>
+            <p class="text-sm text-slate-400 mt-1">A model from the Research Portal is ready to activate</p>
+        </div>
+        <div class="bg-slate-900/60 rounded-xl p-4 mb-5 space-y-2">
+            <div class="flex justify-between">
+                <span class="text-sm text-slate-400">Model</span>
+                <span id="deploy-modal-name" class="text-sm font-semibold text-white">-</span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-sm text-slate-400">Type</span>
+                <span id="deploy-modal-type" class="text-sm text-slate-300">-</span>
+            </div>
+            <div class="flex justify-between">
+                <span class="text-sm text-slate-400">Deployed at</span>
+                <span id="deploy-modal-date" class="text-sm text-slate-300">-</span>
+            </div>
+        </div>
+        <div class="bg-indigo-900/30 border border-indigo-500/20 rounded-lg p-3 mb-5">
+            <div class="flex items-start gap-2 text-xs text-indigo-300">
+                <i class="fas fa-shield-alt mt-0.5"></i>
+                <span>Your raw data was never shared. Only this model (trained on the Research Portal) is being deployed to your device.</span>
+            </div>
+        </div>
+        <div class="flex gap-3">
+            <button id="btn-decline-deploy" onclick="respondDeployment(false)"
+                class="flex-1 py-2.5 px-4 bg-slate-700 hover:bg-slate-600 text-slate-200 font-medium rounded-xl transition-colors">
+                <i class="fas fa-times mr-2"></i>Decline
+            </button>
+            <button id="btn-confirm-deploy" onclick="respondDeployment(true)"
+                class="flex-1 py-2.5 px-4 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-medium rounded-xl transition-colors">
+                <i class="fas fa-check mr-2"></i>Activate
+            </button>
+        </div>
+    </div>
+</div>
 {% endblock %}

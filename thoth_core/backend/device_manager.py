@@ -33,6 +33,7 @@ class DeviceManager:
         """
         self.config = config
         self.device_id = self._get_device_id()
+        self.device_name = None
         self.auth_token = None
         self.registered = False
         self.session = self._create_session()
@@ -444,6 +445,7 @@ class DeviceManager:
                     
                     # Update instance state
                     self.device_id = config_data.get('device_id', self.device_id)
+                    self.device_name = config_data.get('device_name', self.device_name)
                     self.auth_token = config_data.get('auth_token')
                     self.registered = True
                     
@@ -571,8 +573,10 @@ class DeviceManager:
         """Get current device information."""
         return {
             'device_id': self.device_id,
+            'device_name': self.device_name or f"Thoth-{self.device_id[:8]}",
             'registered': self.registered,
             'status': self.status,
+            'mac_address': self.status.get('mac_address'),
             'brain_server': self.config.BRAIN_SERVER_URL if hasattr(self.config, 'BRAIN_SERVER_URL') else None
         }
     

@@ -532,6 +532,11 @@ def login():
                 session['username'] = username
                 session['token'] = result['token']
                 Config.USER_AUTH_TOKEN = result['token']
+                success, msg = device_manager.register_device(result['token'])
+                if success:
+                    device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
+                else:
+                    logger.warning(f"Device registration failed after login: {msg}")
                 return render_template('login_success.html',
                                      username=username,
                                      access_token=result['token'],
@@ -1036,6 +1041,47 @@ def do_logout():
     session.clear()
     flash('You have been logged out.', 'info')
     return redirect(url_for('login'))
+
+
+@app.route('/api/device/name', methods=['POST'])
+def api_update_device_name():
+    """Update this device's display name."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
+    data = request.get_json() or {}
+    new_name = data.get('name', '').strip()
+    if not new_name:
+        return jsonify({'status': 'error', 'error': 'Name is required'}), 400
+    if len(new_name) > 64:
+        return jsonify({'status': 'error', 'error': 'Name too long (max 64 chars)'}), 400
+    device_manager.device_name = new_name
+    config_file = os.path.join(Config.DATA_DIR, 'config', 'device_config.json')
+    try:
+        os.makedirs(os.path.dirname(config_file), exist_ok=True)
+        config_data = {}
+        if os.path.exists(config_file):
+            with open(config_file, 'r') as f:
+                config_data = json.load(f)
+        config_data['device_name'] = new_name
+        with open(config_file, 'w') as f:
+            json.dump(config_data, f, indent=2)
+        if device_manager.registered and device_manager.auth_token:
+            try:
+                headers = {
+                    'Authorization': f'Bearer {device_manager.auth_token}',
+                    'Content-Type': 'application/json'
+                }
+                requests.patch(
+                    f"{Config.BRAIN_SERVER_URL}/device/{device_manager.device_id}",
+                    json={'device_name': new_name},
+                    headers=headers,
+                    timeout=5
+                )
+            except Exception as e:
+                logger.warning(f"Could not sync device name to Brain: {e}")
+        return jsonify({'status': 'success', 'name': new_name})
+    except Exception as e:
+        return jsonify({'status': 'error', 'error': str(e)}), 500
 
 
 @app.route('/api/collection/<action>', methods=['POST'])
