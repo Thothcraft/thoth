@@ -290,22 +290,19 @@ async function refreshCameras() {
         if (data.status === 'success' && data.cameras.length > 0) {
             availableCameras = data.cameras;
             
-            // If only one camera, it's the MacBook. Otherwise use index-based naming
-            const isSingleCamera = data.cameras.length === 1;
             selectedCamera = data.cameras[0].index;
             
             container.innerHTML = data.cameras.map((cam, idx) => {
-                // Smart naming: single camera = MacBook, multiple = index-based
-                let name, icon;
-                if (isSingleCamera) {
-                    name = 'MacBook';
+                let name = cam.name || `Camera ${cam.index}`;
+                let icon = 'fa-video';
+                const nameLower = name.toLowerCase();
+                if (nameLower.includes('front') || nameLower.includes('built') || nameLower.includes('integrated') || nameLower.includes('facetime')) {
                     icon = 'fa-laptop';
-                } else {
-                    // Multiple cameras: 0=iPhone (Continuity), 1=MacBook, etc.
-                    const names = ['iPhone', 'MacBook', 'iPad', 'External'];
-                    const icons = ['fa-mobile-alt', 'fa-laptop', 'fa-tablet-alt', 'fa-video'];
-                    name = names[cam.index] || `Cam ${cam.index}`;
-                    icon = icons[cam.index] || 'fa-video';
+                } else if (nameLower.includes('usb') || nameLower.includes('external')) {
+                    icon = 'fa-video';
+                } else if (data.cameras.length === 1) {
+                    icon = 'fa-camera';
+                    name = cam.name || 'Built-in Camera';
                 }
                 const isActive = cam.index === selectedCamera;
                 return `<button class="cam-btn ${isActive ? 'active' : ''}" data-index="${cam.index}" onclick="selectCamera(${cam.index})">
