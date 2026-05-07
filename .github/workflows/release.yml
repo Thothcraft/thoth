@@ -12,13 +12,60 @@ jobs:
   # ── macOS DMG installer ─────────────────────────────────────────────────
   build-mac:
     runs-on: macos-latest
+    env:
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate Apple signing secrets
+        run: |
+          missing=0
+          for v in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD; do
+            if [ -z "${!v}" ]; then
+              echo "Missing required secret: $v"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Apple signing/notarization secrets are required for a Gatekeeper-safe macOS installer."
+            exit 1
+          fi
 
       - name: Build GUI installer DMG
         run: |
           chmod +x thoth_mac/build_dmg.sh
           ./thoth_mac/build_dmg.sh
+
+      - name: Import Developer ID certificate
+        run: |
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > /tmp/apple-cert.p12
+          security create-keychain -p "" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import /tmp/apple-cert.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security list-keychains -d user -s build.keychain
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+
+      - name: Codesign installer payload and DMG
+        run: |
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "dist/macos-installer/Install Thoth.command"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "dist/Thoth-macOS-Installer.dmg"
+          codesign --verify --deep --strict --verbose=2 "dist/Thoth-macOS-Installer.dmg"
+
+      - name: Notarize and staple DMG
+        run: |
+          xcrun notarytool submit "dist/Thoth-macOS-Installer.dmg" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --wait
+          xcrun stapler staple "dist/Thoth-macOS-Installer.dmg"
+          spctl -a -t open --context context:primary-signature -v "dist/Thoth-macOS-Installer.dmg"
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4

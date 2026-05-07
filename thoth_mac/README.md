@@ -67,12 +67,21 @@ This will:
 
 - macOS with `hdiutil` available (default on macOS runners and local machines).
 
-### Code Signing (for distribution outside the App Store)
+### Code Signing and Notarization (required for Gatekeeper-safe installs)
 
 ```bash
-codesign --deep --force --sign "Developer ID Application: YOUR_NAME" dist/Thoth.app
-# Then notarize:
-xcrun notarytool submit dist/Thoth.dmg --apple-id YOU@EMAIL --team-id TEAM_ID --password APP_PASSWORD
+# Sign the installer script inside the DMG staging folder
+codesign --force --options runtime --timestamp \
+  --sign "Developer ID Application: YOUR_NAME" \
+  "dist/macos-installer/Install Thoth.command"
+
+# Sign and notarize the DMG
+codesign --force --options runtime --timestamp \
+  --sign "Developer ID Application: YOUR_NAME" \
+  "dist/Thoth-macOS-Installer.dmg"
+xcrun notarytool submit "dist/Thoth-macOS-Installer.dmg" \
+  --apple-id YOU@EMAIL --team-id TEAM_ID --password APP_PASSWORD --wait
+xcrun stapler staple "dist/Thoth-macOS-Installer.dmg"
 ```
 
 ## File Structure
