@@ -5,7 +5,13 @@ sensors (camera, microphone, IMU mock), and provides a browser-based
 dashboard for data collection, labelling, and viewing deployed model
 predictions.
 
-## Quick Install
+## Quick Install (DMG + GUI)
+
+1. Download `Thoth-macOS-Installer.dmg` from the latest release.
+2. Open the DMG and run `Install Thoth.command`.
+3. Follow the GUI prompts to complete setup.
+
+## Manual Install (CLI fallback)
 
 ```bash
 chmod +x install.sh
@@ -19,7 +25,7 @@ This will:
 3. Register a **LaunchAgent** so Thoth starts on every login
 4. Launch the app immediately
 
-After install, look for **𓁟** in your menu bar and click **Open Dashboard**.
+After install, look for **Thoth** in your menu bar and click **Open Dashboard**.
 
 ## Menu Bar Options
 
@@ -46,7 +52,7 @@ After install, look for **𓁟** in your menu bar and click **Open Dashboard**.
 
 ## Building a .dmg Installer for Distribution
 
-To package Thoth as a `.dmg` that customers can install by dragging to Applications:
+To package Thoth as a `.dmg` with a guided installer entrypoint:
 
 ```bash
 # One-command build
@@ -54,29 +60,12 @@ To package Thoth as a `.dmg` that customers can install by dragging to Applicati
 ```
 
 This will:
-1. Build `Thoth.app` via **py2app** (self-contained `.app` bundle with embedded Python)
-2. Create `dist/Thoth-Installer-1.0.0.dmg` with a drag-to-Applications layout
+1. Bundle `thoth_core`, `thoth_mac`, and installer assets.
+2. Create `dist/Thoth-macOS-Installer.dmg` with `Install Thoth.command`.
 
 ### Prerequisites
 
-- `py2app` (installed automatically by the build script)
-- Optional: `brew install create-dmg` for a branded DMG with custom background
-
-### Manual Steps
-
-```bash
-# Step 1: Build .app
-source .venv/bin/activate
-python setup_app.py py2app
-
-# Step 2: Create DMG (simple)
-hdiutil create -volname Thoth -srcfolder dist/Thoth.app -ov -format UDZO dist/Thoth.dmg
-
-# Step 2 (alt): Branded DMG
-create-dmg --volname Thoth --volicon Thoth.icns \
-  --icon "Thoth.app" 175 190 --app-drop-link 425 190 \
-  dist/Thoth.dmg dist/Thoth.app
-```
+- macOS with `hdiutil` available (default on macOS runners and local machines).
 
 ### Code Signing (for distribution outside the App Store)
 
@@ -96,6 +85,8 @@ thoth_mac/
 │   ├── microphone.py   # PyAudio / sox / ffmpeg
 │   ├── imu.py          # Mock IMU
 │   └── csi.py          # ESP32 USB CSI (scaffolded)
+├── Install Thoth.command  # GUI-guided installer entrypoint
+├── build_dmg.sh        # Build release DMG
 ├── install.sh          # One-click installer
 ├── uninstall.sh
 ├── requirements.txt    # macOS-only deps

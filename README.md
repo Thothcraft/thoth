@@ -42,6 +42,13 @@ thoth/
 
 ### macOS
 
+Use the release DMG for guided installation:
+
+1. Download `Thoth-macOS-Installer.dmg` from releases.
+2. Open the DMG and run `Install Thoth.command`.
+
+Manual fallback:
+
 ```bash
 cd thoth_mac
 chmod +x install.sh

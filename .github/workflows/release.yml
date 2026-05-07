@@ -9,22 +9,22 @@ permissions:
   contents: write      # Allow creating releases
 
 jobs:
-  # ── macOS archive ───────────────────────────────────────────────────────
+  # ── macOS DMG installer ─────────────────────────────────────────────────
   build-mac:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create macOS archive
+      - name: Build GUI installer DMG
         run: |
-          tar czf Thoth-macOS.tar.gz \
-            thoth_core/ thoth_mac/ .env LICENSE README.md
+          chmod +x thoth_mac/build_dmg.sh
+          ./thoth_mac/build_dmg.sh
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-release
-          path: Thoth-macOS.tar.gz
+          path: dist/Thoth-macOS-Installer.dmg
 
   # ── Windows archive ────────────────────────────────────────────────────
   build-win:
@@ -80,7 +80,7 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            release-assets/macos-release/Thoth-macOS.tar.gz
+            release-assets/macos-release/Thoth-macOS-Installer.dmg
             release-assets/windows-release/Thoth-Windows.zip
             release-assets/rpi-release/Thoth-RPi.tar.gz
           body: |
@@ -90,7 +90,7 @@ jobs:
 
             | Platform | File | Install |
             |----------|------|---------|
-            | **macOS** | `Thoth-macOS.tar.gz` | Extract → `cd thoth_mac && ./install.sh` |
+            | **macOS** | `Thoth-macOS-Installer.dmg` | Open DMG → run `Install Thoth.command` (GUI guided) |
             | **Windows** | `Thoth-Windows.zip` | Extract → `cd thoth_win && powershell -ExecutionPolicy Bypass -File install.ps1` |
             | **Raspberry Pi** | `Thoth-RPi.tar.gz` | Extract → `sudo ./thoth_rpi/setup/install.sh` |
 
