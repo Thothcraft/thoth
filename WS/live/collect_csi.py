@@ -15,6 +15,7 @@ import sys
 import time
 import threading
 import signal
+from pathlib import Path
 
 try:
     import serial
@@ -28,6 +29,31 @@ HEADER = "type,seq,mac,rssi,rate,noise_floor,fft_gain,agc_gain,channel,local_tim
 stop_event = threading.Event()
 _csi_count = 0               # total CSI lines written
 _csi_count_lock = threading.Lock()
+
+def find_receiver_port(baud=115200, timeout=0.25):
+    """Find the most likely ESP32 CSI receiver port."""
+    ports = [p.device for p in list_ports.comports()]
+    if not ports:
+        return None, []
+
+    first_openable = None
+    for port in ports:
+        try:
+            with serial.Serial(port, baudrate=baud, timeout=timeout) as ser:
+                if first_openable is None:
+                    first_openable = port
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    line = ser.readline()
+                    if not line:
+                        continue
+                    text = line.decode("utf-8", errors="ignore").strip()
+                    if text.startswith("CSI_DATA,"):
+                        return port, ports
+        except Exception:
+            continue
+
+    return first_openable, ports
 
 def reset_board(port, baud, label):
     """Open/close briefly to toggle DTR/RTS which resets many ESP32 boards."""
@@ -105,7 +131,7 @@ def discover_note(port_hint):
 
 def main():
     ap = argparse.ArgumentParser(description="Collect raw CSI from receiver ESP32 for a fixed duration.")
-    ap.add_argument("--rx-port", required=True, help="Serial port of the receiver ESP32 (e.g. /dev/ttyACM1 or COM5)")
+    ap.add_argument("--rx-port", default="auto", help="Serial port of the receiver ESP32, or 'auto' to detect it")
     ap.add_argument("--tx-port", default=None, help="(Optional) Serial port of the sender ESP32 (only reset pulse, no logging)")
     ap.add_argument("--baud", type=int, default=115200, help="Baud rate (default: 115200)")
     ap.add_argument("--out", required=True, help="Output CSV file path (without extension)")
@@ -113,6 +139,16 @@ def main():
     ap.add_argument("--times", type=int, default=1, help="Number of times to repeat the collection (default: 1)")
     ap.add_argument("--no-reset", action="store_true", help="Skip reset pulses on the boards")
     args = ap.parse_args()
+
+    if args.rx_port == "auto":
+        detected_port, detected_ports = find_receiver_port(args.baud)
+        if not detected_port:
+            print(f"[error] Could not auto-detect receiver. Available ports: {', '.join(detected_ports) or 'none'}", file=sys.stderr)
+            sys.exit(2)
+        args.rx_port = detected_port
+        print(f"[info] Auto-detected receiver: {args.rx_port}")
+
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
 
     print(f"[info] Receiver: {args.rx_port} @ {args.baud}")
     if args.tx_port:

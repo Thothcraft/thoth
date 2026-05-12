@@ -90,12 +90,13 @@
                 </div>
                 <div class="flex justify-between items-center py-2 border-b border-slate-700">
                     <span class="text-slate-400">Battery</span>
+                    {% set battery_level = system_status.battery_level or 0 %}
                     <div class="flex items-center">
                         <div class="w-24 h-3 bg-slate-700 rounded-full mr-3 overflow-hidden">
-                            <div class="h-full rounded-full transition-all duration-500 {% if system_status.battery_level > 50 %}bg-green-500{% elif system_status.battery_level > 20 %}bg-yellow-500{% else %}bg-red-500{% endif %}" 
-                                 style="width: {{ system_status.battery_level or 0 }}%"></div>
+                            <div class="h-full rounded-full transition-all duration-500 {% if battery_level > 50 %}bg-green-500{% elif battery_level > 20 %}bg-yellow-500{% else %}bg-red-500{% endif %}"
+                                 style="width: {{ battery_level }}%"></div>
                         </div>
-                        <span class="text-slate-300 w-12 text-right">{{ system_status.battery_level or 0 }}%</span>
+                        <span class="text-slate-300 w-12 text-right">{{ battery_level }}%</span>
                     </div>
                 </div>
                 <div class="flex justify-between items-center py-2 border-b border-slate-700">
@@ -202,6 +203,17 @@
                     </div>
                     <p class="text-white font-medium">{{ sensor.name }}</p>
                     <p class="text-slate-500 text-xs mt-1">{{ sensor.sensor_type }}</p>
+                    {% if sensor.port %}
+                    <p class="text-slate-400 text-xs mt-1 truncate" title="{{ sensor.port }}">{{ sensor.port }}</p>
+                    {% endif %}
+                    {% if sensor.devices %}
+                    <p class="text-slate-400 text-xs mt-1 truncate" title="{{ sensor.devices|join(', ') }}">{{ sensor.devices|join(', ') }}</p>
+                    {% endif %}
+                    {% if sensor.error and not sensor.available %}
+                    <p class="text-red-400 text-xs mt-2 truncate" title="{{ sensor.error }}">{{ sensor.error }}</p>
+                    {% elif sensor.error %}
+                    <p class="text-yellow-400 text-xs mt-2 truncate" title="{{ sensor.error }}">{{ sensor.error }}</p>
+                    {% endif %}
                 </div>
                 {% else %}
                 <div class="col-span-full text-center py-8 text-slate-500">
@@ -210,6 +222,27 @@
                 </div>
                 {% endfor %}
             </div>
+        </div>
+
+        <!-- Sensor Recording -->
+        <div class="card md:col-span-2">
+            <h3 class="text-lg font-semibold mb-4 text-white flex items-center">
+                <i class="fas fa-record-vinyl mr-2 text-rose-400"></i>
+                Sensor Recording
+            </h3>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <button onclick="recordSensor('sensehat_imu', this)" class="btn btn-primary">
+                    <i class="fas fa-compass mr-2"></i>
+                    Record Sense HAT IMU for 1 Minute
+                </button>
+                <button onclick="recordSensor('wifi_csi', this)" class="btn btn-secondary">
+                    <i class="fas fa-wifi mr-2"></i>
+                    Record ESP32 CSI for 1 Minute
+                </button>
+            </div>
+
+            <div id="recording-status" class="mt-4 text-sm text-slate-400"></div>
         </div>
     </div>
 </div>
@@ -274,6 +307,55 @@ async function saveDeviceName() {
     }
 }
 
+async function recordSensor(sensorType, button) {
+    const original = button.innerHTML;
+    button.disabled = true;
+    button.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Starting...';
+    try {
+        const resp = await fetch(`/api/sensors/${sensorType}/record`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ duration_seconds: 60 })
+        });
+        const data = await resp.json();
+        if (data.status !== 'success') {
+            throw new Error(data.error || 'Recording failed to start');
+        }
+        const rec = data.recording;
+        document.getElementById('recording-status').textContent =
+            `${rec.sensor_type} recording started (${rec.recording_id}).`;
+        showToast('Recording started', 'success');
+        pollRecordings();
+    } catch (error) {
+        showToast(error.message || 'Recording failed', 'error');
+    } finally {
+        button.disabled = false;
+        button.innerHTML = original;
+    }
+}
+
+async function pollRecordings() {
+    try {
+        const resp = await fetch('/api/sensors/recordings');
+        const data = await resp.json();
+        if (data.status !== 'success') return;
+        const recordings = Object.values(data.recordings || {}).sort((a, b) =>
+            (b.started_at || '').localeCompare(a.started_at || '')
+        );
+        if (recordings.length === 0) return;
+        const latest = recordings[0];
+        const fileText = latest.filename ? ` File: ${latest.filename}.` : '';
+        const sampleText = latest.samples !== undefined ? ` Samples: ${latest.samples}.` : '';
+        document.getElementById('recording-status').textContent =
+            `${latest.sensor_type}: ${latest.status}.${fileText}${sampleText}`;
+        if (latest.status === 'recording' || latest.status === 'queued') {
+            setTimeout(pollRecordings, 3000);
+        }
+    } catch (e) {
+        /* keep dashboard usable if polling fails */
+    }
+}
+
 // ── Deployment Confirmation Modal ─────────────────────────────────────────────
 let _deploymentPolling = null;
 let _seenDeployments = new Set();
@@ -281,6 +363,7 @@ let _seenDeployments = new Set();
 document.addEventListener('DOMContentLoaded', function () {
     checkPendingDeployments();
     _deploymentPolling = setInterval(checkPendingDeployments, 10000);
+    pollRecordings();
 });
 
 async function checkPendingDeployments() {
