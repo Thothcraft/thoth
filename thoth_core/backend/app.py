@@ -264,6 +264,30 @@ def get_device_info() -> Dict[str, Any]:
                 if mac and mac != '00:00:00:00:00:00':
                     interfaces[iface] = mac
         
+        # Convert psutil objects to plain dicts to ensure JSON serialization works
+        mem_info = psutil.virtual_memory()
+        memory_dict = {
+            'total': mem_info.total,
+            'available': mem_info.available,
+            'percent': mem_info.percent,
+            'used': mem_info.used,
+            'free': mem_info.free,
+            'active': getattr(mem_info, 'active', 0),
+            'inactive': getattr(mem_info, 'inactive', 0),
+            'buffers': getattr(mem_info, 'buffers', 0),
+            'cached': getattr(mem_info, 'cached', 0),
+            'shared': getattr(mem_info, 'shared', 0),
+            'slab': getattr(mem_info, 'slab', 0)
+        }
+        
+        disk_info = psutil.disk_usage('/')
+        disk_dict = {
+            'total': disk_info.total,
+            'used': disk_info.used,
+            'free': disk_info.free,
+            'percent': disk_info.percent
+        }
+        
         system_info = {
             'system': platform.system(),
             'node': platform.node(),
@@ -272,14 +296,22 @@ def get_device_info() -> Dict[str, Any]:
             'machine': platform.machine(),
             'processor': platform.processor(),
             'cpu_count': os.cpu_count(),
-            'memory': psutil.virtual_memory()._asdict(),
-            'disk_usage': psutil.disk_usage('/')._asdict(),
+            'memory': memory_dict,
+            'disk_usage': disk_dict,
             'network_interfaces': interfaces,
             'hostname': socket.gethostname(),
             'ip_address': socket.gethostbyname(socket.gethostname()),
             'python_version': platform.python_version(),
             'boot_time': datetime.fromtimestamp(psutil.boot_time()).isoformat()
         }
+        
+        # Validate JSON serialization before returning
+        try:
+            json.dumps(system_info)
+        except (TypeError, ValueError) as e:
+            logger.error(f"Device info is not JSON serializable: {e}")
+            return {}
+        
         return system_info
     except Exception as e:
         logger.error(f"Error getting device info: {e}")
