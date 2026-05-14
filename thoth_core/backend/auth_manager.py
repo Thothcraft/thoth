@@ -8,12 +8,22 @@ and session handling for the Thoth device.
 import os
 import json
 import logging
-import jwt
+import base64
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+
+def _decode_unverified_jwt(token: str) -> Dict[str, Any]:
+    """Decode a JWT payload without verifying the signature."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8"))
+    except Exception as exc:
+        raise ValueError(f"Invalid JWT payload: {exc}") from exc
 
 class AuthManager:
     """Manages authentication with the Brain server."""
@@ -152,20 +162,15 @@ class AuthManager:
                 result = response.json()
                 
                 # Parse token to get expiry
-                token_data = jwt.decode(
-                    result['access_token'],
-                    key=None,
-                    options={"verify_signature": False},
-                    algorithms=["HS256"]
-                )
+                token_data = _decode_unverified_jwt(result['access_token'])
                 
                 # Update auth state
                 self.token = result['access_token']
                 self.refresh_token = result.get('refresh_token')
                 self.token_expiry = datetime.utcfromtimestamp(token_data['exp'])
                 self.user_info = {
-                    'username': token_data.get('sub'),
-                    'user_id': token_data.get('user_id'),
+                    'username': result.get('username') or token_data.get('username'),
+                    'user_id': result.get('user_id') or token_data.get('user_id') or token_data.get('sub'),
                     'email': token_data.get('email'),
                     'scopes': token_data.get('scopes', [])
                 }
@@ -222,12 +227,7 @@ class AuthManager:
                 result = response.json()
                 
                 # Parse new token
-                token_data = jwt.decode(
-                    result['access_token'],
-                    key=None,
-                    options={"verify_signature": False},
-                    algorithms=["HS256"]
-                )
+                token_data = _decode_unverified_jwt(result['access_token'])
                 
                 # Update auth state
                 self.token = result['access_token']

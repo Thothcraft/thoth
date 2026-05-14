@@ -9,22 +9,86 @@ permissions:
   contents: write      # Allow creating releases
 
 jobs:
-  # ── macOS archive ───────────────────────────────────────────────────────
-  build-mac:
-    runs-on: ubuntu-latest
+  # ── macOS ZIP archive (unsigned, no Apple Developer required) ─────────────
+  build-mac-zip:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Create macOS archive
         run: |
-          tar czf Thoth-macOS.tar.gz \
+          zip -r Thoth-macOS.zip \
             thoth_core/ thoth_mac/ .env LICENSE README.md
 
-      - name: Upload macOS artifact
+      - name: Upload macOS ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macos-release
-          path: Thoth-macOS.tar.gz
+          name: macos-zip-release
+          path: Thoth-macOS.zip
+
+  # ── macOS DMG installer (requires Apple Developer signing) ───────────────
+  build-mac-dmg:
+    runs-on: macos-latest
+    env:
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Apple signing secrets
+        run: |
+          missing=0
+          for v in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD; do
+            if [ -z "${!v}" ]; then
+              echo "Missing required secret: $v"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Apple signing/notarization secrets are required for a Gatekeeper-safe macOS installer."
+            exit 1
+          fi
+
+      - name: Build GUI installer DMG
+        run: |
+          chmod +x thoth_mac/build_dmg.sh
+          ./thoth_mac/build_dmg.sh
+
+      - name: Import Developer ID certificate
+        run: |
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > /tmp/apple-cert.p12
+          security create-keychain -p "" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import /tmp/apple-cert.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security list-keychains -d user -s build.keychain
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+
+      - name: Codesign installer payload and DMG
+        run: |
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "dist/macos-installer/Install Thoth.command"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "dist/Thoth-macOS-Installer.dmg"
+          codesign --verify --deep --strict --verbose=2 "dist/Thoth-macOS-Installer.dmg"
+
+      - name: Notarize and staple DMG
+        run: |
+          xcrun notarytool submit "dist/Thoth-macOS-Installer.dmg" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --wait
+          xcrun stapler staple "dist/Thoth-macOS-Installer.dmg"
+          spctl -a -t open --context context:primary-signature -v "dist/Thoth-macOS-Installer.dmg"
+
+      - name: Upload macOS DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg-release
+          path: dist/Thoth-macOS-Installer.dmg
 
   # ── Windows archive ────────────────────────────────────────────────────
   build-win:
@@ -62,7 +126,7 @@ jobs:
 
   # ── Create GitHub Release ──────────────────────────────────────────────
   release:
-    needs: [build-mac, build-win, build-rpi]
+    needs: [build-mac-zip, build-win, build-rpi]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -80,7 +144,7 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            release-assets/macos-release/Thoth-macOS.tar.gz
+            release-assets/macos-zip-release/Thoth-macOS.zip
             release-assets/windows-release/Thoth-Windows.zip
             release-assets/rpi-release/Thoth-RPi.tar.gz
           body: |
@@ -90,7 +154,7 @@ jobs:
 
             | Platform | File | Install |
             |----------|------|---------|
-            | **macOS** | `Thoth-macOS.tar.gz` | Extract → `cd thoth_mac && ./install.sh` |
+            | **macOS** | `Thoth-macOS.zip` | Extract → `cd thoth_mac && ./install.sh` |
             | **Windows** | `Thoth-Windows.zip` | Extract → `cd thoth_win && powershell -ExecutionPolicy Bypass -File install.ps1` |
             | **Raspberry Pi** | `Thoth-RPi.tar.gz` | Extract → `sudo ./thoth_rpi/setup/install.sh` |
 

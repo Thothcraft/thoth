@@ -23,8 +23,12 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from typing import Dict, List, Optional, Any, Tuple
 from dotenv import load_dotenv
-import cv2
 import base64
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 # Load environment variables
 load_dotenv()
@@ -41,6 +45,7 @@ from .config import Config, BUTTON_ACTIONS, SENSOR_CONFIG
 from .models import SensorReading, SystemStatus, ButtonConfig, UploadResult
 from .device_manager import DeviceManager
 from .auth_manager import AuthManager
+from ..sensors.hardware_detector import detect_sensors, ensure_system_dist_packages
 
 # Set up logging
 logging.basicConfig(
@@ -123,6 +128,7 @@ device_manager = DeviceManager(Config)
 
 # Global state
 collection_active = False
+sensor_recordings: Dict[str, Dict[str, Any]] = {}
 
 
 def get_system_uptime() -> str:
@@ -626,25 +632,8 @@ def status():
 
 def get_available_sensors():
     """Get list of available sensors on this device."""
-    sensors = []
-    # Check for camera
-    try:
-        cap = cv2.VideoCapture(0)
-        camera_available = cap.isOpened()
-        cap.release()
-        sensors.append({
-            'sensor_type': 'camera',
-            'name': 'Camera',
-            'available': camera_available,
-            'error': None if camera_available else 'Camera not detected'
-        })
-    except Exception as e:
-        sensors.append({
-            'sensor_type': 'camera',
-            'name': 'Camera',
-            'available': False,
-            'error': str(e)
-        })
+    sensors = detect_sensors()
+
     # Check for microphone
     try:
         import pyaudio
@@ -660,6 +649,110 @@ def get_available_sensors():
         'error': None if mic_available else 'Microphone not detected'
     })
     return sensors
+
+
+def _record_sensehat_imu(recording_id: str, duration_seconds: float):
+    """Record Sense HAT IMU samples to a JSONL file."""
+    global collection_active
+    output_path = None
+    try:
+        ensure_system_dist_packages()
+        from sense_hat import SenseHat
+
+        sense = SenseHat()
+        os.makedirs(Config.DATA_DIR, exist_ok=True)
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(Config.DATA_DIR, f"sensehat_imu_{timestamp}.jsonl")
+        sample_interval = 1.0 / max(float(SENSOR_CONFIG.get("sample_rate", 1.0)), 1.0)
+        deadline = time.time() + duration_seconds
+        samples = 0
+        collection_active = True
+        sensor_recordings[recording_id].update({
+            "status": "recording",
+            "filename": os.path.basename(output_path),
+            "path": output_path,
+        })
+        with open(output_path, "w") as f:
+            while time.time() < deadline:
+                sample = {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "orientation_degrees": sense.get_orientation_degrees(),
+                    "accelerometer_raw": sense.get_accelerometer_raw(),
+                    "gyroscope_raw": sense.get_gyroscope_raw(),
+                    "compass_raw": sense.get_compass_raw(),
+                }
+                f.write(json.dumps(sample) + "\n")
+                samples += 1
+                sensor_recordings[recording_id]["samples"] = samples
+                time.sleep(sample_interval)
+        sensor_recordings[recording_id].update({
+            "status": "completed",
+            "completed_at": datetime.utcnow().isoformat(),
+            "samples": samples,
+        })
+    except Exception as e:
+        logger.error("Sense HAT recording failed: %s", e, exc_info=True)
+        sensor_recordings.setdefault(recording_id, {}).update({
+            "status": "error",
+            "error": str(e),
+            "path": output_path,
+            "completed_at": datetime.utcnow().isoformat(),
+        })
+    finally:
+        collection_active = any(
+            rec.get("status") == "recording"
+            for rec in sensor_recordings.values()
+        )
+
+
+def _record_csi(recording_id: str, duration_seconds: float):
+    """Record ESP32 CSI data using WS/live/collect_csi.py."""
+    global collection_active
+    try:
+        os.makedirs(Config.DATA_DIR, exist_ok=True)
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        output_base = os.path.join(Config.DATA_DIR, f"csi_{timestamp}.csv")
+        script_path = os.path.join(Config.BASE_DIR, "WS", "live", "collect_csi.py")
+        command = [
+            sys.executable,
+            script_path,
+            "--rx-port",
+            "auto",
+            "--out",
+            output_base,
+            "--duration",
+            str(duration_seconds),
+            "--times",
+            "1",
+        ]
+        collection_active = True
+        sensor_recordings[recording_id].update({
+            "status": "recording",
+            "filename": os.path.basename(output_base).replace(".csv", "_1.csv"),
+            "path": output_base.replace(".csv", "_1.csv"),
+        })
+        proc = subprocess.run(command, capture_output=True, text=True, timeout=duration_seconds + 20)
+        sensor_recordings[recording_id].update({
+            "status": "completed" if proc.returncode == 0 else "error",
+            "completed_at": datetime.utcnow().isoformat(),
+            "returncode": proc.returncode,
+            "stdout": proc.stdout[-4000:],
+            "stderr": proc.stderr[-4000:],
+        })
+        if proc.returncode != 0:
+            sensor_recordings[recording_id]["error"] = proc.stderr or proc.stdout or "CSI collector failed"
+    except Exception as e:
+        logger.error("CSI recording failed: %s", e, exc_info=True)
+        sensor_recordings.setdefault(recording_id, {}).update({
+            "status": "error",
+            "error": str(e),
+            "completed_at": datetime.utcnow().isoformat(),
+        })
+    finally:
+        collection_active = any(
+            rec.get("status") == "recording"
+            for rec in sensor_recordings.values()
+        )
 
 
 def get_media_files():
@@ -1116,6 +1209,71 @@ def api_update_device_name():
         return jsonify({'status': 'error', 'error': str(e)}), 500
 
 
+@app.route('/api/sensors/detect', methods=['GET'])
+def api_detect_sensors():
+    """Detect smart sensors attached to this device."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
+    try:
+        return jsonify({'status': 'success', 'sensors': get_available_sensors()})
+    except Exception as e:
+        logger.error("Sensor detection failed: %s", e, exc_info=True)
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+
+@app.route('/api/sensors/recordings', methods=['GET'])
+def api_sensor_recordings():
+    """Return current and recent sensor recording jobs."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
+    return jsonify({'status': 'success', 'recordings': sensor_recordings})
+
+
+@app.route('/api/sensors/<sensor_type>/record', methods=['POST'])
+def api_record_sensor(sensor_type):
+    """Start a bounded sensor recording job."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
+    data = request.get_json(silent=True) or {}
+    duration_seconds = float(data.get('duration_seconds', 60))
+    duration_seconds = max(1.0, min(duration_seconds, 3600.0))
+    active_same_type = [
+        rec for rec in sensor_recordings.values()
+        if rec.get('sensor_type') == sensor_type and rec.get('status') == 'recording'
+    ]
+    if active_same_type:
+        return jsonify({'status': 'error', 'error': f'{sensor_type} recording already active'}), 409
+
+    recording_id = str(uuid.uuid4())[:8]
+    sensor_recordings[recording_id] = {
+        'recording_id': recording_id,
+        'sensor_type': sensor_type,
+        'duration_seconds': duration_seconds,
+        'status': 'queued',
+        'started_at': datetime.utcnow().isoformat(),
+    }
+
+    if sensor_type in ('sensehat_imu', 'sensehat', 'imu'):
+        thread = threading.Thread(
+            target=_record_sensehat_imu,
+            args=(recording_id, duration_seconds),
+            daemon=True,
+        )
+    elif sensor_type in ('wifi_csi', 'csi'):
+        thread = threading.Thread(
+            target=_record_csi,
+            args=(recording_id, duration_seconds),
+            daemon=True,
+        )
+    else:
+        sensor_recordings[recording_id]['status'] = 'error'
+        sensor_recordings[recording_id]['error'] = f'Unsupported recording sensor: {sensor_type}'
+        return jsonify({'status': 'error', 'error': sensor_recordings[recording_id]['error']}), 400
+
+    thread.start()
+    return jsonify({'status': 'success', 'recording': sensor_recordings[recording_id]})
+
+
 @app.route('/api/collection/<action>', methods=['POST'])
 def collection_action(action):
     """Start or stop data collection."""
@@ -1185,6 +1343,8 @@ def sync_files_to_cloud():
 @app.route('/api/camera/list', methods=['GET'])
 def camera_list():
     """List available cameras on the system."""
+    if cv2 is None:
+        return jsonify({'status': 'error', 'message': 'OpenCV is not installed.'}), 503
     cameras = []
     for i in range(5):
         cap = cv2.VideoCapture(i)
@@ -1205,6 +1365,8 @@ def camera_list():
 @app.route('/api/camera/capture', methods=['GET'])
 def camera_capture():
     """Capture an image from the selected camera and return as base64 data URI."""
+    if cv2 is None:
+        return jsonify({'status': 'error', 'message': 'OpenCV is not installed.'}), 503
     try:
         camera_index = int(request.args.get('camera_index', 0))
         cap = cv2.VideoCapture(camera_index)
@@ -1242,6 +1404,8 @@ def camera_capture():
 @app.route('/api/camera/record', methods=['POST'])
 def camera_record():
     """Record a video from the selected camera."""
+    if cv2 is None:
+        return jsonify({'status': 'error', 'message': 'OpenCV is not installed.'}), 503
     try:
         data = request.get_json(force=True) or {}
         duration = int(data.get('duration', 5))

@@ -55,10 +55,10 @@ class ThothStatusBarApp(rumps.App):
             logger.warning(f"Icon not found at: {_ICON_PATH}, using text fallback")
         super().__init__(
             name="Thoth",
-            title=None if icon_file else "𓁟",
+            title=None if icon_file else "T",
             icon=icon_file,
             quit_button=None,  # we supply our own
-            template=True,  # makes icon adapt to light/dark menu bar
+            template=False,  # keep custom square "T" icon visible
         )
         self.menu = [
             rumps.MenuItem("Open Dashboard", callback=self.open_dashboard),
