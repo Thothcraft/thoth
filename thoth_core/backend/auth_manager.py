@@ -141,7 +141,7 @@ class AuthManager:
         if not self.config.BRAIN_SERVER_URL:
             raise Exception("Brain server URL not configured")
             
-        url = f"{self.config.BRAIN_SERVER_URL}/token"
+        url = f"{self.config.BRAIN_SERVER_URL}/api/token"
         
         try:
             # Send login request
@@ -214,7 +214,7 @@ class AuthManager:
         from requests.exceptions import RequestException
         
         try:
-            url = f"{self.config.BRAIN_SERVER_URL}/auth/refresh-token"
+            url = f"{self.config.BRAIN_SERVER_URL}/api/auth/refresh-token"
             
             response = requests.post(
                 url,

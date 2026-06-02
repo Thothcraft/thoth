@@ -339,7 +339,7 @@ def _process_pending_uploads(filenames: list, auth_token: str):
                 ext = os.path.splitext(filename)[1].lower()
                 content_type = 'application/json' if ext == '.json' else 'text/csv' if ext == '.csv' else 'application/octet-stream'
                 device_id = getattr(Config, 'DEVICE_ID', None)
-                brain_url = f"{Config.BRAIN_SERVER_URL}/file/upload"
+                brain_url = f"{Config.BRAIN_SERVER_URL}/api/file/upload"
                 headers = {
                     'Authorization': f'Bearer {auth_token}',
                     'Content-Type': 'application/json'
@@ -398,7 +398,7 @@ def register_device_periodically():
         for attempt in range(3):
             try:
                 response = requests.post(
-                    f"{Config.BRAIN_SERVER_URL}/device/register",
+                    f"{Config.BRAIN_SERVER_URL}/api/device/register",
                     json=registration_data,
                     headers=headers,
                     timeout=30
@@ -944,7 +944,7 @@ def api_media_delete(filename):
                     try:
                         headers = {'Authorization': f'Bearer {auth_token}'}
                         response = requests.delete(
-                            f"{Config.BRAIN_SERVER_URL}/file/{file_id}",
+                            f"{Config.BRAIN_SERVER_URL}/api/file/{file_id}",
                             headers=headers, timeout=30
                         )
                         if response.status_code in (200, 204):
@@ -1035,7 +1035,7 @@ def api_media_upload_to_cloud(filename):
             if labels:
                 data['labels'] = json.dumps(labels)
             response = requests.post(
-                f"{Config.BRAIN_SERVER_URL}/file/upload-multipart",
+                f"{Config.BRAIN_SERVER_URL}/api/file/upload-multipart",
                 files=files, data=data, headers=headers, timeout=120
             )
         if response.status_code in (200, 201):
@@ -1197,7 +1197,7 @@ def api_update_device_name():
                     'Content-Type': 'application/json'
                 }
                 requests.patch(
-                    f"{Config.BRAIN_SERVER_URL}/device/{device_manager.device_id}",
+                    f"{Config.BRAIN_SERVER_URL}/api/device/{device_manager.device_id}",
                     json={'device_name': new_name},
                     headers=headers,
                     timeout=5
@@ -1678,7 +1678,7 @@ def api_confirm_deployment(deployment_id):
         auth_token = session.get('token') or getattr(Config, 'USER_AUTH_TOKEN', None)
         if auth_token and Config.BRAIN_SERVER_URL:
             headers = {'Authorization': f'Bearer {auth_token}'}
-            ack_url = f"{Config.BRAIN_SERVER_URL}/device/{device_manager.device_id}/deployment/{deployment_id}/ack"
+            ack_url = f"{Config.BRAIN_SERVER_URL}/api/device/{device_manager.device_id}/deployment/{deployment_id}/ack"
             requests.post(ack_url, json={"status": "delivered"}, headers=headers, timeout=10)
             logger.info(f"Deployment {deployment_id} confirmed and acknowledged to Brain")
     except Exception as e:
@@ -1704,7 +1704,7 @@ def api_decline_deployment(deployment_id):
         auth_token = session.get('token') or getattr(Config, 'USER_AUTH_TOKEN', None)
         if auth_token and Config.BRAIN_SERVER_URL:
             headers = {'Authorization': f'Bearer {auth_token}'}
-            ack_url = f"{Config.BRAIN_SERVER_URL}/device/{device_manager.device_id}/deployment/{deployment_id}/ack"
+            ack_url = f"{Config.BRAIN_SERVER_URL}/api/device/{device_manager.device_id}/deployment/{deployment_id}/ack"
             requests.post(ack_url, json={"status": "declined"}, headers=headers, timeout=10)
             logger.info(f"Deployment {deployment_id} declined and acknowledged to Brain")
     except Exception as e:

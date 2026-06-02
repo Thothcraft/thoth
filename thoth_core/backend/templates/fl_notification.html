@@ -410,7 +410,7 @@ async function checkPendingRequests() {
 // Check for training progress
 async function checkProgress() {
     try {
-        const response = await fetch(`${BRAIN_SERVER_URL}/fl/participation/progress/${DEVICE_ID}`);
+        const response = await fetch(`${BRAIN_SERVER_URL}/api/fl/participation/progress/${DEVICE_ID}`);
         const data = await response.json();
         
         if (data.success && data.active) {
@@ -488,7 +488,7 @@ async function respondToRequest(approved) {
     btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Processing...';
     
     try {
-        const response = await fetch(`${BRAIN_SERVER_URL}/fl/participation/respond/${currentRequest.request_id}`, {
+        const response = await fetch(`${BRAIN_SERVER_URL}/api/fl/participation/respond/${currentRequest.request_id}`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',

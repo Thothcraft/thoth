@@ -144,7 +144,7 @@ def upload_to_cloud(filename):
         device_id = getattr(Config, 'DEVICE_ID', None)
         
         # Upload to Brain
-        brain_url = f"{Config.BRAIN_SERVER_URL}/file/upload"
+        brain_url = f"{Config.BRAIN_SERVER_URL}/api/file/upload"
         headers = {
             'Authorization': f'Bearer {auth_token}',
             'Content-Type': 'application/json'

@@ -399,7 +399,7 @@ class DeviceManager:
 
             # Acknowledge receipt to Brain so it won't resend
             try:
-                ack_url = f"{self.config.BRAIN_SERVER_URL}/device/{self.device_id}/deployment/{deployment_id}/ack"
+                ack_url = f"{self.config.BRAIN_SERVER_URL}/api/device/{self.device_id}/deployment/{deployment_id}/ack"
                 self.session.post(ack_url, json={"status": "pending_confirmation"}, timeout=5)
                 logger.info(f"Deployment {deployment_id} acknowledged as pending_confirmation")
             except Exception as e:
@@ -485,7 +485,7 @@ class DeviceManager:
             data['timestamp'] = datetime.utcnow().isoformat()
         
         try:
-            url = f"{self.config.BRAIN_SERVER_URL}/device/heartbeat"
+            url = f"{self.config.BRAIN_SERVER_URL}/api/device/heartbeat"
             
             headers = {
                 "Authorization": f"Bearer {self.auth_token}",
@@ -555,7 +555,7 @@ class DeviceManager:
         if not self.device_id or not self.config.BRAIN_SERVER_URL:
             return
         try:
-            url = f"{self.config.BRAIN_SERVER_URL}/device/{self.device_id}/offline"
+            url = f"{self.config.BRAIN_SERVER_URL}/api/device/{self.device_id}/offline"
             self.session.post(url, json={}, timeout=3)
             logger.info("Sent offline signal to Brain server")
         except Exception as e:
@@ -615,7 +615,7 @@ class DeviceManager:
                 return 0, 0, []
             
             # Get list of files already on cloud
-            url = f"{self.config.BRAIN_SERVER_URL}/file/files"
+            url = f"{self.config.BRAIN_SERVER_URL}/api/file/files"
             headers = {
                 "Authorization": f"Bearer {self.auth_token}",
                 "Content-Type": "application/json"
@@ -646,7 +646,7 @@ class DeviceManager:
                     file_size = os.path.getsize(file_path)
                     
                     # Upload to Brain server
-                    upload_url = f"{self.config.BRAIN_SERVER_URL}/file/upload"
+                    upload_url = f"{self.config.BRAIN_SERVER_URL}/api/file/upload"
                     upload_data = {
                         "filename": filename,
                         "content": content,
