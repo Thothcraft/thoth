@@ -1805,12 +1805,6 @@ def api_live_capture_stream(kind):
 
     kind = kind.lower()
     if kind == 'video':
-        minute_dir = current_minute()
-        if minute_dir:
-            files = capture_files(minute_dir)
-            path = files.get('video')
-            if path and path.exists():
-                return send_file(path, mimetype='video/mp4', conditional=False, max_age=0)
         try:
             return Response(
                 stream_with_context(mjpeg_stream()),
@@ -1818,7 +1812,14 @@ def api_live_capture_stream(kind):
                 headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
             )
         except Exception:
-            abort(404, description='No live video available')
+            minute_dir = current_minute()
+            if not minute_dir:
+                abort(404, description='No live capture minute available')
+            files = capture_files(minute_dir)
+            path = files.get('video')
+            if not path or not path.exists():
+                abort(404, description='No live video available')
+            return send_file(path, mimetype='video/mp4', conditional=False, max_age=0)
 
     minute_dir = current_minute()
     if not minute_dir:
