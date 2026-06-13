@@ -18,6 +18,8 @@ import platform
 import netifaces
 import requests
 import tempfile
+import math
+import html
 from datetime import datetime, timedelta
 from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -288,6 +290,124 @@ def detect_sensor_inventory() -> List[Dict[str, Any]]:
             "files": "imu json",
         },
     ]
+
+
+def _split_csv_line(line: str) -> List[str]:
+    cells: List[str] = []
+    current = []
+    in_quotes = False
+    i = 0
+    while i < len(line):
+        char = line[i]
+        if char == '"':
+            if in_quotes and i + 1 < len(line) and line[i + 1] == '"':
+                current.append('"')
+                i += 2
+                continue
+            in_quotes = not in_quotes
+        elif char == ',' and not in_quotes:
+            cells.append(''.join(current))
+            current = []
+        else:
+            current.append(char)
+        i += 1
+    cells.append(''.join(current))
+    return cells
+
+
+def _parse_csi_average_series(path: Path, limit: int = 180) -> List[float]:
+    if not path.exists():
+        return []
+
+    series: List[float] = []
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as handle:
+            lines = [line.strip() for line in handle if line.strip()]
+    except Exception:
+        return []
+
+    if not lines:
+        return []
+
+    def _mean_from_payload(payload: str) -> Optional[float]:
+        payload = payload.strip().strip('[]')
+        if not payload:
+            return None
+        try:
+            values = [float(value) for value in payload.split(',') if value.strip()]
+        except ValueError:
+            return None
+        if len(values) < 2:
+            return None
+        mags = []
+        for idx in range(0, len(values) - 1, 2):
+            imag = values[idx]
+            real = values[idx + 1]
+            mags.append(math.sqrt((real * real) + (imag * imag)))
+        if not mags:
+            return None
+        return sum(mags) / len(mags)
+
+    first = lines[0]
+    if first.startswith('{'):
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            raw = str(row.get('line') or row.get('raw') or row.get('raw_csi_line') or '').strip()
+            if not raw.startswith('CSI_DATA,'):
+                continue
+            cells = _split_csv_line(raw)
+            mean = _mean_from_payload(cells[-1] if cells else '')
+            if mean is not None:
+                series.append(mean)
+    else:
+        header = _split_csv_line(first)
+        data_index = header.index('data') if 'data' in header else -1
+        if data_index < 0:
+            return []
+        for line in lines[1:]:
+            if not line.startswith('CSI_DATA,'):
+                continue
+            cells = _split_csv_line(line)
+            if len(cells) <= data_index:
+                continue
+            mean = _mean_from_payload(cells[data_index])
+            if mean is not None:
+                series.append(mean)
+
+    return series[-limit:]
+
+
+def _build_csi_svg(points: List[float]) -> str:
+    width = 960
+    height = 260
+    pad = 18
+    if not points:
+        return (
+            f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">'
+            f'<rect width="{width}" height="{height}" rx="16" fill="#020617"/>'
+            '<text x="20" y="40" fill="#94a3b8" font-size="14">Waiting for CSI samples...</text>'
+            '</svg>'
+        )
+
+    min_v = min(points)
+    max_v = max(points)
+    span = max_v - min_v or 1.0
+    step = (width - pad * 2) / max(1, len(points) - 1)
+    polyline = ' '.join(
+        f'{pad + idx * step:.2f},{height - pad - ((value - min_v) / span) * (height - pad * 2):.2f}'
+        for idx, value in enumerate(points)
+    )
+    return (
+        f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">'
+        f'<rect width="{width}" height="{height}" rx="16" fill="#020617"/>'
+        f'<polyline fill="none" stroke="#60a5fa" stroke-width="2.5" points="{html.escape(polyline)}"/>'
+        '<text x="20" y="28" fill="#cbd5e1" font-size="14">Average CSI amplitude</text>'
+        f'<text x="20" y="48" fill="#94a3b8" font-size="11">Packets: {len(points)}</text>'
+        '</svg>'
+    )
 
 
 def get_capture_overview() -> Dict[str, Any]:
@@ -1625,6 +1745,7 @@ def live_capture_stream(kind):
         active_minute=current_minute().name if current_minute() else None,
         username=session.get('username'),
         stream_url=url_for('api_live_capture_stream', kind=kind),
+        csi_plot_url=url_for('api_live_capture_csi_plot') if kind == 'csi' else None,
         plot_urls=[url_for('api_live_capture_plot', plot=plot) for plot in RADAR_PLOTS] if kind == 'radar' else [],
     )
 
@@ -1636,14 +1757,21 @@ def api_live_capture_stream(kind):
 
     kind = kind.lower()
     if kind == 'video':
-        minute_dir = current_minute()
-        if not minute_dir:
-            abort(404, description='No live capture minute available')
-        files = capture_files(minute_dir)
-        path = files.get('video')
-        if not path or not path.exists():
-            abort(404, description='No live video available')
-        return send_file(path, mimetype='video/mp4', conditional=False, max_age=0)
+        try:
+            return Response(
+                stream_with_context(mjpeg_stream()),
+                mimetype='multipart/x-mixed-replace; boundary=frame',
+                headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+            )
+        except Exception:
+            minute_dir = current_minute()
+            if not minute_dir:
+                abort(404, description='No live capture minute available')
+            files = capture_files(minute_dir)
+            path = files.get('video')
+            if not path or not path.exists():
+                abort(404, description='No live video available')
+            return send_file(path, mimetype='video/mp4', conditional=False, max_age=0)
 
     minute_dir = current_minute()
     if not minute_dir:
@@ -1671,6 +1799,26 @@ def api_live_capture_stream(kind):
         )
 
     return jsonify({'status': 'error', 'message': f'Unsupported live stream kind: {kind}'}), 400
+
+
+@app.route('/api/captures/live/csi/plot')
+def api_live_capture_csi_plot():
+    """Render a live CSI amplitude SVG from the active minute."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('captures')))
+
+    minute_dir = current_minute()
+    if not minute_dir:
+        abort(404, description='No live capture minute available')
+
+    files = capture_files(minute_dir)
+    path = files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial')
+    if not path or not path.exists():
+        abort(404, description='No CSI data available')
+
+    points = _parse_csi_average_series(path)
+    svg = _build_csi_svg(points)
+    return Response(svg, mimetype='image/svg+xml', headers={'Cache-Control': 'no-cache'})
 
 
 @app.route('/api/captures/live/radar/plot/<plot>')
