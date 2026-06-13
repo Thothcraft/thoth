@@ -1,130 +1,165 @@
 {% extends "base.html" %}
 
-{% block title %}Thoth Dashboard - {{ super() }}{% endblock %}
+{% block title %}Dashboard - {{ super() }}{% endblock %}
 
 {% block content %}
+{% set collecting = system_status.collection_active %}
+{% set latest = capture_overview.latest_minute %}
 <div class="space-y-6">
-    <div class="card">
-        <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-            <div>
-                <div class="text-sm uppercase tracking-wide text-gray-500">Thoth</div>
-                <h2 class="text-3xl font-semibold text-gray-900 mt-1">Continuous synchronized capture</h2>
-                <p class="text-sm text-gray-600 mt-2">DreamHat radar, USB camera, ESP32 CSI, and Sense HAT status are detected automatically. Offline sources stay visible but dimmed.</p>
+    <section class="rounded-2xl bg-slate-950 px-6 py-6 text-white shadow-lg">
+        <div class="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+            <div class="max-w-3xl">
+                <div class="text-xs uppercase tracking-[0.28em] text-slate-400">Thoth device</div>
+                <h1 class="mt-2 text-3xl font-semibold">Continuous synchronized capture</h1>
+                <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-300">
+                    Minute folders from <code class="rounded bg-white/10 px-1.5 py-0.5 text-slate-100">/home/pi/Desktop/data</code> are collected automatically on boot.
+                    Radar, camera, CSI, and Sense HAT stay visible as online or offline sources.
+                </p>
             </div>
             <div class="flex flex-wrap gap-3">
-                <a href="{{ url_for('captures') }}" class="btn btn-primary">
-                    <i class="fas fa-folder-open mr-2"></i>Browse Minutes
+                <span class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium {{ 'bg-emerald-500/15 text-emerald-300' if collecting else 'bg-amber-500/15 text-amber-300' }}">
+                    <span class="h-2 w-2 rounded-full {{ 'bg-emerald-400' if collecting else 'bg-amber-300' }}"></span>
+                    {{ 'Collecting data' if collecting else 'Idle' }}
+                </span>
+                <a href="{{ url_for('captures') }}" class="inline-flex items-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-medium text-slate-950 hover:bg-slate-100">
+                    <i class="fas fa-folder-open"></i>
+                    Browse minutes
                 </a>
-                {% if capture_overview.latest_minute %}
-                <a href="{{ url_for('capture_detail', minute=capture_overview.latest_minute.minute) }}" class="btn btn-secondary">
-                    <i class="fas fa-eye mr-2"></i>Latest Minute
+                {% if latest %}
+                <a href="{{ url_for('capture_detail', minute=latest.minute) }}" class="inline-flex items-center gap-2 rounded-xl border border-white/15 px-4 py-2 text-sm font-medium text-white hover:bg-white/5">
+                    <i class="fas fa-eye"></i>
+                    Latest minute
                 </a>
-                <a href="{{ url_for('download_capture_minute', minute=capture_overview.latest_minute.minute) }}" class="btn btn-secondary">
-                    <i class="fas fa-download mr-2"></i>Download Latest
+                <a href="{{ url_for('download_capture_minute', minute=latest.minute) }}" class="inline-flex items-center gap-2 rounded-xl border border-white/15 px-4 py-2 text-sm font-medium text-white hover:bg-white/5">
+                    <i class="fas fa-download"></i>
+                    Download latest
                 </a>
                 {% endif %}
             </div>
         </div>
-    </div>
 
-    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        <div class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div class="rounded-xl bg-white/5 p-4">
+                <div class="text-xs uppercase tracking-wide text-slate-400">State</div>
+                <div class="mt-2 text-lg font-semibold">{{ 'Collecting data' if collecting else 'Idle' }}</div>
+            </div>
+            <div class="rounded-xl bg-white/5 p-4">
+                <div class="text-xs uppercase tracking-wide text-slate-400">Capture keep</div>
+                <div class="mt-2 text-lg font-semibold">{{ capture_overview.keep_minutes }} minutes</div>
+            </div>
+            <div class="rounded-xl bg-white/5 p-4">
+                <div class="text-xs uppercase tracking-wide text-slate-400">Saved minutes</div>
+                <div class="mt-2 text-lg font-semibold">{{ capture_overview.minute_count }}</div>
+            </div>
+            <div class="rounded-xl bg-white/5 p-4">
+                <div class="text-xs uppercase tracking-wide text-slate-400">Capture dir</div>
+                <div class="mt-2 break-all text-sm text-slate-200">{{ capture_overview.capture_dir }}</div>
+            </div>
+        </div>
+    </section>
+
+    <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {% for sensor in sensors %}
-        <div class="card {% if not sensor.online %}opacity-60{% endif %}">
+        <article class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm {{ 'opacity-60' if not sensor.online else '' }}">
             <div class="flex items-start justify-between gap-3">
                 <div>
-                    <div class="text-sm font-medium text-gray-500">{{ sensor.key }}</div>
-                    <h3 class="text-lg font-semibold text-gray-900 mt-1">{{ sensor.name }}</h3>
+                    <div class="text-xs uppercase tracking-[0.18em] text-slate-500">{{ sensor.key }}</div>
+                    <h2 class="mt-1 text-lg font-semibold text-slate-950">{{ sensor.name }}</h2>
                 </div>
-                <span class="inline-flex items-center text-xs font-medium px-2 py-1 rounded-full {% if sensor.online %}bg-green-100 text-green-700{% else %}bg-gray-100 text-gray-500{% endif %}">
-                    <span class="h-2 w-2 rounded-full mr-2 {% if sensor.online %}bg-green-500{% else %}bg-gray-400{% endif %}"></span>
+                <span class="inline-flex items-center gap-2 rounded-full px-2.5 py-1 text-xs font-medium {{ 'bg-emerald-500/10 text-emerald-700' if sensor.online else 'bg-slate-100 text-slate-500' }}">
+                    <span class="h-2 w-2 rounded-full {{ 'bg-emerald-500' if sensor.online else 'bg-slate-400' }}"></span>
                     {{ 'Online' if sensor.online else 'Offline' }}
                 </span>
             </div>
-            <div class="mt-4 space-y-2 text-sm text-gray-600">
-                <div><span class="text-gray-400">Source:</span> {{ sensor.source }}</div>
-                <div><span class="text-gray-400">Data:</span> {{ sensor.files }}</div>
+            <div class="mt-4 space-y-2 text-sm text-slate-600">
+                <div><span class="text-slate-400">Source:</span> {{ sensor.source }}</div>
+                <div><span class="text-slate-400">Data:</span> {{ sensor.files }}</div>
             </div>
             <div class="mt-4">
                 {% if sensor.stream and sensor.online %}
-                <a href="{{ sensor.stream }}" target="_blank" class="text-blue-600 hover:text-blue-800 text-sm font-medium">
-                    Open live stream
+                <a href="{{ sensor.stream }}" target="_blank" class="inline-flex items-center gap-2 text-sm font-medium text-indigo-600 hover:text-indigo-500">
+                    Open live view
+                    <i class="fas fa-arrow-right text-xs"></i>
                 </a>
                 {% else %}
-                <span class="text-sm text-gray-400">No live stream</span>
+                <span class="text-sm text-slate-400">No live stream</span>
+                {% endif %}
+            </div>
+        </article>
+        {% endfor %}
+    </section>
+
+    <section class="grid gap-6 xl:grid-cols-[1.6fr_1fr]">
+        <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div class="flex items-center justify-between gap-3">
+                <div>
+                    <div class="text-xs uppercase tracking-[0.18em] text-slate-500">Minutes</div>
+                    <h2 class="mt-1 text-2xl font-semibold text-slate-950">Recent capture folders</h2>
+                </div>
+                <a href="{{ url_for('captures') }}" class="text-sm font-medium text-indigo-600 hover:text-indigo-500">Open full browser</a>
+            </div>
+
+            <div class="mt-4 grid gap-3 lg:grid-cols-2">
+                {% for minute in recent_minutes %}
+                <a href="{{ url_for('capture_detail', minute=minute.minute) }}" class="rounded-2xl border border-slate-200 p-4 transition hover:border-slate-300 hover:bg-slate-50">
+                    <div class="flex items-start justify-between gap-3">
+                        <div>
+                            <div class="text-xs uppercase tracking-[0.18em] text-slate-500">Minute folder</div>
+                            <div class="mt-1 font-mono text-lg font-semibold text-slate-950">{{ minute.minute }}</div>
+                        </div>
+                        <span class="rounded-full px-2.5 py-1 text-xs font-medium {{ 'bg-emerald-500/10 text-emerald-700' if minute.files.video and minute.files.radar and minute.files.csi else 'bg-amber-500/10 text-amber-700' }}">
+                            {{ 'Ready' if minute.files.video and minute.files.radar and minute.files.csi else 'Collecting' }}
+                        </span>
+                    </div>
+                    <div class="mt-4 flex flex-wrap gap-2 text-xs">
+                        <span class="rounded-full bg-slate-100 px-2.5 py-1 text-slate-700">Video {{ 'on' if minute.files.video else 'off' }}</span>
+                        <span class="rounded-full bg-slate-100 px-2.5 py-1 text-slate-700">Radar {{ 'on' if minute.files.radar else 'off' }}</span>
+                        <span class="rounded-full bg-slate-100 px-2.5 py-1 text-slate-700">CSI {{ 'on' if minute.files.csi else 'off' }}</span>
+                    </div>
+                    <div class="mt-4 text-xs text-slate-500">
+                        Updated {{ minute.modified }}
+                    </div>
+                </a>
+                {% endfor %}
+
+                {% if not recent_minutes %}
+                <div class="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
+                    No minute folders found yet.
+                </div>
                 {% endif %}
             </div>
         </div>
-        {% endfor %}
-    </div>
 
-    <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        <div class="card xl:col-span-2">
-            <div class="flex items-center justify-between">
-                <h3 class="text-xl font-semibold text-gray-900">Capture index</h3>
-                <span class="text-sm text-gray-500">{{ capture_overview.minute_count }} minute folders kept</span>
-            </div>
-            <div class="mt-4 overflow-x-auto">
-                <table class="min-w-full divide-y divide-gray-200">
-                    <thead>
-                        <tr class="text-left text-xs uppercase tracking-wide text-gray-500">
-                            <th class="py-3 pr-4">Minute</th>
-                            <th class="py-3 pr-4">Video</th>
-                            <th class="py-3 pr-4">Radar</th>
-                            <th class="py-3 pr-4">CSI</th>
-                            <th class="py-3 pr-4"></th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-100">
-                        {% for minute in (capture_overview.latest_minute and [capture_overview.latest_minute] or []) %}
-                        <tr>
-                            <td class="py-3 pr-4 font-mono text-sm">{{ minute.minute }}</td>
-                            <td class="py-3 pr-4 text-sm">{{ 'Yes' if minute.files.video else 'No' }}</td>
-                            <td class="py-3 pr-4 text-sm">{{ 'Yes' if minute.files.radar else 'No' }}</td>
-                            <td class="py-3 pr-4 text-sm">{{ 'Yes' if minute.files.csi else 'No' }}</td>
-                            <td class="py-3 pr-4 text-right">
-                                <a href="{{ url_for('capture_detail', minute=minute.minute) }}" class="text-blue-600 hover:text-blue-800 text-sm font-medium">Open</a>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                        {% if not capture_overview.latest_minute %}
-                        <tr>
-                            <td colspan="5" class="py-6 text-sm text-gray-500">No minute folders found yet.</td>
-                        </tr>
-                        {% endif %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <div class="card">
-            <h3 class="text-xl font-semibold text-gray-900">System</h3>
+        <aside class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div class="text-xs uppercase tracking-[0.18em] text-slate-500">System</div>
+            <h2 class="mt-1 text-2xl font-semibold text-slate-950">Device status</h2>
             <div class="mt-4 space-y-3 text-sm">
                 <div class="flex justify-between gap-3">
-                    <span class="text-gray-500">Collection</span>
-                    <span>{{ 'Active' if system_status.collection_active else 'Inactive' }}</span>
+                    <span class="text-slate-500">WiFi</span>
+                    <span class="font-medium">{{ 'Connected' if system_status.wifi_connected else 'Disconnected' }}</span>
                 </div>
                 <div class="flex justify-between gap-3">
-                    <span class="text-gray-500">WiFi</span>
-                    <span>{{ 'Connected' if system_status.wifi_connected else 'Disconnected' }}</span>
+                    <span class="text-slate-500">Uptime</span>
+                    <span class="font-medium">{{ system_status.uptime or 'N/A' }}</span>
                 </div>
                 <div class="flex justify-between gap-3">
-                    <span class="text-gray-500">Uptime</span>
-                    <span>{{ system_status.uptime or 'N/A' }}</span>
+                    <span class="text-slate-500">IP</span>
+                    <span class="font-medium">{{ system_status.ip_address or 'N/A' }}</span>
                 </div>
                 <div class="flex justify-between gap-3">
-                    <span class="text-gray-500">Disk</span>
-                    <span>{{ system_status.disk_usage['percent_used'] if system_status.disk_usage else 0 }}%</span>
+                    <span class="text-slate-500">Temperature</span>
+                    <span class="font-medium">{{ system_status.temperature if system_status.temperature is not none else 'N/A' }}</span>
                 </div>
                 <div class="flex justify-between gap-3">
-                    <span class="text-gray-500">Capture dir</span>
-                    <span class="font-mono text-xs text-right">{{ capture_overview.capture_dir }}</span>
+                    <span class="text-slate-500">Disk</span>
+                    <span class="font-medium">{{ system_status.disk_usage['percent_used'] if system_status.disk_usage else 0 }}%</span>
                 </div>
                 <div class="flex justify-between gap-3">
-                    <span class="text-gray-500">Keep</span>
-                    <span>{{ capture_overview.keep_minutes }} minutes</span>
+                    <span class="text-slate-500">Capture service</span>
+                    <span class="font-medium">{{ 'Active' if system_status.collection_active else 'Inactive' }}</span>
                 </div>
             </div>
-        </div>
-    </div>
+        </aside>
+    </section>
 </div>
 {% endblock %}

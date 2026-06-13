@@ -1383,6 +1383,7 @@ def status():
         available_networks = scan_wifi_networks()
         capture_overview = get_capture_overview()
         sensors = detect_sensor_inventory()
+        recent_minutes = list_minutes()[:8]
 
         return render_template('status.html',
                             system_status=system_status,
@@ -1393,7 +1394,8 @@ def status():
                             username=session.get('username'),
                             available_networks=available_networks,
                             capture_overview=capture_overview,
-                            sensors=sensors)
+                            sensors=sensors,
+                            recent_minutes=recent_minutes)
 
     except Exception as e:
         logger.error(f"Error in status route: {str(e)}", exc_info=True)
@@ -1605,6 +1607,24 @@ def upload_capture_minute(minute):
 
 @app.route('/captures/live/<kind>')
 def live_capture_stream(kind):
+    """Show a live capture page for the selected sensor."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('captures')))
+
+    kind = kind.lower()
+    if kind not in {'video', 'csi', 'radar'}:
+        abort(404, description=f'Unsupported live stream kind: {kind}')
+
+    return render_template(
+        'live_stream.html',
+        kind=kind,
+        active_minute=current_minute().name if current_minute() else None,
+        username=session.get('username'),
+        stream_url=url_for('api_live_capture_stream', kind=kind),
+    )
+
+@app.route('/api/captures/live/<kind>')
+def api_live_capture_stream(kind):
     """Stream the current live sensor feed."""
     if 'username' not in session:
         return redirect(url_for('login', next=url_for('captures')))
