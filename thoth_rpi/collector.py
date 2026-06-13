@@ -51,7 +51,7 @@ def run_capture(python: str, capture_script: str) -> int:
         capture_script,
         "--start-now",
         "--duration",
-        "60",
+        "58.5",
     ]
     proc = subprocess.run(cmd)
     return proc.returncode
