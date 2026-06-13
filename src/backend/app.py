@@ -65,6 +65,7 @@ from backend.capture_manager import (
     cleanup_old_minutes,
     zip_minute_folder,
     mjpeg_stream,
+    tail_binary_file,
     sse_tail,
     preview_text,
 )
@@ -1805,21 +1806,18 @@ def api_live_capture_stream(kind):
 
     kind = kind.lower()
     if kind == 'video':
-        try:
-            return Response(
-                stream_with_context(mjpeg_stream()),
-                mimetype='multipart/x-mixed-replace; boundary=frame',
-                headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
-            )
-        except Exception:
-            minute_dir = current_minute()
-            if not minute_dir:
-                abort(404, description='No live capture minute available')
-            files = capture_files(minute_dir)
-            path = files.get('video')
-            if not path or not path.exists():
-                abort(404, description='No live video available')
-            return send_file(path, mimetype='video/mp4', conditional=False, max_age=0)
+        minute_dir = current_minute()
+        if not minute_dir:
+            abort(404, description='No live capture minute available')
+        files = capture_files(minute_dir)
+        path = files.get('video')
+        if not path or not path.exists():
+            abort(404, description='No live video available')
+        return Response(
+            stream_with_context(tail_binary_file(path)),
+            mimetype='video/mp4',
+            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+        )
 
     minute_dir = current_minute()
     if not minute_dir:

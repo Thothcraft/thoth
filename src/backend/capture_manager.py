@@ -184,6 +184,22 @@ def _read_ffmpeg_frame(stdout, buffer: bytearray) -> Optional[bytes]:
         buffer.extend(chunk)
 
 
+def tail_binary_file(path: Path, poll_interval: float = 0.15, chunk_size: int = 65536) -> Iterable[bytes]:
+    if not path.exists():
+        return
+
+    with open(path, 'rb') as handle:
+        offset = 0
+        while True:
+            handle.seek(offset)
+            chunk = handle.read(chunk_size)
+            if chunk:
+                offset = handle.tell()
+                yield chunk
+                continue
+            time.sleep(poll_interval)
+
+
 def mjpeg_stream(device: Optional[str] = None, width: Optional[int] = None, height: Optional[int] = None, fps: Optional[int] = None) -> Iterable[bytes]:
     device = device or Config.CAPTURE_CAMERA_DEVICE
     width = width or Config.CAPTURE_CAMERA_WIDTH
