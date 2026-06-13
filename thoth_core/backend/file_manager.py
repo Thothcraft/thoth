@@ -16,7 +16,7 @@ class FileManager:
         target_dir = self.base_path / subdir if subdir else self.base_path
         if not target_dir.exists():
             return []
-            
+
         files = []
         for item in target_dir.iterdir():
             if item.is_file():

@@ -1,9 +1,7 @@
-"""Thoth Flask Backend Application (platform-agnostic core).
+"""Thoth Flask Backend Application.
 
 This module provides the main Flask application for the Thoth device,
 including REST API endpoints and WebSocket support for real-time data streaming.
-RPi-specific code (SenseHat, PiSugar, captive portal, hotspot) has been removed;
-each platform package extends this core as needed.
 """
 
 import os
@@ -20,32 +18,53 @@ import platform
 import netifaces
 import requests
 from datetime import datetime, timedelta
+from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from typing import Dict, List, Optional, Any, Tuple
 from dotenv import load_dotenv
-import base64
-
-try:
-    import cv2
-except ImportError:
-    cv2 = None
 
 # Load environment variables
 load_dotenv()
 
 from flask import (
-    Flask, jsonify, request, render_template, 
-    redirect, url_for, flash, session, send_from_directory, abort
+    Flask, jsonify, request, render_template,
+    redirect, url_for, flash, session, send_from_directory, abort, send_file, Response, stream_with_context, after_this_request
 )
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
+import requests
 from werkzeug.security import generate_password_hash, check_password_hash
+
+# Add src directory to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Try to import Sense HAT, fall back to mock if not available
+try:
+    from sense_hat import SenseHat
+    sense = SenseHat()
+    SENSE_HAT_AVAILABLE = True
+    print("Using real Sense HAT")
+except (ImportError, OSError):
+    print("Sense HAT not found, using mock implementation")
+    from .mock_sense_hat import sense
+    SENSE_HAT_AVAILABLE = False
 
 from .config import Config, BUTTON_ACTIONS, SENSOR_CONFIG
 from .models import SensorReading, SystemStatus, ButtonConfig, UploadResult
 from .device_manager import DeviceManager
 from .auth_manager import AuthManager
-from ..sensors.hardware_detector import detect_sensors, ensure_system_dist_packages
+from .capture_manager import (
+    list_minutes,
+    get_minute,
+    capture_files,
+    current_minute,
+    minute_summary,
+    cleanup_old_minutes,
+    zip_minute_folder,
+    mjpeg_stream,
+    sse_tail,
+    preview_text,
+)
 
 # Set up logging
 logging.basicConfig(
@@ -78,37 +97,10 @@ def log_response(response):
     logger.info(f"Response: {request.method} {request.path} - {response.status_code}")
     return response
 
-# Load user info from saved credentials before each request
-@app.before_request
-def populate_session_if_auth_manager_has_credentials():
-    """If credentials were loaded at startup but session is empty, populate it."""
-    # Disabled: require explicit login on first run
-    # if 'username' not in session and auth_manager.is_authenticated() and auth_manager.user_info:
-    #     session['username'] = auth_manager.user_info.get('username')
-    #     session['user_id'] = auth_manager.user_info.get('user_id')
-    #     session['token'] = auth_manager.token
-    pass
-
 # Add current date to all templates
 @app.context_processor
 def inject_now():
-    """Inject commonly used globals into every template."""
-    user_info = None
-    if 'username' in session:
-        user_info = {
-            'username': session.get('username'),
-            'user_id': session.get('user_id')
-        }
-    elif auth_manager.is_authenticated():
-        user_info = auth_manager.user_info
-    return {
-        'now': datetime.utcnow(),
-        'user_info': user_info,
-        'config': {
-            'app_name': Config.APP_NAME,
-            'version': Config.VERSION
-        }
-    }
+    return {'now': datetime.utcnow()}
 
 # Initialize scheduler
 device_scheduler = BackgroundScheduler()
@@ -121,6 +113,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 # Ensure required directories exist
 os.makedirs(Config.CONFIG_DIR, exist_ok=True)
 os.makedirs(Config.LOGS_DIR, exist_ok=True)
+os.makedirs(Config.CAPTURE_DATA_DIR, exist_ok=True)
 
 # Initialize managers
 auth_manager = AuthManager(Config)
@@ -128,32 +121,225 @@ device_manager = DeviceManager(Config)
 
 # Global state
 collection_active = False
-sensor_recordings: Dict[str, Dict[str, Any]] = {}
+wifi_manager = None
 
+# Mock user for local authentication (in production, use a proper user database)
+USERS = {
+    'admin': {
+        'password': generate_password_hash('admin123'),
+        'role': 'admin'
+    },
+    'user': {
+        'password': generate_password_hash('password123'),
+        'role': 'user'
+    }
+}
+
+def scan_wifi_networks():
+    """Scan for available WiFi networks."""
+    networks = []
+
+    try:
+        if platform.system() == 'Windows':
+            # Use netsh on Windows to scan for networks
+            result = subprocess.run(
+                ['netsh', 'wlan', 'show', 'networks', 'mode=bssid'],
+                capture_output=True, text=True, timeout=10
+            )
+
+            if result.returncode == 0:
+                current_ssid = None
+                current_secure = False
+                current_signal = 0
+
+                for line in result.stdout.split('\n'):
+                    line = line.strip()
+                    if line.startswith('SSID') and ':' in line and 'BSSID' not in line:
+                        # Save previous network if exists
+                        if current_ssid:
+                            networks.append({
+                                'ssid': current_ssid,
+                                'secure': current_secure,
+                                'signal': current_signal
+                            })
+                        # Parse new SSID
+                        current_ssid = line.split(':', 1)[1].strip()
+                        current_secure = False
+                        current_signal = 0
+                    elif 'Authentication' in line and ':' in line:
+                        auth = line.split(':', 1)[1].strip()
+                        current_secure = auth.lower() != 'open'
+                    elif 'Signal' in line and ':' in line:
+                        try:
+                            signal_str = line.split(':', 1)[1].strip().replace('%', '')
+                            current_signal = int(signal_str)
+                        except ValueError:
+                            current_signal = 50
+
+                # Add last network
+                if current_ssid:
+                    networks.append({
+                        'ssid': current_ssid,
+                        'secure': current_secure,
+                        'signal': current_signal
+                    })
+        else:
+            # Linux - use iwlist or nmcli
+            result = subprocess.run(
+                ['iwlist', 'wlan0', 'scan'],
+                capture_output=True, text=True, timeout=15
+            )
+            # Parse Linux output (simplified)
+            for line in result.stdout.split('\n'):
+                if 'ESSID:' in line:
+                    ssid = line.split('ESSID:')[1].strip().strip('"')
+                    if ssid:
+                        networks.append({'ssid': ssid, 'secure': True, 'signal': 50})
+    except Exception as e:
+        logger.error(f"Error scanning WiFi networks: {e}")
+
+    # Remove duplicates and empty SSIDs
+    seen = set()
+    unique_networks = []
+    for net in networks:
+        if net['ssid'] and net['ssid'] not in seen:
+            seen.add(net['ssid'])
+            unique_networks.append(net)
+
+    return unique_networks if unique_networks else []
 
 def get_system_uptime() -> str:
     """Get system uptime in a human-readable format."""
     try:
-        uptime_seconds = time.time() - psutil.boot_time()
-        return str(timedelta(seconds=int(uptime_seconds)))
+        if platform.system() == 'Windows':
+            # Use psutil for Windows
+            uptime_seconds = time.time() - psutil.boot_time()
+            return str(timedelta(seconds=int(uptime_seconds)))
+        else:
+            with open('/proc/uptime', 'r') as f:
+                uptime_seconds = float(f.readline().split()[0])
+                return str(timedelta(seconds=uptime_seconds)).split('.')[0]
     except Exception:
         return "unknown"
 
 
+def detect_sensor_inventory() -> List[Dict[str, Any]]:
+    """Detect available sensors and recording sources."""
+    minutes = list_minutes()
+    latest = minutes[0] if minutes else None
+    current_dir = current_minute()
+    current_files = capture_files(current_dir) if current_dir else {}
+
+    def _has_serial_device() -> bool:
+        candidates = []
+        for pattern in ("/dev/ttyACM", "/dev/ttyUSB"):
+            for idx in range(10):
+                path = f"{pattern}{idx}"
+                if os.path.exists(path):
+                    candidates.append(path)
+        serial_dir = Path("/dev/serial/by-id")
+        if serial_dir.exists():
+            for item in serial_dir.iterdir():
+                candidates.append(str(item))
+        return bool(candidates)
+
+    return [
+        {
+            "name": "DreamHat Radar",
+            "key": "dreamhat_radar",
+            "online": bool(current_files.get("radar") and current_files["radar"].exists()) or subprocess.run(
+                ["systemctl", "is-active", "thoth-collector"],
+                capture_output=True,
+                text=True,
+            ).stdout.strip() == "active",
+            "source": "BGT60TR13C",
+            "stream": "/captures/live/radar",
+            "files": "radar binary",
+        },
+        {
+            "name": "USB Camera",
+            "key": "usb_camera",
+            "online": os.path.exists(Config.CAPTURE_CAMERA_DEVICE),
+            "source": Config.CAPTURE_CAMERA_DEVICE,
+            "stream": "/captures/live/video",
+            "files": "mp4 video",
+        },
+        {
+            "name": "ESP32 CSI",
+            "key": "esp32_csi",
+            "online": _has_serial_device() or bool(
+                current_files.get("csi_timestamped")
+                and current_files["csi_timestamped"].exists()
+            ),
+            "source": "USB serial",
+            "stream": "/captures/live/csi",
+            "files": "csv/jsonl",
+        },
+        {
+            "name": "Sense HAT",
+            "key": "sense_hat",
+            "online": SENSE_HAT_AVAILABLE,
+            "source": "GPIO / I2C",
+            "stream": None,
+            "files": "imu json",
+        },
+    ]
+
+
+def get_capture_overview() -> Dict[str, Any]:
+    """Summarize the capture directory."""
+    minutes = list_minutes()
+    latest = minutes[0] if minutes else None
+    return {
+        "capture_dir": Config.CAPTURE_DATA_DIR,
+        "keep_minutes": Config.CAPTURE_KEEP_MINUTES,
+        "minute_count": len(minutes),
+        "latest_minute": latest,
+    }
+
+# Global state
+collection_active = False
+wifi_manager = None
+
 def get_system_status(update_remote: bool = True) -> SystemStatus:
-    """Get current system status and optionally update the Brain server."""
+    """Get current system status and optionally update the Brain server.
+
+    Args:
+        update_remote: If True, update the status on the Brain server
+
+    Returns:
+        SystemStatus: Current system status
+    """
     try:
-        # Check internet connectivity
+        is_windows = platform.system() == 'Windows'
+
+        # Check WiFi connection (platform-aware)
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(2)
-            s.connect(("8.8.8.8", 80))
-            s.close()
-            wifi_connected = True
+            if is_windows:
+                wifi_connected = subprocess.run(
+                    ["ping", "-n", "1", "8.8.8.8"],
+                    capture_output=True, timeout=5
+                ).returncode == 0
+            else:
+                wifi_connected = subprocess.run(
+                    ["ping", "-c1", "8.8.8.8"],
+                    capture_output=True, timeout=5
+                ).returncode == 0
         except Exception:
             wifi_connected = False
-        
-        # Get battery level
+
+        # Check collection status (Linux only, mock on Windows)
+        collection_status = False
+        if not is_windows:
+            try:
+                collection_status = subprocess.run(
+                    ["systemctl", "is-active", "thoth-collector"],
+                    capture_output=True, text=True
+                ).stdout.strip() == "active"
+            except Exception:
+                collection_status = False
+
+        # Get battery level (mock for now)
         battery_level = None
         try:
             battery = psutil.sensors_battery()
@@ -161,16 +347,16 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
                 battery_level = int(battery.percent)
         except Exception:
             battery_level = None
-        
-        # Get CPU temperature (Linux only)
+
+        # Get CPU temperature
         cpu_temp = None
-        if platform.system() == "Linux":
+        if not is_windows:
             try:
                 with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
                     cpu_temp = float(f.read().strip()) / 1000.0
             except Exception:
-                pass
-        
+                pass  # Temperature not available on this system
+
         # Get IP address
         ip_address = None
         try:
@@ -180,7 +366,7 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
             s.close()
         except Exception as e:
             logger.debug(f"Could not get IP address: {e}")
-        
+
         # Get disk usage
         disk_usage = None
         try:
@@ -197,27 +383,30 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
             }
         except Exception:
             pass
-        
+
+        # Get uptime
         uptime_output = get_system_uptime()
-        
+
+        # Create status object
         status = SystemStatus(
             status="ok",
             battery_level=battery_level,
             wifi_connected=wifi_connected,
-            ap_mode=False,
-            collection_active=collection_active,
+            ap_mode=not wifi_connected,
+            collection_active=collection_status,
             uptime=uptime_output,
             temperature=cpu_temp,
             disk_usage=disk_usage,
             ip_address=ip_address
         )
-        
+
+        # Update device manager status
         if update_remote:
             try:
                 device_manager.update_status({
                     'battery_level': battery_level,
                     'wifi_connected': wifi_connected,
-                    'collection_active': collection_active,
+                    'collection_active': collection_status,
                     'online': True,
                     'ip_address': ip_address,
                     'temperature': cpu_temp,
@@ -225,22 +414,22 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
                 })
             except Exception as e:
                 logger.error(f"Error updating device status: {e}")
-        
+
         return status
-        
+
     except Exception as e:
         logger.error(f"Error getting system status: {e}", exc_info=True)
         return SystemStatus(status="error", error=str(e))
 
-
 def tail_sensor_data():
     """Background task to tail sensor data and emit via WebSocket."""
     sensor_file = Config.SENSOR_DATA_FILE
-    
+
     while True:
         try:
             if os.path.exists(sensor_file):
                 with open(sensor_file, 'r') as f:
+                    # Go to end of file
                     f.seek(0, 2)
                     while True:
                         line = f.readline()
@@ -258,10 +447,10 @@ def tail_sensor_data():
             print(f"Error in sensor data tail: {e}")
             time.sleep(5)
 
-
 def get_device_info() -> Dict[str, Any]:
     """Get detailed information about the device."""
     try:
+        # Get network interfaces and MAC addresses
         interfaces = {}
         for iface in netifaces.interfaces():
             addrs = netifaces.ifaddresses(iface)
@@ -269,31 +458,8 @@ def get_device_info() -> Dict[str, Any]:
                 mac = addrs[netifaces.AF_LINK][0].get('addr')
                 if mac and mac != '00:00:00:00:00:00':
                     interfaces[iface] = mac
-        
-        # Convert psutil objects to plain dicts to ensure JSON serialization works
-        mem_info = psutil.virtual_memory()
-        memory_dict = {
-            'total': mem_info.total,
-            'available': mem_info.available,
-            'percent': mem_info.percent,
-            'used': mem_info.used,
-            'free': mem_info.free,
-            'active': getattr(mem_info, 'active', 0),
-            'inactive': getattr(mem_info, 'inactive', 0),
-            'buffers': getattr(mem_info, 'buffers', 0),
-            'cached': getattr(mem_info, 'cached', 0),
-            'shared': getattr(mem_info, 'shared', 0),
-            'slab': getattr(mem_info, 'slab', 0)
-        }
-        
-        disk_info = psutil.disk_usage('/')
-        disk_dict = {
-            'total': disk_info.total,
-            'used': disk_info.used,
-            'free': disk_info.free,
-            'percent': disk_info.percent
-        }
-        
+
+        # Get system information
         system_info = {
             'system': platform.system(),
             'node': platform.node(),
@@ -302,48 +468,121 @@ def get_device_info() -> Dict[str, Any]:
             'machine': platform.machine(),
             'processor': platform.processor(),
             'cpu_count': os.cpu_count(),
-            'memory': memory_dict,
-            'disk_usage': disk_dict,
+            'memory': psutil.virtual_memory()._asdict(),
+            'disk_usage': psutil.disk_usage('/')._asdict(),
             'network_interfaces': interfaces,
             'hostname': socket.gethostname(),
             'ip_address': socket.gethostbyname(socket.gethostname()),
             'python_version': platform.python_version(),
             'boot_time': datetime.fromtimestamp(psutil.boot_time()).isoformat()
         }
-        
-        # Validate JSON serialization before returning
-        try:
-            json.dumps(system_info)
-        except (TypeError, ValueError) as e:
-            logger.error(f"Device info is not JSON serializable: {e}")
-            return {}
-        
         return system_info
     except Exception as e:
         logger.error(f"Error getting device info: {e}")
         return {}
 
+def register_device_periodically():
+    """Register device with Brain server every minute."""
+    try:
+        # Get device info
+        device_info = get_device_info()
+
+        # Get device ID from session or generate one
+        device_id = session.get('device_id')
+        if not device_id:
+            # Try to get MAC address as device ID
+            mac_address = next(iter(device_info.get('network_interfaces', {}).values()), None)
+            device_id = mac_address or str(uuid.uuid4())
+            session['device_id'] = device_id
+
+        # Get device name from session or use hostname
+        device_name = session.get('device_name', device_info.get('hostname', 'Thoth Device'))
+
+        # Get access token from environment
+        access_token = os.getenv('BRAIN_AUTH_TOKEN')
+        if not access_token:
+            logger.error("No BRAIN_AUTH_TOKEN found in environment variables")
+            return
+
+        # Prepare request data
+        data = {
+            'device_id': device_id,
+            'device_name': device_name,
+            'device_type': 'thoth',
+            'hardware_info': device_info
+        }
+
+        # Send registration request
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+
+        for url in (
+            f"{Config.BRAIN_SERVER_URL}/api/device/register",
+            f"{Config.BRAIN_SERVER_URL}/device/register",
+        ):
+            response = requests.post(
+                url,
+                json=data,
+                headers=headers,
+                timeout=10
+            )
+            if response.status_code in (404, 405):
+                logger.warning(f"Device registration returned {response.status_code} for {url}")
+                continue
+            response.raise_for_status()
+            logger.info(f"Device registration successful: {response.json()}")
+            break
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error during device registration: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.status_code} - {e.response.text}")
+    except Exception as e:
+        logger.error(f"Unexpected error in device registration: {str(e)}", exc_info=True)
+
 
 def _process_pending_uploads(filenames: list, auth_token: str):
-    """Process pending upload requests by uploading files to Brain server."""
+    """Process pending upload requests by uploading files to Brain server.
+
+    Args:
+        filenames: List of filenames to upload
+        auth_token: User authentication token
+    """
+    import base64
+    import threading
+
     def upload_files():
         for filename in filenames:
             try:
+                # Get file path
                 file_path = os.path.join(Config.DATA_DIR, filename)
                 if not os.path.exists(file_path):
                     logger.warning(f"File not found for upload: {filename}")
                     continue
+
+                # Read file content
                 with open(file_path, 'rb') as f:
                     content = f.read()
+
+                # Encode as base64
                 content_b64 = base64.b64encode(content).decode('utf-8')
+
+                # Determine content type
                 ext = os.path.splitext(filename)[1].lower()
                 content_type = 'application/json' if ext == '.json' else 'text/csv' if ext == '.csv' else 'application/octet-stream'
+
+                # Get device ID
                 device_id = getattr(Config, 'DEVICE_ID', None)
-                brain_url = f"{Config.BRAIN_SERVER_URL}/api/file/upload"
+
+                # Upload to Brain
+                brain_url = f"{Config.BRAIN_SERVER_URL}/file/upload"
                 headers = {
                     'Authorization': f'Bearer {auth_token}',
                     'Content-Type': 'application/json'
                 }
+
                 payload = {
                     'filename': filename,
                     'content': content_b64,
@@ -351,15 +590,21 @@ def _process_pending_uploads(filenames: list, auth_token: str):
                     'device_id': device_id,
                     'content_type': content_type
                 }
+
                 logger.info(f"Uploading {filename} ({len(content)} bytes) to Brain cloud")
+
                 response = requests.post(brain_url, json=payload, headers=headers, timeout=120)
+
                 if response.status_code in (200, 201):
                     result = response.json()
                     logger.info(f"File uploaded successfully: {filename} -> cloud_file_id={result.get('file_id')}")
                 else:
                     logger.error(f"Upload failed for {filename}: {response.status_code} - {response.text}")
+
             except Exception as e:
                 logger.error(f"Error uploading {filename}: {e}")
+
+    # Run uploads in background thread to not block registration
     thread = threading.Thread(target=upload_files, daemon=True)
     thread.start()
 
@@ -367,67 +612,131 @@ def _process_pending_uploads(filenames: list, auth_token: str):
 def register_device_periodically():
     """Register device with Brain server every minute (only if user is authenticated)."""
     try:
+        # Skip if Brain server URL is not configured
         if not getattr(Config, 'BRAIN_SERVER_URL', None):
+            logger.warning("Brain server URL not configured, skipping device registration")
             return
+
+        # Get authentication token from the authenticated user's session
+        # This is stored globally after successful login
         auth_token = getattr(Config, 'USER_AUTH_TOKEN', None)
         if not auth_token:
+            logger.debug("No authenticated user token available, skipping device registration")
             return
+
+        # Get device information
         device_info = get_device_info()
+
+        # Prepare headers with the authentication token
         headers = {
             'Authorization': f'Bearer {auth_token.strip()}',
             'Content-Type': 'application/json',
             'User-Agent': 'Thoth-Device/1.0'
         }
+
+        # Get or generate device ID
         device_id = getattr(Config, 'DEVICE_ID', None)
         if not device_id:
+            # Try to get MAC address and generate a UUID from it
             mac_address = next(iter(device_info.get('network_interfaces', {}).values()), None)
             if mac_address:
+                # Create a UUID from the MAC address (version 5 with DNS namespace)
                 device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, mac_address))
             else:
                 device_id = str(uuid.uuid4())
+
             Config.DEVICE_ID = device_id
+            logger.info(f"Generated new device ID: {device_id}")
+
+        # Prepare registration data with a display name based on MAC if available
         mac_display = next(iter(device_info.get('network_interfaces', {}).values()), '')[:8]
+
+        # Get list of data files to send to Brain
         files_list = device_manager._get_data_files_list()
+
         registration_data = {
             'device_id': device_id,
             'device_name': f"Thoth-{mac_display}" if mac_display else f"Thoth-{device_id[:8]}",
             'device_type': 'thoth',
             'hardware_info': device_info,
-            'files': files_list
+            'files': files_list  # Push file list to Brain
         }
-        for attempt in range(3):
+
+        # Log the request for debugging
+        logger.info(f"Registering device with data: {json.dumps(registration_data, indent=2)}")
+
+        # Send registration request with retry logic
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
                 response = requests.post(
-                    f"{Config.BRAIN_SERVER_URL}/api/device/register",
+                    f"{Config.BRAIN_SERVER_URL}/device/register",
                     json=registration_data,
                     headers=headers,
                     timeout=30
                 )
-                if response.status_code in (200, 201):
+
+                # Handle response - consider it successful if we get a 200/201 or 400 with the logging error
+                if response.status_code in (200, 201) or \
+                   (response.status_code == 400 and 'log_response() takes 3 positional arguments but 4 were given' in response.text):
+
+                    # Try to parse the response as JSON
                     try:
                         result = response.json()
-                        pending_uploads = result.get('pending_uploads', [])
-                        if pending_uploads:
-                            _process_pending_uploads(pending_uploads, auth_token)
+                        logger.info(f"Registration response JSON: {result}")
+                        if result.get('success') == True or 'device_id' in result:
+                            logger.info(f"Device registration successful")
+
+                            # Check for pending upload requests
+                            pending_uploads = result.get('pending_uploads', [])
+                            logger.info(f"Pending uploads in response: {pending_uploads}")
+                            if pending_uploads:
+                                logger.info(f"Processing {len(pending_uploads)} pending uploads...")
+                                _process_pending_uploads(pending_uploads, auth_token)
+
+                            return True
                     except ValueError:
-                        pass
-                    return True
-                if attempt == 2:
+                        # If we can't parse JSON but got a 200, consider it a success
+                        if response.status_code in (200, 201):
+                            logger.info("Device registration successful (non-JSON response)")
+                            return True
+
+                    logger.warning(f"Unexpected response format: {response.text}")
+                    return True  # Still consider it a success since the device was registered
+
+                logger.warning(f"Registration attempt {attempt + 1} failed with status {response.status_code}")
+                logger.warning(f"Response body: {response.text}")
+
+                # If we're out of retries, log the final error
+                if attempt == max_retries - 1:
+                    logger.error(f"Device registration failed after {max_retries} attempts")
+                    return False
+
+                # Wait before retrying
+                time.sleep(2)
+
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"Network error during registration (attempt {attempt + 1}): {str(e)}")
+                if attempt == max_retries - 1:
+                    logger.error("Max retries reached, giving up")
                     return False
                 time.sleep(2)
-            except requests.exceptions.RequestException:
-                if attempt == 2:
-                    return False
-                time.sleep(2)
+
+        return False
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error during device registration: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.status_code} - {e.response.text}")
         return False
     except Exception as e:
         logger.error(f"Unexpected error in device registration: {str(e)}", exc_info=True)
         return False
 
-
 # Start background tasks
 socketio.start_background_task(tail_sensor_data)
 
+# Start device registration scheduler (10 second interval for responsive uploads)
 device_scheduler.add_job(
     register_device_periodically,
     'interval',
@@ -435,34 +744,216 @@ device_scheduler.add_job(
     id='device_registration',
     replace_existing=True
 )
+device_scheduler.add_job(
+    lambda: cleanup_old_minutes(Config.CAPTURE_KEEP_MINUTES),
+    'interval',
+    minutes=10,
+    id='capture_cleanup',
+    replace_existing=True
+)
 device_scheduler.start()
 
+# Load registration info if available
 device_manager.load_registration_info()
+cleanup_old_minutes(Config.CAPTURE_KEEP_MINUTES)
+
+# Start device heartbeat if registered
 if device_manager.registered:
     try:
         device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
+        logger.info("Started device heartbeat")
     except Exception as e:
         logger.error(f"Failed to start device heartbeat: {e}")
 
+# WiFi credentials storage file
+WIFI_CREDENTIALS_FILE = os.path.join(Config.CONFIG_DIR, 'wifi_credentials.json')
+WIFI_CONFIGURED_FILE = os.path.join(Config.CONFIG_DIR, 'wifi_configured.flag')
 
-# ============================================================================
+def load_wifi_credentials():
+    """Load saved WiFi credentials."""
+    try:
+        if os.path.exists(WIFI_CREDENTIALS_FILE):
+            with open(WIFI_CREDENTIALS_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading WiFi credentials: {e}")
+    return {}
+
+def save_wifi_credentials(ssid, password):
+    """Save WiFi credentials for future use."""
+    try:
+        os.makedirs(Config.CONFIG_DIR, exist_ok=True)
+        creds = load_wifi_credentials()
+        creds[ssid] = password
+        creds['_active_ssid'] = ssid  # Track the active network
+        with open(WIFI_CREDENTIALS_FILE, 'w') as f:
+            json.dump(creds, f)
+        # Mark WiFi as configured
+        with open(WIFI_CONFIGURED_FILE, 'w') as f:
+            f.write(ssid)
+        logger.info(f"WiFi credentials saved for {ssid}")
+    except Exception as e:
+        logger.error(f"Error saving WiFi credentials: {e}")
+
+def is_wifi_configured():
+    """Check if WiFi has been explicitly configured by user."""
+    return os.path.exists(WIFI_CONFIGURED_FILE)
+
+def get_configured_ssid():
+    """Get the SSID of the configured WiFi network."""
+    try:
+        if os.path.exists(WIFI_CONFIGURED_FILE):
+            with open(WIFI_CONFIGURED_FILE, 'r') as f:
+                return f.read().strip()
+    except Exception:
+        pass
+    return None
+
+def clear_wifi_configuration():
+    """Clear WiFi configuration (disconnect from network)."""
+    try:
+        if os.path.exists(WIFI_CONFIGURED_FILE):
+            os.remove(WIFI_CONFIGURED_FILE)
+            logger.info("WiFi configuration cleared")
+    except Exception as e:
+        logger.error(f"Error clearing WiFi configuration: {e}")
+
+def check_wifi_connected():
+    """Check if WiFi is connected AND configured."""
+    # First check if WiFi has been explicitly configured
+    if not is_wifi_configured():
+        return False
+
+    try:
+        # Try to connect to Google DNS to check internet connectivity
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(2)
+        s.connect(("8.8.8.8", 80))
+        s.close()
+        return True
+    except Exception:
+        return False
+
 # Routes
-# ============================================================================
-
 @app.route('/')
 def index():
-    """Serve the appropriate page based on authentication status."""
+    """Serve the appropriate page based on authentication and registration status."""
+    # If already authenticated, go to status
     if 'username' in session:
         return redirect(url_for('status'))
-    return redirect(url_for('login'))
 
+    # Check if WiFi is connected
+    wifi_connected = check_wifi_connected()
+
+    # If WiFi not connected or not logged in, show setup page
+    return redirect(url_for('setup'))
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Thoth Device</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+            .ok { background-color: #d4edda; color: #155724; }
+            .error { background-color: #f8d7da; color: #721c24; }
+            button { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; }
+            .start { background-color: #28a745; color: white; }
+            .stop { background-color: #dc3545; color: white; }
+            .config { background-color: #007bff; color: white; }
+        </style>
+    </head>
+    <body>
+        <h1>Thoth Research Device</h1>
+        <div id="status" class="status">Loading...</div>
+
+        <h2>Controls</h2>
+        <button class="start" onclick="startCollection()">Start Collection</button>
+        <button class="stop" onclick="stopCollection()">Stop Collection</button>
+        <button class="config" onclick="uploadData()">Upload Data</button>
+
+        <h2>Live Data</h2>
+        <div id="live-data">
+            <p>Pitch: <span id="pitch">--</span>°</p>
+            <p>Roll: <span id="roll">--</span>°</p>
+            <p>Yaw: <span id="yaw">--</span>°</p>
+        </div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+        <script>
+            const socket = io();
+
+            // Update status
+            function updateStatus() {
+                fetch('/health')
+                    .then(r => r.json())
+                    .then(data => {
+                        const statusDiv = document.getElementById('status');
+                        statusDiv.className = 'status ' + (data.status === 'ok' ? 'ok' : 'error');
+                        statusDiv.innerHTML = `
+                            Status: ${data.status}<br>
+                            Battery: ${data.battery_level || 'N/A'}%<br>
+                            WiFi: ${data.wifi_connected ? 'Connected' : 'Disconnected'}<br>
+                            Collection: ${data.collection_active ? 'Active' : 'Inactive'}
+                        `;
+                    });
+            }
+
+            // Control functions
+            function startCollection() {
+                fetch('/control/start', {method: 'POST'})
+                    .then(r => r.json())
+                    .then(data => {
+                        alert('Collection started: ' + data.status);
+                        updateStatus();
+                    });
+            }
+
+            function stopCollection() {
+                fetch('/control/stop', {method: 'POST'})
+                    .then(r => r.json())
+                    .then(data => {
+                        alert('Collection stopped: ' + data.status);
+                        updateStatus();
+                    });
+            }
+
+            function uploadData() {
+                fetch('/upload', {method: 'POST'})
+                    .then(r => r.json())
+                    .then(data => {
+                        alert(`Upload result: ${data.success ? 'Success' : 'Failed'}`);
+                    });
+            }
+
+            // WebSocket events
+            socket.on('connect', function() {
+                console.log('Connected to Thoth device');
+            });
+
+            socket.on('imu_data', function(data) {
+                if (data.imu) {
+                    document.getElementById('pitch').textContent = data.imu.pitch.toFixed(1);
+                    document.getElementById('roll').textContent = data.imu.roll.toFixed(1);
+                    document.getElementById('yaw').textContent = data.imu.yaw.toFixed(1);
+                }
+            });
+
+            // Update status every 5 seconds
+            updateStatus();
+            setInterval(updateStatus, 5000);
+        </script>
+    </body>
+    </html>
+    """
+    return render_template_string(html)
 
 @app.route('/health')
 def health():
     """Get system health status."""
     status = get_system_status()
     return jsonify(status.to_dict())
-
 
 @app.route('/data/current')
 def get_current_data():
@@ -479,39 +970,77 @@ def get_current_data():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 @app.route('/data/history')
 def get_data_history():
     """Get historical sensor data with pagination."""
     try:
         limit = request.args.get('limit', 100, type=int)
         offset = request.args.get('offset', 0, type=int)
+
         if not os.path.exists(Config.SENSOR_DATA_FILE):
             return jsonify([])
+
         with open(Config.SENSOR_DATA_FILE, 'r') as f:
             lines = f.readlines()
+
+        # Apply pagination
         start_idx = max(0, len(lines) - offset - limit)
         end_idx = len(lines) - offset
+
         data = []
         for line in lines[start_idx:end_idx]:
             try:
                 data.append(json.loads(line.strip()))
             except json.JSONDecodeError:
                 continue
+
         return jsonify(data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/control/start', methods=['POST'])
+def start_collection():
+    """Start sensor data collection."""
+    try:
+        result = subprocess.run(
+            ["sudo", "systemctl", "start", "thoth-collector"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            return jsonify({"status": "started", "message": "Data collection started"})
+        else:
+            return jsonify({"status": "error", "message": result.stderr}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/control/stop', methods=['POST'])
+def stop_collection():
+    """Stop sensor data collection."""
+    try:
+        result = subprocess.run(
+            ["sudo", "systemctl", "stop", "thoth-collector"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            return jsonify({"status": "stopped", "message": "Data collection stopped"})
+        else:
+            return jsonify({"status": "error", "message": result.stderr}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/upload', methods=['POST'])
 def upload_data():
     """Upload collected data to remote server."""
     try:
         upload_url = request.json.get('upload_url') if request.json else Config.UPLOAD_URL
+
         if not upload_url:
             return jsonify({"success": False, "error": "No upload URL configured"}), 400
+
         if not os.path.exists(Config.SENSOR_DATA_FILE):
             return jsonify({"success": False, "error": "No data file found"}), 404
+
+        # Read all data
         data = []
         with open(Config.SENSOR_DATA_FILE, 'r') as f:
             for line in f:
@@ -519,76 +1048,202 @@ def upload_data():
                     data.append(json.loads(line.strip()))
                 except json.JSONDecodeError:
                     continue
+
         if not data:
             return jsonify({"success": False, "error": "No data to upload"}), 400
+
+        # Upload data
         headers = {'Content-Type': 'application/json'}
         if Config.API_KEY:
             headers['Authorization'] = f'Bearer {Config.API_KEY}'
+
         response = requests.post(upload_url, json=data, headers=headers, timeout=30)
+
         if response.status_code == 200:
-            return jsonify({"success": True, "uploaded": len(data), "message": "Data uploaded successfully"})
+            return jsonify({
+                "success": True,
+                "uploaded": len(data),
+                "message": "Data uploaded successfully"
+            })
         else:
-            return jsonify({"success": False, "error": f"Upload failed: {response.status_code}"}), 500
+            return jsonify({
+                "success": False,
+                "error": f"Upload failed: {response.status_code}"
+            }), 500
+
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
-
 
 @app.route('/config/button', methods=['GET', 'POST'])
 def button_config():
     """Get or set button configuration."""
     if request.method == 'GET':
         return jsonify(BUTTON_ACTIONS)
+
     try:
         new_config = request.json
         BUTTON_ACTIONS.update(new_config)
+
+        # Save to config file (simple approach)
         config_file = os.path.join(os.path.dirname(__file__), 'button_config.json')
         with open(config_file, 'w') as f:
             json.dump(BUTTON_ACTIONS, f)
+
         return jsonify({"updated": BUTTON_ACTIONS, "message": "Button configuration updated"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ============================================================================
+# CAPTIVE PORTAL DETECTION ROUTES
+# These routes handle automatic captive portal detection for various devices
+# ============================================================================
 
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    """Handle user login and device registration."""
+@app.route('/generate_204')
+@app.route('/gen_204')
+def android_captive_portal():
+    """Android captive portal detection - redirect to setup."""
+    return redirect(url_for('setup'))
+
+@app.route('/hotspot-detect.html')
+@app.route('/library/test/success.html')
+def apple_captive_portal():
+    """Apple/iOS captive portal detection - redirect to setup."""
+    return redirect(url_for('setup'))
+
+@app.route('/connecttest.txt')
+@app.route('/ncsi.txt')
+def windows_captive_portal():
+    """Windows captive portal detection - redirect to setup."""
+    return redirect(url_for('setup'))
+
+@app.route('/success.txt')
+def firefox_captive_portal():
+    """Firefox captive portal detection - redirect to setup."""
+    return redirect(url_for('setup'))
+
+@app.route('/canonical.html')
+def ubuntu_captive_portal():
+    """Ubuntu captive portal detection - redirect to setup."""
+    return redirect(url_for('setup'))
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def catch_all(path):
+    """Catch-all route for captive portal - redirect unknown paths to setup."""
+    # Only redirect if in hotspot mode (no WiFi configured)
+    config_flag = os.path.join(Config.DATA_DIR, 'config', 'wifi_configured.flag')
+    if not os.path.exists(config_flag):
+        # In hotspot/setup mode - redirect to setup
+        if path not in ['setup', 'login', 'status', 'static', 'api', 'wifi']:
+            if not path.startswith(('static/', 'api/', 'wifi/')):
+                return redirect(url_for('setup'))
+    # Otherwise, return 404 for unknown paths
+    return abort(404)
+
+@app.route('/setup')
+def setup():
+    """Show the setup page for WiFi and login."""
+    # If already authenticated, go to status
     if 'username' in session:
         return redirect(url_for('status'))
-    if request.method == 'GET':
-        return render_template('login.html', next=request.args.get('next', ''))
-    try:
-        username = request.form.get('username')
-        password = request.form.get('password')
-        next_page = request.form.get('next', '')
-        if not username or not password:
-            flash('Username and password are required', 'error')
-            return redirect(url_for('login', next=next_page))
-        try:
-            result = auth_manager.login(username, password)
-            if result.get('success'):
-                session['user_id'] = result['user'].get('user_id')
-                session['username'] = username
-                session['token'] = result['token']
-                Config.USER_AUTH_TOKEN = result['token']
-                success, msg = device_manager.register_device(result['token'])
-                if success:
-                    device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
-                else:
-                    logger.warning(f"Device registration failed after login: {msg}")
-                return render_template('login_success.html',
-                                     username=username,
-                                     access_token=result['token'],
-                                     user_info=result['user'])
-            else:
-                flash('Invalid username or password', 'error')
-        except Exception as e:
-            logger.error(f"Login error: {str(e)}", exc_info=True)
-            flash(f'Login failed: {str(e)}', 'error')
-    except Exception as e:
-        logger.error(f"Login error: {str(e)}", exc_info=True)
-        flash('An error occurred. Please try again.', 'error')
-    return redirect(url_for('login'))
 
+    # Check if user wants to change WiFi
+    change_wifi = request.args.get('change_wifi') == '1'
+    if change_wifi:
+        clear_wifi_configuration()
+
+    wifi_connected = check_wifi_connected()
+    available_networks = scan_wifi_networks()
+
+    # Get current SSID from saved configuration
+    current_ssid = get_configured_ssid()
+
+    return render_template('setup.html',
+                         wifi_connected=wifi_connected,
+                         available_networks=available_networks,
+                         current_ssid=current_ssid,
+                         version=Config.VERSION)
+
+@app.route('/api/wifi/scan', methods=['GET'])
+def api_wifi_scan():
+    """Scan for available WiFi networks."""
+    try:
+        networks = scan_wifi_networks()
+        return jsonify({'status': 'success', 'networks': networks})
+    except Exception as e:
+        logger.error(f"Error scanning WiFi: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'error': str(e), 'networks': []}), 500
+
+def connect_wifi_raspberry_pi(ssid: str, password: str) -> tuple:
+    """Connect to WiFi on Raspberry Pi using the connect-wifi.sh script."""
+    try:
+        script_path = os.path.join(os.path.dirname(__file__), '..', '..', 'setup', 'connect-wifi.sh')
+        if os.path.exists(script_path):
+            result = subprocess.run(
+                ['sudo', script_path, ssid, password],
+                capture_output=True, text=True, timeout=60
+            )
+            if result.returncode == 0:
+                # Extract IP from output
+                ip_address = None
+                for line in result.stdout.split('\n'):
+                    if 'IP Address:' in line:
+                        ip_address = line.split(':')[1].strip()
+                return True, ip_address
+            else:
+                return False, result.stderr
+        else:
+            return False, "connect-wifi.sh not found"
+    except Exception as e:
+        return False, str(e)
+
+@app.route('/api/wifi/connect', methods=['POST'])
+def api_wifi_connect():
+    """Connect to a WiFi network and save credentials."""
+    try:
+        data = request.get_json() or request.form
+        ssid = data.get('ssid')
+        password = data.get('password', '')
+
+        if not ssid:
+            return jsonify({'status': 'error', 'error': 'SSID is required'}), 400
+
+        logger.info(f"Attempting to connect to WiFi: {ssid}")
+
+        # Save credentials for future use
+        save_wifi_credentials(ssid, password)
+
+        # Store in session
+        session['wifi_ssid'] = ssid
+
+        # On Raspberry Pi, use the connect script
+        if platform.system() == 'Linux' and os.path.exists('/etc/hostapd'):
+            success, result = connect_wifi_raspberry_pi(ssid, password)
+            if success:
+                ip_address = result
+                return jsonify({
+                    'status': 'success',
+                    'message': f'Connected to {ssid}',
+                    'wifi_connected': True,
+                    'ip_address': ip_address
+                })
+            else:
+                return jsonify({
+                    'status': 'error',
+                    'error': f'Failed to connect: {result}'
+                }), 500
+
+        # On Windows/Mac dev, simulate success
+        return jsonify({
+            'status': 'success',
+            'message': f'WiFi credentials saved for {ssid}',
+            'wifi_connected': True,
+            'ip_address': '127.0.0.1'  # Dev mode
+        })
+
+    except Exception as e:
+        logger.error(f"Error connecting to WiFi: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'error': str(e)}), 500
 
 @app.route('/api/setup/login', methods=['POST'])
 def api_setup_login():
@@ -597,559 +1252,401 @@ def api_setup_login():
         data = request.get_json() or request.form
         username = data.get('username')
         password = data.get('user_password')
+
         if not username or not password:
             return jsonify({'status': 'error', 'error': 'Username and password are required'}), 400
+
+        # Authenticate with the Brain server
         result = auth_manager.login(username, password)
+
         if result.get('success'):
+            # Store user session
             session['user_id'] = result['user'].get('user_id')
             session['username'] = username
             session['token'] = result['token']
+
+            # Store token globally for device registration
             Config.USER_AUTH_TOKEN = result['token']
+
+            # Register the device
             success, message = device_manager.register_device(result['token'])
+
             if success:
                 device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
+                logger.info(f"Login successful for user: {username}, device registered")
+            else:
+                logger.warning(f"Device registration failed: {message}")
+
             return jsonify({
                 'status': 'success',
                 'message': 'Login successful',
-                'redirect': url_for('info_page')
+                'redirect': url_for('status')
             })
         else:
             return jsonify({'status': 'error', 'error': 'Invalid username or password'}), 401
+
     except Exception as e:
         logger.error(f"Login error: {e}", exc_info=True)
         return jsonify({'status': 'error', 'error': str(e)}), 500
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Handle user login and device registration."""
+    # Redirect to status if already logged in
+    if 'username' in session:
+        return redirect(url_for('status'))
+
+    if request.method == 'GET':
+        return render_template('login.html', next=request.args.get('next', ''))
+
+    # Handle POST request
+    try:
+        username = request.form.get('username')
+        password = request.form.get('password')
+        next_page = request.form.get('next', '')
+
+        if not username or not password:
+            flash('Username and password are required', 'error')
+            return redirect(url_for('login', next=next_page))
+
+        # Authenticate with the Brain server
+        try:
+            result = auth_manager.login(username, password)
+
+            if result.get('success'):
+                # Store user session
+                session['user_id'] = result['user'].get('user_id')
+                session['username'] = username
+                session['token'] = result['token']
+
+                # Store token globally for device registration
+                Config.USER_AUTH_TOKEN = result['token']
+
+                logger.info(f"Login successful for user: {username}")
+                logger.info("Device registration will now use this user's token")
+
+                # Show the token on success page
+                return render_template('login_success.html',
+                                     username=username,
+                                     access_token=result['token'],
+                                     user_info=result['user'])
+            else:
+                flash('Invalid username or password', 'error')
+
+        except Exception as e:
+            logger.error(f"Login error: {str(e)}", exc_info=True)
+            flash(f'Login failed: {str(e)}', 'error')
+
+    except Exception as e:
+        logger.error(f"Login error: {str(e)}", exc_info=True)
+        flash('An error occurred. Please try again.', 'error')
+
+    return redirect(url_for('login'))
 
 @app.route('/status')
 def status():
     """Display the device status page."""
-    return redirect(url_for('info_page'))
-
-
-# ============================================================================
-# Thoth Web App Pages: Info, Media, Models
-# ============================================================================
-
-def get_available_sensors():
-    """Get list of available sensors on this device."""
-    sensors = detect_sensors()
-
-    # Check for microphone
-    try:
-        import pyaudio
-        p = pyaudio.PyAudio()
-        mic_available = p.get_device_count() > 0
-        p.terminate()
-    except Exception:
-        mic_available = False
-    sensors.append({
-        'sensor_type': 'microphone',
-        'name': 'Microphone',
-        'available': mic_available,
-        'error': None if mic_available else 'Microphone not detected'
-    })
-    return sensors
-
-
-def _record_sensehat_imu(recording_id: str, duration_seconds: float):
-    """Record Sense HAT IMU samples to a JSONL file."""
-    global collection_active
-    output_path = None
-    try:
-        ensure_system_dist_packages()
-        from sense_hat import SenseHat
-
-        sense = SenseHat()
-        os.makedirs(Config.DATA_DIR, exist_ok=True)
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.join(Config.DATA_DIR, f"sensehat_imu_{timestamp}.jsonl")
-        sample_interval = 1.0 / max(float(SENSOR_CONFIG.get("sample_rate", 1.0)), 1.0)
-        deadline = time.time() + duration_seconds
-        samples = 0
-        collection_active = True
-        sensor_recordings[recording_id].update({
-            "status": "recording",
-            "filename": os.path.basename(output_path),
-            "path": output_path,
-        })
-        with open(output_path, "w") as f:
-            while time.time() < deadline:
-                sample = {
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "orientation_degrees": sense.get_orientation_degrees(),
-                    "accelerometer_raw": sense.get_accelerometer_raw(),
-                    "gyroscope_raw": sense.get_gyroscope_raw(),
-                    "compass_raw": sense.get_compass_raw(),
-                }
-                f.write(json.dumps(sample) + "\n")
-                samples += 1
-                sensor_recordings[recording_id]["samples"] = samples
-                time.sleep(sample_interval)
-        sensor_recordings[recording_id].update({
-            "status": "completed",
-            "completed_at": datetime.utcnow().isoformat(),
-            "samples": samples,
-        })
-    except Exception as e:
-        logger.error("Sense HAT recording failed: %s", e, exc_info=True)
-        sensor_recordings.setdefault(recording_id, {}).update({
-            "status": "error",
-            "error": str(e),
-            "path": output_path,
-            "completed_at": datetime.utcnow().isoformat(),
-        })
-    finally:
-        collection_active = any(
-            rec.get("status") == "recording"
-            for rec in sensor_recordings.values()
-        )
-
-
-def _record_csi(recording_id: str, duration_seconds: float):
-    """Record ESP32 CSI data using WS/live/collect_csi.py."""
-    global collection_active
-    try:
-        os.makedirs(Config.DATA_DIR, exist_ok=True)
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        output_base = os.path.join(Config.DATA_DIR, f"csi_{timestamp}.csv")
-        script_path = os.path.join(Config.BASE_DIR, "WS", "live", "collect_csi.py")
-        command = [
-            sys.executable,
-            script_path,
-            "--rx-port",
-            "auto",
-            "--out",
-            output_base,
-            "--duration",
-            str(duration_seconds),
-            "--times",
-            "1",
-        ]
-        collection_active = True
-        sensor_recordings[recording_id].update({
-            "status": "recording",
-            "filename": os.path.basename(output_base).replace(".csv", "_1.csv"),
-            "path": output_base.replace(".csv", "_1.csv"),
-        })
-        proc = subprocess.run(command, capture_output=True, text=True, timeout=duration_seconds + 20)
-        sensor_recordings[recording_id].update({
-            "status": "completed" if proc.returncode == 0 else "error",
-            "completed_at": datetime.utcnow().isoformat(),
-            "returncode": proc.returncode,
-            "stdout": proc.stdout[-4000:],
-            "stderr": proc.stderr[-4000:],
-        })
-        if proc.returncode != 0:
-            sensor_recordings[recording_id]["error"] = proc.stderr or proc.stdout or "CSI collector failed"
-    except Exception as e:
-        logger.error("CSI recording failed: %s", e, exc_info=True)
-        sensor_recordings.setdefault(recording_id, {}).update({
-            "status": "error",
-            "error": str(e),
-            "completed_at": datetime.utcnow().isoformat(),
-        })
-    finally:
-        collection_active = any(
-            rec.get("status") == "recording"
-            for rec in sensor_recordings.values()
-        )
-
-
-def get_media_files():
-    """Get list of media files in the data directory."""
-    media_files = []
-    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
-    video_extensions = {'.mp4', '.avi', '.mov', '.webm', '.mkv'}
-    audio_extensions = {'.wav', '.mp3', '.m4a', '.aac', '.ogg', '.flac'}
-    media_extensions = image_extensions | video_extensions | audio_extensions
-    labels_dir = os.path.join(Config.DATA_DIR, 'labels')
-    cloud_status = {}
-    cloud_status_file = os.path.join(Config.DATA_DIR, 'cloud_status.json')
-    if os.path.exists(cloud_status_file):
-        try:
-            with open(cloud_status_file, 'r') as f:
-                cloud_status = json.load(f)
-        except:
-            pass
-    try:
-        data_dir = Config.DATA_DIR
-        if os.path.exists(data_dir):
-            for filename in os.listdir(data_dir):
-                ext = os.path.splitext(filename)[1].lower()
-                if ext in media_extensions:
-                    file_path = os.path.join(data_dir, filename)
-                    stat = os.stat(file_path)
-                    if ext in image_extensions:
-                        file_type = 'image'
-                    elif ext in video_extensions:
-                        file_type = 'video'
-                    elif ext in audio_extensions:
-                        file_type = 'audio'
-                    else:
-                        file_type = 'other'
-                    size = stat.st_size
-                    if size < 1024:
-                        size_formatted = f"{size} B"
-                    elif size < 1024 * 1024:
-                        size_formatted = f"{size / 1024:.1f} KB"
-                    else:
-                        size_formatted = f"{size / (1024 * 1024):.1f} MB"
-                    labels = []
-                    base_name = os.path.splitext(filename)[0]
-                    labels_file = os.path.join(labels_dir, f"{base_name}.json")
-                    if os.path.exists(labels_file):
-                        try:
-                            with open(labels_file, 'r') as f:
-                                label_data = json.load(f)
-                                if isinstance(label_data, dict):
-                                    labels = label_data.get('labels', [])
-                                elif isinstance(label_data, list):
-                                    labels = label_data
-                        except:
-                            pass
-                    media_files.append({
-                        'filename': filename,
-                        'type': file_type,
-                        'size': size,
-                        'size_formatted': size_formatted,
-                        'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                        'on_cloud': filename in cloud_status,
-                        'labels': labels
-                    })
-        media_files.sort(key=lambda x: x['modified'], reverse=True)
-    except Exception as e:
-        logger.error(f"Error getting media files: {e}")
-    return media_files
-
-
-@app.route('/info')
-def info_page():
-    """Display the device info page."""
+    # Check if user is logged in
     if 'username' not in session:
-        return redirect(url_for('login', next=url_for('info_page')))
+        return redirect(url_for('login', next=url_for('status')))
+
     try:
+        # Get system status
         system_status = get_system_status()
+
+        # Get device information
         device_info = device_manager.get_device_info()
-        hardware_info = get_device_info()
-        sensors = get_available_sensors()
-        return render_template('info.html',
-                            active_page='info',
+
+        # Get disk usage
+        disk_usage = psutil.disk_usage('/')
+
+        # Get CPU temperature (Linux only)
+        cpu_temp = None
+        if platform.system() != 'Windows':
+            try:
+                with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
+                    cpu_temp = float(f.read().strip()) / 1000.0  # Convert millidegrees to degrees
+            except Exception:
+                pass
+
+        # Get IP address
+        ip_address = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 80))
+            ip_address = s.getsockname()[0]
+            s.close()
+        except Exception as e:
+            logger.error(f"Error getting IP address: {e}")
+
+        # Get list of available WiFi networks
+        available_networks = scan_wifi_networks()
+        capture_overview = get_capture_overview()
+        sensors = detect_sensor_inventory()
+
+        return render_template('status.html',
                             system_status=system_status,
                             device_info=device_info,
-                            hardware_info=hardware_info,
+                            disk_usage=disk_usage,
+                            cpu_temp=cpu_temp,
+                            ip_address=ip_address,
+                            username=session.get('username'),
+                            available_networks=available_networks,
+                            capture_overview=capture_overview,
                             sensors=sensors)
+
     except Exception as e:
-        logger.error(f"Error in info page: {str(e)}", exc_info=True)
-        flash('An error occurred while loading the info page.', 'error')
-        return redirect(url_for('login'))
+        logger.error(f"Error in status route: {str(e)}", exc_info=True)
+        flash('An error occurred while loading the status page.', 'error')
+        return redirect(url_for('index'))
 
-
-@app.route('/media')
-def media_page():
-    """Display the media gallery page."""
+@app.route('/captures')
+def captures():
+    """Show the minute capture browser."""
     if 'username' not in session:
-        return redirect(url_for('login', next=url_for('media_page')))
-    try:
-        media_files = get_media_files()
-        return render_template('media.html',
-                            active_page='media',
-                            media_files=media_files)
-    except Exception as e:
-        logger.error(f"Error in media page: {str(e)}", exc_info=True)
-        flash('An error occurred while loading the media page.', 'error')
-        return redirect(url_for('info_page'))
+        return redirect(url_for('login', next=url_for('captures')))
+
+    minutes = list_minutes()
+    active = current_minute()
+    return render_template(
+        'captures.html',
+        minutes=minutes,
+        active_minute=active.name if active else None,
+        username=session.get('username'),
+    )
 
 
-@app.route('/models')
-def models_page():
-    """Display the deployed models page."""
+@app.route('/captures/<minute>')
+def capture_detail(minute):
+    """Show a single minute capture."""
     if 'username' not in session:
-        return redirect(url_for('login', next=url_for('models_page')))
-    try:
-        _load_deployed_models()
-        models = []
-        total_inferences = 0
-        for did, info in deployed_models.items():
-            total_inferences += info.get('predictions_count', 0)
-            models.append({
-                'id': did,
-                'name': info.get('model_name', 'Unknown'),
-                'type': info.get('model_type', 'unknown'),
-                'status': info.get('status', 'ready'),
-                'description': f"Type: {info.get('model_type', 'unknown')}",
-                'deployed_at': info.get('deployed_at', ''),
-                'predictions_count': info.get('predictions_count', 0),
-                'last_prediction': info.get('last_prediction'),
-                'class_names': info.get('config', {}).get('class_names', []),
-                'config': info.get('config', {}),
-            })
-        return render_template('models.html',
-                               active_page='models',
-                               models=models,
-                               total_inferences=total_inferences)
-    except Exception as e:
-        logger.error(f"Error in models page: {str(e)}", exc_info=True)
-        flash('An error occurred while loading the models page.', 'error')
-        return redirect(url_for('info_page'))
+        return redirect(url_for('login', next=url_for('capture_detail', minute=minute)))
+
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        abort(404, description='Minute folder not found')
+
+    files = capture_files(minute_dir)
+    detail = minute_summary(minute_dir)
+    video_preview = f"/api/captures/{minute}/file/video" if files.get("video") else None
+    radar_preview = preview_text(files.get("radar"), 12000)
+    csi_preview = preview_text(files.get("csi_timestamped") or files.get("csi_csv"), 12000)
+    serial_preview = preview_text(files.get("csi_serial"), 12000)
+
+    return render_template(
+        'capture_detail.html',
+        minute=minute_dir.name,
+        capture=minute_dir,
+        minute_info=detail,
+        files=files,
+        video_url=video_preview,
+        radar_preview=radar_preview,
+        csi_preview=csi_preview,
+        serial_preview=serial_preview,
+        username=session.get('username'),
+        active_minute=current_minute().name if current_minute() else None,
+    )
 
 
-# ============================================================================
-# Media API Endpoints
-# ============================================================================
-
-@app.route('/api/media/list', methods=['GET'])
-def api_media_list():
-    """Get list of media files."""
-    try:
-        media_files = get_media_files()
-        return jsonify({'status': 'success', 'files': media_files})
-    except Exception as e:
-        return jsonify({'status': 'error', 'error': str(e)}), 500
-
-
-@app.route('/api/media/serve/<filename>')
-def api_media_serve(filename):
-    """Serve a media file."""
-    try:
-        if '..' in filename or '/' in filename or '\\' in filename:
-            return jsonify({'status': 'error', 'error': 'Invalid filename'}), 400
-        return send_from_directory(Config.DATA_DIR, filename)
-    except Exception as e:
-        return jsonify({'status': 'error', 'error': str(e)}), 404
-
-
-@app.route('/api/media/delete/<filename>', methods=['DELETE'])
-def api_media_delete(filename):
-    """Delete a media file locally and from cloud."""
+@app.route('/captures/<minute>/download')
+def download_capture_minute(minute):
+    """Download all files for a minute as a zip archive."""
     if 'username' not in session:
-        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
-    try:
-        if '..' in filename or '/' in filename or '\\' in filename:
-            return jsonify({'status': 'error', 'error': 'Invalid filename'}), 400
-        file_path = os.path.join(Config.DATA_DIR, filename)
-        cloud_deleted = False
-        cloud_status_file = os.path.join(Config.DATA_DIR, 'cloud_status.json')
-        cloud_status = {}
-        if os.path.exists(cloud_status_file):
-            try:
-                with open(cloud_status_file, 'r') as f:
-                    cloud_status = json.load(f)
-            except:
-                pass
-        if filename in cloud_status:
-            file_id = cloud_status[filename].get('file_id')
-            if file_id:
-                auth_token = session.get('token') or getattr(Config, 'USER_AUTH_TOKEN', None)
-                if auth_token:
-                    try:
-                        headers = {'Authorization': f'Bearer {auth_token}'}
-                        response = requests.delete(
-                            f"{Config.BRAIN_SERVER_URL}/api/file/{file_id}",
-                            headers=headers, timeout=30
-                        )
-                        if response.status_code in (200, 204):
-                            cloud_deleted = True
-                    except Exception as e:
-                        logger.warning(f"Error deleting from cloud: {e}")
-            del cloud_status[filename]
-            with open(cloud_status_file, 'w') as f:
-                json.dump(cloud_status, f, indent=2)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            labels_file = os.path.join(Config.DATA_DIR, 'labels', os.path.splitext(filename)[0] + '.json')
-            if os.path.exists(labels_file):
-                os.remove(labels_file)
-            msg = f'Deleted {filename}'
-            if cloud_deleted:
-                msg += ' (also removed from cloud)'
-            return jsonify({'status': 'success', 'message': msg})
-        else:
-            return jsonify({'status': 'error', 'error': 'File not found'}), 404
-    except Exception as e:
-        return jsonify({'status': 'error', 'error': str(e)}), 500
+        return redirect(url_for('login', next=url_for('captures')))
+
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        abort(404, description='Minute folder not found')
+
+    zip_path = zip_minute_folder(minute_dir)
+    @after_this_request
+    def cleanup(response):
+        try:
+            if zip_path.exists():
+                zip_path.unlink()
+        except Exception:
+            pass
+        return response
+
+    return send_file(
+        zip_path,
+        as_attachment=True,
+        download_name=f"{minute_dir.name}.zip",
+        mimetype='application/zip',
+        conditional=True,
+    )
 
 
-@app.route('/api/media/upload', methods=['POST'])
-def api_media_upload():
-    """Upload a media file."""
-    if 'username' not in session:
-        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
-    try:
-        if 'file' not in request.files:
-            return jsonify({'status': 'error', 'error': 'No file provided'}), 400
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({'status': 'error', 'error': 'No file selected'}), 400
-        filename = file.filename
-        file_path = os.path.join(Config.DATA_DIR, filename)
-        os.makedirs(Config.DATA_DIR, exist_ok=True)
-        file.save(file_path)
-        return jsonify({'status': 'success', 'filename': filename})
-    except Exception as e:
-        return jsonify({'status': 'error', 'error': str(e)}), 500
+@app.route('/api/captures', methods=['GET'])
+def api_list_captures():
+    """Return the capture minute index."""
+    return jsonify({
+        'status': 'success',
+        'minutes': list_minutes(),
+        'active_minute': current_minute().name if current_minute() else None,
+        'capture_dir': Config.CAPTURE_DATA_DIR,
+        'keep_minutes': Config.CAPTURE_KEEP_MINUTES,
+    })
 
 
-@app.route('/api/media/upload/<filename>', methods=['POST'])
-def api_media_upload_to_cloud(filename):
-    """Upload a specific media file to the cloud."""
-    if 'username' not in session:
-        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
-    try:
-        if '..' in filename or '/' in filename or '\\' in filename:
-            return jsonify({'status': 'error', 'error': 'Invalid filename'}), 400
-        file_path = os.path.join(Config.DATA_DIR, filename)
-        if not os.path.exists(file_path):
-            return jsonify({'status': 'error', 'error': 'File not found'}), 404
-        ext = os.path.splitext(filename)[1].lower()
-        content_types = {
-            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
-            '.gif': 'image/gif', '.mp4': 'video/mp4', '.avi': 'video/avi',
-            '.mov': 'video/quicktime', '.webm': 'video/webm',
-            '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4'
-        }
-        content_type = content_types.get(ext, 'application/octet-stream')
-        auth_token = session.get('token') or getattr(Config, 'USER_AUTH_TOKEN', None)
-        if not auth_token:
-            return jsonify({'status': 'error', 'error': 'Not authenticated.'}), 401
-        device_id = device_manager.device_id if device_manager else None
-        labels = []
-        labels_dir = os.path.join(Config.DATA_DIR, 'labels')
-        base_name = os.path.splitext(filename)[0]
-        labels_file = os.path.join(labels_dir, f"{base_name}.json")
-        if os.path.exists(labels_file):
-            try:
-                with open(labels_file, 'r') as f:
-                    label_data = json.load(f)
-                    if isinstance(label_data, dict):
-                        labels = label_data.get('labels', [])
-                    elif isinstance(label_data, list):
-                        labels = label_data
-            except:
-                pass
-        headers = {'Authorization': f'Bearer {auth_token}'}
-        with open(file_path, 'rb') as f:
-            files = {'file': (filename, f, content_type)}
-            data = {}
-            if device_id:
-                data['device_id'] = device_id
-            if labels:
-                data['labels'] = json.dumps(labels)
-            response = requests.post(
-                f"{Config.BRAIN_SERVER_URL}/api/file/upload-multipart",
-                files=files, data=data, headers=headers, timeout=120
-            )
-        if response.status_code in (200, 201):
-            result = response.json()
-            cloud_status_file = os.path.join(Config.DATA_DIR, 'cloud_status.json')
-            cloud_status = {}
-            if os.path.exists(cloud_status_file):
-                try:
-                    with open(cloud_status_file, 'r') as f:
-                        cloud_status = json.load(f)
-                except:
-                    pass
-            cloud_status[filename] = {
-                'file_id': result.get('file_id'),
-                'uploaded_at': datetime.utcnow().isoformat()
+@app.route('/api/captures/<minute>', methods=['GET'])
+def api_capture_detail(minute):
+    """Return the metadata for a single capture minute."""
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        return jsonify({'status': 'error', 'message': 'Minute folder not found'}), 404
+
+    files = capture_files(minute_dir)
+    detail = minute_summary(minute_dir)
+    detail['files_on_disk'] = {key: str(path) if path else None for key, path in files.items()}
+    return jsonify({'status': 'success', 'capture': detail})
+
+
+@app.route('/api/captures/<minute>/file/<kind>', methods=['GET'])
+def api_capture_file(minute, kind):
+    """Serve an individual capture file."""
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        return jsonify({'status': 'error', 'message': 'Minute folder not found'}), 404
+
+    files = capture_files(minute_dir)
+    mapping = {
+        'video': files.get('video'),
+        'radar': files.get('radar'),
+        'csi_csv': files.get('csi_csv'),
+        'csi_timestamped': files.get('csi_timestamped'),
+        'csi_serial': files.get('csi_serial'),
+        'manifest': files.get('manifest'),
+        'log': files.get('video_log'),
+    }
+    file_path = mapping.get(kind)
+    if not file_path or not file_path.exists():
+        return jsonify({'status': 'error', 'message': f'File {kind} not found'}), 404
+
+    mime = 'application/octet-stream'
+    if file_path.suffix == '.mp4':
+        mime = 'video/mp4'
+    elif file_path.suffix == '.csv':
+        mime = 'text/csv'
+    elif file_path.suffix == '.json':
+        mime = 'application/json'
+    elif file_path.suffix == '.jsonl':
+        mime = 'application/x-ndjson'
+    elif file_path.suffix == '.log':
+        mime = 'text/plain'
+
+    return send_file(file_path, as_attachment=False, mimetype=mime, conditional=True)
+
+
+@app.route('/api/captures/<minute>/upload', methods=['POST'])
+def upload_capture_minute(minute):
+    """Upload all files in a capture minute to Brain."""
+    auth_token = getattr(Config, 'USER_AUTH_TOKEN', None)
+    if not auth_token:
+        return jsonify({'status': 'error', 'message': 'Not authenticated'}), 401
+
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        return jsonify({'status': 'error', 'message': 'Minute folder not found'}), 404
+
+    files = capture_files(minute_dir)
+    uploaded = []
+    errors = []
+    import base64
+
+    for key, path in files.items():
+        if not path or not path.exists():
+            continue
+        try:
+            with open(path, 'rb') as handle:
+                content = base64.b64encode(handle.read()).decode('utf-8')
+            suffix = path.suffix.lower()
+            if suffix == '.mp4':
+                content_type = 'video/mp4'
+            elif suffix == '.csv':
+                content_type = 'text/csv'
+            elif suffix == '.json':
+                content_type = 'application/json'
+            elif suffix == '.jsonl':
+                content_type = 'application/x-ndjson'
+            else:
+                content_type = 'application/octet-stream'
+            headers = {
+                'Authorization': f'Bearer {auth_token}',
+                'Content-Type': 'application/json',
             }
-            with open(cloud_status_file, 'w') as f:
-                json.dump(cloud_status, f, indent=2)
-            return jsonify({'status': 'success', 'message': f'Uploaded {filename}', 'file_id': result.get('file_id')})
-        elif response.status_code == 401:
-            return jsonify({'status': 'error', 'error': 'Authentication expired.'}), 401
-        else:
-            return jsonify({'status': 'error', 'error': f'Upload failed: {response.status_code}'}), 500
-    except requests.exceptions.Timeout:
-        return jsonify({'status': 'error', 'error': 'Upload timed out.'}), 500
-    except Exception as e:
-        return jsonify({'status': 'error', 'error': str(e)}), 500
+            payload = {
+                'filename': f'{minute_dir.name}/{path.name}',
+                'content': content,
+                'is_base64': True,
+                'device_id': getattr(Config, 'DEVICE_ID', None),
+                'content_type': content_type,
+            }
+            response = requests.post(
+                f"{Config.BRAIN_SERVER_URL}/file/upload",
+                json=payload,
+                headers=headers,
+                timeout=120,
+            )
+            if response.status_code in (200, 201):
+                uploaded.append(path.name)
+            else:
+                errors.append(f"{path.name}: {response.status_code}")
+        except Exception as exc:
+            errors.append(f"{path.name}: {exc}")
+
+    return jsonify({
+        'status': 'success' if not errors else 'partial',
+        'minute': minute_dir.name,
+        'uploaded': uploaded,
+        'errors': errors,
+    })
 
 
-@app.route('/api/media/rename/<filename>', methods=['POST'])
-def api_media_rename(filename):
-    """Rename a media file."""
+@app.route('/captures/live/<kind>')
+def live_capture_stream(kind):
+    """Stream the current live sensor feed."""
     if 'username' not in session:
-        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
-    try:
-        if '..' in filename or '/' in filename or '\\' in filename:
-            return jsonify({'status': 'error', 'error': 'Invalid filename'}), 400
-        data = request.get_json()
-        new_name = data.get('new_name', '').strip()
-        if not new_name:
-            return jsonify({'status': 'error', 'error': 'New name is required'}), 400
-        if '..' in new_name or '/' in new_name or '\\' in new_name:
-            return jsonify({'status': 'error', 'error': 'Invalid new filename'}), 400
-        old_path = os.path.join(Config.DATA_DIR, filename)
-        new_path = os.path.join(Config.DATA_DIR, new_name)
-        if not os.path.exists(old_path):
-            return jsonify({'status': 'error', 'error': 'File not found'}), 404
-        if os.path.exists(new_path):
-            return jsonify({'status': 'error', 'error': 'A file with that name already exists'}), 400
-        os.rename(old_path, new_path)
-        old_labels = get_labels_file_path(filename)
-        if os.path.exists(old_labels):
-            new_labels = get_labels_file_path(new_name)
-            os.rename(old_labels, new_labels)
-        return jsonify({'status': 'success', 'message': f'Renamed to {new_name}', 'new_name': new_name})
-    except Exception as e:
-        return jsonify({'status': 'error', 'error': str(e)}), 500
+        return redirect(url_for('login', next=url_for('captures')))
 
+    kind = kind.lower()
+    if kind == 'video':
+        return Response(
+            stream_with_context(mjpeg_stream()),
+            mimetype='multipart/x-mixed-replace; boundary=frame',
+        )
 
-# ============================================================================
-# Labels API Endpoints
-# ============================================================================
+    minute_dir = current_minute()
+    if not minute_dir:
+        abort(404, description='No live capture minute available')
 
-def get_labels_file_path(media_filename):
-    """Get the path to the labels JSON file for a media file."""
-    labels_dir = os.path.join(Config.DATA_DIR, 'labels')
-    os.makedirs(labels_dir, exist_ok=True)
-    base_name = os.path.splitext(media_filename)[0]
-    return os.path.join(labels_dir, f"{base_name}.json")
+    files = capture_files(minute_dir)
+    if kind == 'csi':
+        path = files.get('csi_timestamped') or files.get('csi_csv') or files.get('csi_serial')
+        if not path:
+            abort(404, description='No CSI stream available')
+        return Response(
+            stream_with_context(sse_tail(path, 'csi')),
+            mimetype='text/event-stream',
+            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+        )
 
+    if kind == 'radar':
+        path = files.get('radar')
+        if not path:
+            abort(404, description='No radar stream available')
+        return Response(
+            stream_with_context(sse_tail(path, 'radar', mode='binary')),
+            mimetype='text/event-stream',
+            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+        )
 
-@app.route('/api/media/labels/<filename>', methods=['GET'])
-def api_get_labels(filename):
-    """Get labels for a media file."""
-    try:
-        if '..' in filename or '/' in filename or '\\' in filename:
-            return jsonify({'status': 'error', 'error': 'Invalid filename'}), 400
-        labels_path = get_labels_file_path(filename)
-        if os.path.exists(labels_path):
-            with open(labels_path, 'r') as f:
-                data = json.load(f)
-            return jsonify({'status': 'success', 'labels': data.get('labels', [])})
-        else:
-            return jsonify({'status': 'success', 'labels': []})
-    except Exception as e:
-        return jsonify({'status': 'error', 'error': str(e)}), 500
-
-
-@app.route('/api/media/labels/<filename>', methods=['POST'])
-def api_save_labels(filename):
-    """Save labels for a media file."""
-    if 'username' not in session:
-        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
-    try:
-        if '..' in filename or '/' in filename or '\\' in filename:
-            return jsonify({'status': 'error', 'error': 'Invalid filename'}), 400
-        data = request.get_json()
-        labels = data.get('labels', [])
-        labels_path = get_labels_file_path(filename)
-        with open(labels_path, 'w') as f:
-            json.dump({
-                'filename': filename,
-                'labels': labels,
-                'updated_at': datetime.utcnow().isoformat(),
-                'updated_by': session.get('username')
-            }, f, indent=2)
-        return jsonify({'status': 'success', 'message': 'Labels saved'})
-    except Exception as e:
-        return jsonify({'status': 'error', 'error': str(e)}), 500
-
+    return jsonify({'status': 'error', 'message': f'Unsupported live stream kind: {kind}'}), 400
 
 @app.route('/logout')
-def do_logout():
+def logout():
     """Log out the current user."""
+    # Update device status
     try:
         device_manager.update_status({
             'online': False,
@@ -1157,129 +1654,86 @@ def do_logout():
         })
     except Exception as e:
         logger.error(f"Error updating device status on logout: {e}")
-    device_manager.stop_heartbeat()
+
+    # Clear the user's auth token so device registration stops
     Config.USER_AUTH_TOKEN = None
-    try:
-        auth_manager.logout()
-    except Exception as e:
-        logger.error(f"Error in auth_manager logout: {e}")
+
     session.clear()
     flash('You have been logged out.', 'info')
     return redirect(url_for('login'))
 
-
-@app.route('/api/device/name', methods=['POST'])
-def api_update_device_name():
-    """Update this device's display name."""
-    if 'username' not in session:
-        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
-    data = request.get_json() or {}
-    new_name = data.get('name', '').strip()
-    if not new_name:
-        return jsonify({'status': 'error', 'error': 'Name is required'}), 400
-    if len(new_name) > 64:
-        return jsonify({'status': 'error', 'error': 'Name too long (max 64 chars)'}), 400
-    device_manager.device_name = new_name
-    config_file = os.path.join(Config.DATA_DIR, 'config', 'device_config.json')
+@app.route('/wifi/config', methods=['POST'])
+def wifi_config():
+    """Handle WiFi configuration from captive portal."""
     try:
-        os.makedirs(os.path.dirname(config_file), exist_ok=True)
-        config_data = {}
-        if os.path.exists(config_file):
-            with open(config_file, 'r') as f:
-                config_data = json.load(f)
-        config_data['device_name'] = new_name
-        with open(config_file, 'w') as f:
-            json.dump(config_data, f, indent=2)
-        if device_manager.registered and device_manager.auth_token:
+        ssid = request.form.get('ssid')
+        password = request.form.get('password')
+        username = request.form.get('username')
+        user_password = request.form.get('user_password')
+
+        if not ssid:
+            return jsonify({"error": "SSID required"}), 400
+
+        # Configure the WiFi network
+        logger.info(f"Configuring WiFi network: {ssid}")
+
+        # In a real implementation, you would configure the WiFi here
+        # For example:
+        # configure_wifi(ssid, password)
+
+        # If user credentials were provided, log in and register the device
+        response_data = {'status': 'success', 'message': f'Successfully connected to {ssid}'}
+
+        if username and user_password:
             try:
-                headers = {
-                    'Authorization': f'Bearer {device_manager.auth_token}',
-                    'Content-Type': 'application/json'
-                }
-                requests.patch(
-                    f"{Config.BRAIN_SERVER_URL}/api/device/{device_manager.device_id}",
-                    json={'device_name': new_name},
-                    headers=headers,
-                    timeout=5
-                )
+                result = auth_manager.login(username, user_password)
+
+                if result.get('success'):
+                    # Register the device with the Brain server
+                    success, message = device_manager.register_device(result['token'])
+
+                    if success:
+                        # Start the heartbeat to send periodic status updates
+                        device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
+                        logger.info("Device registered and heartbeat started")
+
+                        # Store user session
+                        session['user_id'] = result['user'].get('user_id')
+                        session['username'] = username
+                        session['token'] = result['token']
+
+                        # Update device status with initial information
+                        device_manager.update_status({
+                            'online': True,
+                            'wifi_connected': True,
+                            'ip_address': request.remote_addr,
+                            'last_seen': datetime.utcnow().isoformat()
+                        })
+
+                        response_data['redirect'] = url_for('status')
+                    else:
+                        response_data['error'] = f'Device registration failed: {message}'
+                else:
+                    response_data['error'] = 'Invalid username or password'
+
             except Exception as e:
-                logger.warning(f"Could not sync device name to Brain: {e}")
-        return jsonify({'status': 'success', 'name': new_name})
+                logger.error(f"Login/registration error: {str(e)}", exc_info=True)
+                response_data['error'] = 'An error occurred during login. Please try again.'
+
+        return jsonify(response_data)
+
     except Exception as e:
-        return jsonify({'status': 'error', 'error': str(e)}), 500
-
-
-@app.route('/api/sensors/detect', methods=['GET'])
-def api_detect_sensors():
-    """Detect smart sensors attached to this device."""
-    if 'username' not in session:
-        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
-    try:
-        return jsonify({'status': 'success', 'sensors': get_available_sensors()})
-    except Exception as e:
-        logger.error("Sensor detection failed: %s", e, exc_info=True)
-        return jsonify({'status': 'error', 'error': str(e)}), 500
-
-
-@app.route('/api/sensors/recordings', methods=['GET'])
-def api_sensor_recordings():
-    """Return current and recent sensor recording jobs."""
-    if 'username' not in session:
-        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
-    return jsonify({'status': 'success', 'recordings': sensor_recordings})
-
-
-@app.route('/api/sensors/<sensor_type>/record', methods=['POST'])
-def api_record_sensor(sensor_type):
-    """Start a bounded sensor recording job."""
-    if 'username' not in session:
-        return jsonify({'status': 'error', 'error': 'Unauthorized'}), 401
-    data = request.get_json(silent=True) or {}
-    duration_seconds = float(data.get('duration_seconds', 60))
-    duration_seconds = max(1.0, min(duration_seconds, 3600.0))
-    active_same_type = [
-        rec for rec in sensor_recordings.values()
-        if rec.get('sensor_type') == sensor_type and rec.get('status') == 'recording'
-    ]
-    if active_same_type:
-        return jsonify({'status': 'error', 'error': f'{sensor_type} recording already active'}), 409
-
-    recording_id = str(uuid.uuid4())[:8]
-    sensor_recordings[recording_id] = {
-        'recording_id': recording_id,
-        'sensor_type': sensor_type,
-        'duration_seconds': duration_seconds,
-        'status': 'queued',
-        'started_at': datetime.utcnow().isoformat(),
-    }
-
-    if sensor_type in ('sensehat_imu', 'sensehat', 'imu'):
-        thread = threading.Thread(
-            target=_record_sensehat_imu,
-            args=(recording_id, duration_seconds),
-            daemon=True,
-        )
-    elif sensor_type in ('wifi_csi', 'csi'):
-        thread = threading.Thread(
-            target=_record_csi,
-            args=(recording_id, duration_seconds),
-            daemon=True,
-        )
-    else:
-        sensor_recordings[recording_id]['status'] = 'error'
-        sensor_recordings[recording_id]['error'] = f'Unsupported recording sensor: {sensor_type}'
-        return jsonify({'status': 'error', 'error': sensor_recordings[recording_id]['error']}), 400
-
-    thread.start()
-    return jsonify({'status': 'success', 'recording': sensor_recordings[recording_id]})
-
+        logger.error(f"Error configuring WiFi: {str(e)}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/collection/<action>', methods=['POST'])
 def collection_action(action):
     """Start or stop data collection."""
     if 'username' not in session:
         return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+
     global collection_active
+
     if action == 'start':
         collection_active = True
         logger.info('Data collection started')
@@ -1291,38 +1745,54 @@ def collection_action(action):
     else:
         return jsonify({'status': 'error', 'message': 'Invalid action'}), 400
 
-
 @app.route('/api/system/restart-service', methods=['POST'])
 def restart_service():
     """Restart a system service."""
     if 'username' not in session:
         return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+
     data = request.get_json()
     service = data.get('service')
+
     if not service:
         return jsonify({'status': 'error', 'message': 'Service name is required'}), 400
-    try:
-        return jsonify({'status': 'success', 'message': f'Service {service} restart initiated'})
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
 
+    try:
+        logger.info(f'Restarting service: {service}')
+        # In a real implementation, you would use systemd or similar to restart the service
+        # For now, we'll just log it
+        return jsonify({
+            'status': 'success',
+            'message': f'Service {service} restart initiated'
+        })
+    except Exception as e:
+        logger.error(f'Error restarting service {service}: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/system/shutdown', methods=['POST'])
 def system_shutdown():
     """Shut down the device."""
-    if 'username' not in session:
+    if 'username' not in session or session.get('role') != 'admin':
         return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
-    try:
-        return jsonify({'status': 'success', 'message': 'Shutdown initiated.'})
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
 
+    try:
+        logger.info('Initiating system shutdown')
+        # In a real implementation, you would call the system shutdown command
+        # For safety, we'll just log it for now
+        return jsonify({
+            'status': 'success',
+            'message': 'Shutdown initiated. The system will power off shortly.'
+        })
+    except Exception as e:
+        logger.error(f'Error shutting down: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/files/sync', methods=['POST'])
 def sync_files_to_cloud():
     """Sync local data files to the Brain server cloud storage."""
     if 'username' not in session:
         return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+
     try:
         uploaded, skipped, errors = device_manager.sync_files_to_cloud()
         return jsonify({
@@ -1333,451 +1803,20 @@ def sync_files_to_cloud():
             'message': f'Synced {uploaded} files to cloud ({skipped} already synced)'
         })
     except Exception as e:
+        logger.error(f'Error syncing files: {str(e)}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-
-# ============================================================================
-# Camera capture API
-# ============================================================================
-
-@app.route('/api/camera/list', methods=['GET'])
-def camera_list():
-    """List available cameras on the system."""
-    if cv2 is None:
-        return jsonify({'status': 'error', 'message': 'OpenCV is not installed.'}), 503
-    cameras = []
-    for i in range(5):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            backend = cap.getBackendName()
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            cameras.append({
-                'index': i,
-                'name': f'Camera {i}',
-                'backend': backend,
-                'resolution': f'{width}x{height}'
-            })
-            cap.release()
-    return jsonify({'status': 'success', 'cameras': cameras})
-
-
-@app.route('/api/camera/capture', methods=['GET'])
-def camera_capture():
-    """Capture an image from the selected camera and return as base64 data URI."""
-    if cv2 is None:
-        return jsonify({'status': 'error', 'message': 'OpenCV is not installed.'}), 503
-    try:
-        camera_index = int(request.args.get('camera_index', 0))
-        cap = cv2.VideoCapture(camera_index)
-        if not cap.isOpened():
-            return jsonify({'status': 'error', 'message': f'Camera {camera_index} not available.'}), 400
-        for _ in range(10):
-            cap.read()
-        ret, frame = cap.read()
-        cap.release()
-        if not ret or frame is None:
-            return jsonify({'status': 'error', 'message': 'Failed to capture.'}), 500
-        width = int(frame.shape[1])
-        height = int(frame.shape[0])
-        ret, buffer = cv2.imencode('.jpg', frame)
-        if not ret:
-            return jsonify({'status': 'error', 'message': 'Failed to encode image'}), 500
-        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-        filename = f"img_{timestamp}.jpg"
-        file_path = os.path.join(Config.DATA_DIR, filename)
-        os.makedirs(Config.DATA_DIR, exist_ok=True)
-        cv2.imwrite(file_path, frame)
-        img_b64 = base64.b64encode(buffer).decode('utf-8')
-        data_uri = f'data:image/jpeg;base64,{img_b64}'
-        return jsonify({
-            'status': 'success',
-            'image': data_uri,
-            'file': filename,
-            'camera_index': camera_index,
-            'resolution': f'{width}x{height}'
-        })
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-@app.route('/api/camera/record', methods=['POST'])
-def camera_record():
-    """Record a video from the selected camera."""
-    if cv2 is None:
-        return jsonify({'status': 'error', 'message': 'OpenCV is not installed.'}), 503
-    try:
-        data = request.get_json(force=True) or {}
-        duration = int(data.get('duration', 5))
-        camera_index = int(data.get('camera_index', 0))
-        if duration <= 0 or duration > 30:
-            return jsonify({'status': 'error', 'message': 'Duration must be 1-30 seconds'}), 400
-        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-        filename = f"vid_{timestamp}.mp4"
-        file_path = os.path.join(Config.DATA_DIR, filename)
-        os.makedirs(Config.DATA_DIR, exist_ok=True)
-        cap = cv2.VideoCapture(camera_index)
-        if not cap.isOpened():
-            return jsonify({'status': 'error', 'message': f'Camera {camera_index} not available.'}), 400
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 640)
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 480)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        if fps <= 0:
-            fps = 30.0
-        fourcc = cv2.VideoWriter_fourcc(*'avc1')
-        out = cv2.VideoWriter(file_path, fourcc, fps, (width, height))
-        if not out.isOpened():
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(file_path, fourcc, fps, (width, height))
-        frame_count = 0
-        start_time = time.time()
-        while time.time() - start_time < duration:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            out.write(frame)
-            frame_count += 1
-        cap.release()
-        out.release()
-        return jsonify({'status': 'success', 'file': filename, 'frames': frame_count})
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-@app.route('/api/audio/record', methods=['POST'])
-def audio_record():
-    """Record audio from the microphone."""
-    try:
-        data = request.get_json(force=True) or {}
-        duration = int(data.get('duration', 5))
-        if duration <= 0 or duration > 60:
-            return jsonify({'status': 'error', 'message': 'Duration must be 1-60 seconds'}), 400
-        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-        filename = f"audio_{timestamp}.wav"
-        file_path = os.path.join(Config.DATA_DIR, filename)
-        os.makedirs(Config.DATA_DIR, exist_ok=True)
-        try:
-            cmd = ['rec', '-q', file_path, 'trim', '0', str(duration)]
-            result = subprocess.run(cmd, capture_output=True, timeout=duration + 5)
-            if result.returncode != 0:
-                raise Exception("sox failed")
-        except Exception:
-            try:
-                if platform.system() == 'Darwin':
-                    cmd = [
-                        'ffmpeg', '-y', '-f', 'avfoundation', '-i', ':0',
-                        '-t', str(duration), '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '1',
-                        file_path
-                    ]
-                else:
-                    cmd = [
-                        'ffmpeg', '-y', '-f', 'pulse', '-i', 'default',
-                        '-t', str(duration), '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '1',
-                        file_path
-                    ]
-                result = subprocess.run(cmd, capture_output=True, timeout=duration + 10)
-                if result.returncode != 0:
-                    raise Exception(f"ffmpeg failed: {result.stderr.decode()}")
-            except FileNotFoundError:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Audio recording requires sox or ffmpeg.'
-                }), 500
-        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-            return jsonify({'status': 'success', 'file': filename})
-        else:
-            return jsonify({'status': 'error', 'message': 'Audio recording failed'}), 500
-    except subprocess.TimeoutExpired:
-        return jsonify({'status': 'error', 'message': 'Recording timed out'}), 500
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-# ============================================================================
-# Model Deployment & Predictions
-# ============================================================================
-
-# In-memory store for deployed models (persisted to disk)
-deployed_models = {}
-model_predictions_log = []
-
-MODELS_DIR = os.path.join(Config.DATA_DIR, 'models')
-MODELS_INDEX_FILE = os.path.join(MODELS_DIR, 'deployed_models.json')
-
-
-def _load_deployed_models():
-    """Load deployed models index from disk."""
-    global deployed_models
-    try:
-        if os.path.exists(MODELS_INDEX_FILE):
-            with open(MODELS_INDEX_FILE, 'r') as f:
-                deployed_models = json.load(f)
-    except Exception:
-        deployed_models = {}
-
-
-def _save_deployed_models():
-    """Persist deployed models index to disk."""
-    try:
-        os.makedirs(MODELS_DIR, exist_ok=True)
-        with open(MODELS_INDEX_FILE, 'w') as f:
-            json.dump(deployed_models, f, indent=2)
-    except Exception as e:
-        logging.error(f"Failed to save deployed models: {e}")
-
-
-_load_deployed_models()
-
-
-@app.route('/api/deploy-model', methods=['POST'])
-def api_receive_deployed_model():
-    """Receive a model pushed from the Brain server."""
-    import base64
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'status': 'error', 'error': 'No data'}), 400
-
-        deployment_id = data.get('deployment_id')
-        model_name = data.get('model_name', 'unknown')
-        model_type = data.get('model_type', 'unknown')
-        model_b64 = data.get('model_data')
-        config = data.get('config', {})
-
-        if not model_b64:
-            return jsonify({'status': 'error', 'error': 'No model data'}), 400
-
-        # Save model weights to disk
-        os.makedirs(MODELS_DIR, exist_ok=True)
-        safe_name = model_name.replace('/', '_').replace('..', '_')
-        ext = '.pkl' if model_type in ('knn', 'svc', 'adaboost', 'xgboost', 'random_forest') else '.pth'
-        model_path = os.path.join(MODELS_DIR, f"{safe_name}{ext}")
-
-        model_bytes = base64.b64decode(model_b64)
-        with open(model_path, 'wb') as f:
-            f.write(model_bytes)
-
-        # Register in index
-        deployed_models[deployment_id] = {
-            'deployment_id': deployment_id,
-            'model_name': model_name,
-            'model_type': model_type,
-            'model_path': model_path,
-            'config': config,
-            'status': 'ready',
-            'deployed_at': config.get('deployed_at', datetime.utcnow().isoformat()),
-            'predictions_count': 0,
-            'last_prediction': None,
-            'triggers': config.get('triggers', []),
-        }
-        _save_deployed_models()
-
-        logging.info(f"Model deployed: {model_name} ({deployment_id})")
-        return jsonify({'status': 'success', 'deployment_id': deployment_id, 'model_name': model_name})
-    except Exception as e:
-        logging.error(f"Deploy model error: {e}")
-        return jsonify({'status': 'error', 'error': str(e)}), 500
-
-
-@app.route('/api/models/deployed', methods=['GET'])
-def api_list_deployed_models():
-    """List all deployed models on this device."""
-    _load_deployed_models()  # always fresh — device_manager may have written new entries
-    models_list = []
-    for did, info in deployed_models.items():
-        models_list.append({
-            'deployment_id': info['deployment_id'],
-            'model_name': info['model_name'],
-            'model_type': info['model_type'],
-            'status': info.get('status', 'unknown'),
-            'deployed_at': info.get('deployed_at'),
-            'predictions_count': info.get('predictions_count', 0),
-            'last_prediction': info.get('last_prediction'),
-            'triggers': info.get('triggers', []),
-            'class_names': info.get('config', {}).get('class_names', []),
-        })
-    return jsonify({'status': 'success', 'models': models_list})
-
-
-@app.route('/api/models/<deployment_id>/toggle', methods=['POST'])
-def api_toggle_model(deployment_id):
-    """Start or stop a deployed model."""
-    if deployment_id not in deployed_models:
-        return jsonify({'status': 'error', 'error': 'Model not found'}), 404
-    model = deployed_models[deployment_id]
-    model['status'] = 'stopped' if model.get('status') == 'running' else 'running'
-    _save_deployed_models()
-    return jsonify({'status': 'success', 'model_status': model['status']})
-
-
-@app.route('/api/models/<deployment_id>/triggers', methods=['GET', 'POST'])
-def api_model_triggers(deployment_id):
-    """Get or update triggers for a deployed model."""
-    if deployment_id not in deployed_models:
-        return jsonify({'status': 'error', 'error': 'Model not found'}), 404
-    model = deployed_models[deployment_id]
-
-    if request.method == 'GET':
-        return jsonify({'status': 'success', 'triggers': model.get('triggers', [])})
-
-    data = request.get_json() or {}
-    triggers = data.get('triggers', [])
-    model['triggers'] = triggers
-    _save_deployed_models()
-    return jsonify({'status': 'success', 'triggers': triggers})
-
-
-@app.route('/api/models/<deployment_id>/delete', methods=['DELETE'])
-def api_delete_deployed_model(deployment_id):
-    """Remove a deployed model from this device."""
-    if deployment_id not in deployed_models:
-        return jsonify({'status': 'error', 'error': 'Model not found'}), 404
-    model = deployed_models.pop(deployment_id)
-    try:
-        if os.path.exists(model.get('model_path', '')):
-            os.remove(model['model_path'])
-    except Exception:
-        pass
-    _save_deployed_models()
-    return jsonify({'status': 'success', 'message': f"Model '{model['model_name']}' removed"})
-
-
-@app.route('/api/pending-deployments', methods=['GET'])
-def api_pending_deployments():
-    """Get pending model deployments awaiting confirmation."""
-    _load_deployed_models()
-    pending = []
-    for did, info in deployed_models.items():
-        if info.get('status') == 'pending_confirmation':
-            pending.append({
-                'deployment_id': info['deployment_id'],
-                'model_name': info['model_name'],
-                'model_type': info['model_type'],
-                'deployed_at': info.get('deployed_at'),
-                'config': info.get('config', {}),
-            })
-    return jsonify({'status': 'success', 'pending_deployments': pending})
-
-
-@app.route('/api/pending-deployments/<deployment_id>/confirm', methods=['POST'])
-def api_confirm_deployment(deployment_id):
-    """Confirm and activate a pending deployment."""
-    if deployment_id not in deployed_models:
-        return jsonify({'status': 'error', 'error': 'Deployment not found'}), 404
-    
-    model = deployed_models[deployment_id]
-    if model.get('status') != 'pending_confirmation':
-        return jsonify({'status': 'error', 'error': 'Deployment is not pending confirmation'}), 400
-    
-    # Update status to running
-    model['status'] = 'running'
-    _save_deployed_models()
-    
-    # Notify Brain server that deployment was accepted
-    try:
-        auth_token = session.get('token') or getattr(Config, 'USER_AUTH_TOKEN', None)
-        if auth_token and Config.BRAIN_SERVER_URL:
-            headers = {'Authorization': f'Bearer {auth_token}'}
-            ack_url = f"{Config.BRAIN_SERVER_URL}/api/device/{device_manager.device_id}/deployment/{deployment_id}/ack"
-            requests.post(ack_url, json={"status": "delivered"}, headers=headers, timeout=10)
-            logger.info(f"Deployment {deployment_id} confirmed and acknowledged to Brain")
-    except Exception as e:
-        logger.warning(f"Failed to acknowledge deployment to Brain: {e}")
-    
-    return jsonify({'status': 'success', 'message': f"Deployment '{model['model_name']}' confirmed"})
-
-
-@app.route('/api/pending-deployments/<deployment_id>/decline', methods=['POST'])
-def api_decline_deployment(deployment_id):
-    """Decline and remove a pending deployment."""
-    if deployment_id not in deployed_models:
-        return jsonify({'status': 'error', 'error': 'Deployment not found'}), 404
-    
-    model = deployed_models[deployment_id]
-    if model.get('status') != 'pending_confirmation':
-        return jsonify({'status': 'error', 'error': 'Deployment is not pending confirmation'}), 400
-    
-    model_name = model['model_name']
-    
-    # Notify Brain server that deployment was declined
-    try:
-        auth_token = session.get('token') or getattr(Config, 'USER_AUTH_TOKEN', None)
-        if auth_token and Config.BRAIN_SERVER_URL:
-            headers = {'Authorization': f'Bearer {auth_token}'}
-            ack_url = f"{Config.BRAIN_SERVER_URL}/api/device/{device_manager.device_id}/deployment/{deployment_id}/ack"
-            requests.post(ack_url, json={"status": "declined"}, headers=headers, timeout=10)
-            logger.info(f"Deployment {deployment_id} declined and acknowledged to Brain")
-    except Exception as e:
-        logger.warning(f"Failed to acknowledge declined deployment to Brain: {e}")
-    
-    # Remove model file and entry
-    try:
-        if os.path.exists(model.get('model_path', '')):
-            os.remove(model['model_path'])
-    except Exception:
-        pass
-    
-    deployed_models.pop(deployment_id)
-    _save_deployed_models()
-    
-    return jsonify({'status': 'success', 'message': f"Deployment '{model_name}' declined"})
-
-
-@app.route('/api/models/<deployment_id>/predict', methods=['POST'])
-def api_make_prediction(deployment_id):
-    """Make a prediction with a deployed model."""
-    global deployed_models
-    
-    if deployment_id not in deployed_models:
-        return jsonify({'status': 'error', 'error': 'Model not found'}), 404
-    
-    model = deployed_models[deployment_id]
-    if model.get('status') not in ['ready', 'running']:
-        return jsonify({'status': 'error', 'error': 'Model is not ready for predictions'}), 400
-    
-    # Simulate a prediction
-    import random
-    class_names = model.get('config', {}).get('class_names', ['class_0', 'class_1'])
-    prediction = {
-        'class': random.choice(class_names),
-        'confidence': round(random.uniform(0.7, 0.99), 3),
-        'timestamp': datetime.utcnow().isoformat()
-    }
-    
-    # Update prediction stats
-    model['predictions_count'] = model.get('predictions_count', 0) + 1
-    model['last_prediction'] = prediction['timestamp']
-    _save_deployed_models()
-    
-    return jsonify({
-        'status': 'success',
-        'prediction': prediction
-    })
-
-
-@app.route('/predictions')
-def predictions_page():
-    """Predictions & Triggers management page."""
-    return render_template('predictions.html',
-                           models=list(deployed_models.values()),
-                           active_tab='predictions')
-
-
-# ============================================================================
-
-def run_server(host=None, port=None, debug=False):
-    """Start the Flask-SocketIO server (called by platform entry points)."""
+if __name__ == '__main__':
+    # Start the scheduler
     if not device_scheduler.running:
         device_scheduler.start()
+
+    # Run the application with threading mode (more compatible on Windows)
     socketio.run(
         app,
-        host=host or Config.HOST,
-        port=port or Config.PORT,
-        debug=debug,
+        host='0.0.0.0',
+        port=5000,
+        debug=True,
         use_reloader=False,
         allow_unsafe_werkzeug=True
     )
-
-
-if __name__ == '__main__':
-    run_server(host='0.0.0.0', debug=True)

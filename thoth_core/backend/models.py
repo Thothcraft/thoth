@@ -41,7 +41,7 @@ class SensorReading:
     accel: AccelerometerReading
     gyro: GyroscopeReading
     mag: MagnetometerReading
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
@@ -51,11 +51,11 @@ class SensorReading:
             'gyro': asdict(self.gyro),
             'mag': asdict(self.mag)
         }
-    
+
     def to_json(self) -> str:
         """Convert to JSON string."""
         return json.dumps(self.to_dict())
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'SensorReading':
         """Create SensorReading from dictionary."""
@@ -80,7 +80,7 @@ class SystemStatus:
     disk_usage: Optional[Dict[str, Any]] = None
     ip_address: Optional[str] = None
     error: Optional[str] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return asdict(self)
@@ -91,11 +91,11 @@ class ButtonConfig:
     single: str = "toggle_collection"
     double: str = "start_ap"
     long: str = "shutdown"
-    
+
     def to_dict(self) -> Dict[str, str]:
         """Convert to dictionary."""
         return asdict(self)
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, str]) -> 'ButtonConfig':
         """Create ButtonConfig from dictionary."""
@@ -108,7 +108,7 @@ class UploadResult:
     uploaded_count: int
     error_message: Optional[str] = None
     upload_url: Optional[str] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return asdict(self)
