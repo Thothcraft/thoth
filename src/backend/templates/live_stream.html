@@ -45,22 +45,36 @@
                 <div class="text-xs uppercase tracking-[0.18em] text-slate-500">Stream</div>
                 <div class="mt-1 text-lg font-semibold text-slate-950">{{ active_minute or 'No active minute' }}</div>
             </div>
-            <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
-                {{ stream_url }}
-            </span>
+            <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">{{ kind_label }}</span>
         </div>
 
         {% if kind == 'video' %}
         <div class="overflow-hidden rounded-xl border border-slate-200 bg-black">
-            <img src="{{ stream_url }}" alt="Live video stream" class="w-full object-contain" />
+            <video
+                id="live-video"
+                src="{{ stream_url }}?t={{ now.timestamp() | int }}"
+                autoplay
+                muted
+                controls
+                playsinline
+                class="w-full bg-black object-contain"
+            ></video>
         </div>
-        {% else %}
+        {% elif kind == 'csi' %}
         <div class="rounded-xl border border-slate-200 bg-slate-950 p-4">
             <div class="mb-3 flex items-center justify-between text-sm text-slate-300">
-                <span>Connected</span>
+                <span>CSI amplitude</span>
                 <span id="live-state">Waiting for data</span>
             </div>
-            <pre id="live-log" class="max-h-[70vh] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-black p-4 text-xs text-emerald-300"></pre>
+            <svg id="csi-chart" viewBox="0 0 960 260" class="h-[70vh] w-full rounded-lg bg-black"></svg>
+        </div>
+        {% else %}
+        <div class="grid gap-4 xl:grid-cols-3">
+            {% for plot_url in plot_urls %}
+            <div class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+                <img src="{{ plot_url }}?t={{ now.timestamp() | int }}" data-plot-url="{{ plot_url }}" alt="Live radar plot" class="h-full w-full object-contain bg-black" />
+            </div>
+            {% endfor %}
         </div>
         {% endif %}
     </section>
@@ -68,21 +82,113 @@
 {% endblock %}
 
 {% block scripts %}
-{% if kind != 'video' %}
+{% if kind == 'video' %}
 <script>
 (() => {
-    const log = document.getElementById('live-log');
+    const video = document.getElementById('live-video');
+    if (!video) return;
+    const src = video.getAttribute('src') || '';
+    setInterval(() => {
+        const currentTime = video.currentTime || 0;
+        video.src = `${src.split('?')[0]}?t=${Date.now()}`;
+        video.load();
+        video.currentTime = currentTime;
+        video.play().catch(() => {});
+    }, 8000);
+})();
+</script>
+{% elif kind == 'csi' %}
+<script>
+(() => {
     const state = document.getElementById('live-state');
-    if (!log || !state) return;
+    const chart = document.getElementById('csi-chart');
+    if (!state || !chart) return;
 
-    const maxLines = 300;
-    const lines = [];
-    const appendLine = (text) => {
-        lines.push(text);
-        while (lines.length > maxLines) lines.shift();
-        log.textContent = lines.join('\n');
-        log.scrollTop = log.scrollHeight;
-    };
+    const width = 960;
+    const height = 260;
+    const padding = 18;
+    const series = [];
+
+    function splitCsvLine(line) {
+        const cells = [];
+        let current = '';
+        let inQuotes = false;
+        for (let index = 0; index < line.length; index += 1) {
+            const char = line[index];
+            if (char === '"') {
+                if (inQuotes && line[index + 1] === '"') {
+                    current += '"';
+                    index += 1;
+                } else {
+                    inQuotes = !inQuotes;
+                }
+                continue;
+            }
+            if (char === ',' && !inQuotes) {
+                cells.push(current);
+                current = '';
+                continue;
+            }
+            current += char;
+        }
+        cells.push(current);
+        return cells;
+    }
+
+    function meanMagnitude(cell) {
+        if (!cell) return null;
+        const cleaned = cell.trim().replace(/^\[/, '').replace(/\]$/, '');
+        if (!cleaned) return null;
+        const values = cleaned.split(',').map(Number).filter(Number.isFinite);
+        if (values.length < 2) return null;
+        const magnitudes = [];
+        for (let index = 0; index + 1 < values.length; index += 2) {
+            const imag = values[index];
+            const real = values[index + 1];
+            magnitudes.push(Math.sqrt((real * real) + (imag * imag)));
+        }
+        if (!magnitudes.length) return null;
+        return magnitudes.reduce((sum, value) => sum + value, 0) / magnitudes.length;
+    }
+
+    function extractRawCsiLine(payload) {
+        const line = String(payload || '').trim();
+        if (!line) return '';
+        if (line.startsWith('CSI_DATA,')) return line;
+        if (line.startsWith('{')) {
+            try {
+                const row = JSON.parse(line);
+                return String(row.line || row.raw || row.raw_csi_line || '').trim();
+            } catch {
+                return '';
+            }
+        }
+        const cells = splitCsvLine(line);
+        const tail = cells[cells.length - 1] || '';
+        return tail.includes('CSI_DATA,') ? tail.trim() : '';
+    }
+
+    function render() {
+        if (!series.length) {
+            chart.innerHTML = '<text x="20" y="40" fill="#94a3b8" font-size="14">Waiting for CSI samples...</text>';
+            return;
+        }
+        const min = Math.min(...series);
+        const max = Math.max(...series);
+        const span = max - min || 1;
+        const step = series.length > 1 ? (width - padding * 2) / (series.length - 1) : 0;
+        const points = series.map((value, index) => {
+            const x = padding + index * step;
+            const y = height - padding - ((value - min) / span) * (height - padding * 2);
+            return `${x},${y}`;
+        }).join(' ');
+        chart.innerHTML = `
+            <rect x="0" y="0" width="${width}" height="${height}" rx="16" fill="#020617"></rect>
+            <polyline fill="none" stroke="#60a5fa" stroke-width="2.5" points="${points}"></polyline>
+            <text x="20" y="28" fill="#cbd5e1" font-size="14">Average CSI amplitude</text>
+            <text x="20" y="48" fill="#94a3b8" font-size="11">Packets: ${series.length}</text>
+        `;
+    }
 
     const source = new EventSource({{ stream_url|tojson }});
     source.onopen = () => {
@@ -91,10 +197,34 @@
     source.onerror = () => {
         state.textContent = 'Reconnecting';
     };
-    source.addEventListener({{ kind|tojson }}, (event) => {
-        appendLine(event.data);
+    source.addEventListener('csi', (event) => {
+        const rawLine = extractRawCsiLine(event.data);
+        if (!rawLine) return;
+        const row = splitCsvLine(rawLine);
+        const mean = meanMagnitude(row[row.length - 1]);
+        if (mean === null) return;
+        series.push(mean);
+        while (series.length > 180) series.shift();
+        render();
         state.textContent = 'Streaming';
     });
+
+    render();
+})();
+</script>
+{% else %}
+<script>
+(() => {
+    const plots = Array.from(document.querySelectorAll('img[data-plot-url]'));
+    if (!plots.length) return;
+    const refresh = () => {
+        const stamp = Date.now();
+        for (const img of plots) {
+            const base = img.getAttribute('data-plot-url');
+            if (base) img.src = `${base}?t=${stamp}`;
+        }
+    };
+    setInterval(refresh, 2000);
 })();
 </script>
 {% endif %}

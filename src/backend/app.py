@@ -17,6 +17,7 @@ import psutil
 import platform
 import netifaces
 import requests
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -65,6 +66,9 @@ from backend.capture_manager import (
     sse_tail,
     preview_text,
 )
+
+RADAR_PLOTS = ('range-doppler', 'azimuth-range', 'azimuth-doppler')
+RADAR_RENDERER = Path(__file__).resolve().parents[2] / 'thoth_rpi' / 'render_radar_plot.py'
 
 # Set up logging
 logging.basicConfig(
@@ -1621,6 +1625,7 @@ def live_capture_stream(kind):
         active_minute=current_minute().name if current_minute() else None,
         username=session.get('username'),
         stream_url=url_for('api_live_capture_stream', kind=kind),
+        plot_urls=[url_for('api_live_capture_plot', plot=plot) for plot in RADAR_PLOTS] if kind == 'radar' else [],
     )
 
 @app.route('/api/captures/live/<kind>')
@@ -1631,10 +1636,14 @@ def api_live_capture_stream(kind):
 
     kind = kind.lower()
     if kind == 'video':
-        return Response(
-            stream_with_context(mjpeg_stream()),
-            mimetype='multipart/x-mixed-replace; boundary=frame',
-        )
+        minute_dir = current_minute()
+        if not minute_dir:
+            abort(404, description='No live capture minute available')
+        files = capture_files(minute_dir)
+        path = files.get('video')
+        if not path or not path.exists():
+            abort(404, description='No live video available')
+        return send_file(path, mimetype='video/mp4', conditional=False, max_age=0)
 
     minute_dir = current_minute()
     if not minute_dir:
@@ -1662,6 +1671,44 @@ def api_live_capture_stream(kind):
         )
 
     return jsonify({'status': 'error', 'message': f'Unsupported live stream kind: {kind}'}), 400
+
+
+@app.route('/api/captures/live/radar/plot/<plot>')
+def api_live_capture_plot(plot):
+    """Render the current minute radar plot as PNG."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('captures')))
+
+    plot = plot.lower()
+    if plot not in RADAR_PLOTS:
+        abort(404, description=f'Unsupported radar plot kind: {plot}')
+
+    minute_dir = current_minute()
+    if not minute_dir:
+        abort(404, description='No live capture minute available')
+
+    files = capture_files(minute_dir)
+    radar_path = files.get('radar')
+    if not radar_path or not radar_path.exists():
+        abort(404, description='No radar file available')
+
+    if not RADAR_RENDERER.exists():
+        abort(500, description='Radar renderer not found')
+
+    cache_dir = Path(tempfile.gettempdir()) / 'thoth-live-radar'
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out_path = cache_dir / f'{minute_dir.name}-{plot}.png'
+
+    radar_mtime = radar_path.stat().st_mtime
+    renderer_mtime = RADAR_RENDERER.stat().st_mtime
+    if not out_path.exists() or out_path.stat().st_mtime < radar_mtime or out_path.stat().st_mtime < renderer_mtime:
+        subprocess.run(
+            [sys.executable, str(RADAR_RENDERER), str(radar_path), plot, str(out_path)],
+            check=True,
+            capture_output=True,
+        )
+
+    return send_file(out_path, mimetype='image/png', conditional=False, max_age=0)
 
 @app.route('/logout')
 def logout():
