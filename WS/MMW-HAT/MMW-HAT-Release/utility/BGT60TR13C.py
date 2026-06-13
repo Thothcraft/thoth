@@ -13,10 +13,17 @@ from utility.BGT60TR13C_CONST import *
 RET_VAL_OK = 0
 RET_VAL_ERR = -1
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class BGT60TR13C:
     def __init__(self, spi_bus=0, spi_dev=0, spi_speed=10_000_000, rst_pin=12, irq_pin=25, version=0, save_to_file=None):
+        self.__spi = None
+        self.__rst = None
+        self.__irq = None
+        self.__data_collection_thread = None
+        self.__data_collection_stop_event = threading.Event()
+        self.__file_fd = None
+
         self.__spi = spidev.SpiDev()
         self.__spi.open(spi_bus, spi_dev)
         self.__spi.max_speed_hz = spi_speed
@@ -32,14 +39,9 @@ class BGT60TR13C:
         self.__num_sampler_per_burst = 0
         self.__last_gsr_reg = 0
 
-        # Data collection thread
-        self.__data_collection_thread = None
-        self.__data_collection_stop_event = threading.Event()
-
         self.__version = version
         self.__seq = 0
         self.__save_to_file = save_to_file
-        self.__file_fd = None
 
     def set_fifo_parameters(self, num_samples_per_frame, num_samples_irq, num_sampler_per_burst):
         # Note that regular Raspberry PI spidev has a limit of 4096 bytes per transfer. In addition, the frame size may be larger than buffer size. So 3 parameters are used to control it.
@@ -170,14 +172,24 @@ class BGT60TR13C:
 
     def stop(self):
         ret_temp = RET_VAL_OK
-        if self.soft_reset(BGT60TRXX_RESET_FSM) != RET_VAL_OK:
-            ret_temp = RET_VAL_ERR
-        if self.__data_collection_thread and self.__data_collection_thread.is_alive():
+        if self.__spi is not None:
+            if self.soft_reset(BGT60TRXX_RESET_FSM) != RET_VAL_OK:
+                ret_temp = RET_VAL_ERR
+        if self.__data_collection_thread is not None and self.__data_collection_thread.is_alive():
             self.__data_collection_stop_event.set()
             self.__data_collection_thread.join()
         if self.__file_fd is not None:
             self.__file_fd.close()
             self.__file_fd = None
+        if self.__irq is not None:
+            self.__irq.close()
+            self.__irq = None
+        if self.__rst is not None:
+            self.__rst.close()
+            self.__rst = None
+        if self.__spi is not None:
+            self.__spi.close()
+            self.__spi = None
         return ret_temp
 
     def soft_reset(self, reset_type):
@@ -254,6 +266,8 @@ class BGT60TR13C:
             time.sleep(0.001)
             while self.__irq.value==1:
                 fifo_data = self.__get_fifo_data(self.__num_sampler_per_burst)
+                if fifo_data is None:
+                    break
                 try:
                     self.__sub_frame_buffer += fifo_data
                     if len(self.__sub_frame_buffer) >= self.__num_bytes_per_frame:
@@ -269,11 +283,16 @@ class BGT60TR13C:
                             self.__seq += 1
                         if self.__file_fd is not None:
                             self.__file_fd.write(full_frame)
-                        self.frame_buffer.put(full_frame, block=False)
+                        try:
+                            self.frame_buffer.put_nowait(full_frame)
+                        except queue.Full:
+                            pass
                 except queue.Full:
-                    logging.warning("Queue is full!")
+                    pass
         logging.debug("Data collection thread stopped.")
 
     def __del__(self):
-        self.stop()
-
+        try:
+            self.stop()
+        except Exception:
+            pass

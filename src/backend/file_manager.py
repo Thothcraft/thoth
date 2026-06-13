@@ -56,4 +56,4 @@ class FileManager:
 from .config import Config
 
 # Initialize file manager with the config's data directory
-file_manager = FileManager(Config.CAPTURE_DATA_DIR)
+file_manager = FileManager(Config.DATA_DIR)

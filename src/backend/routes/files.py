@@ -5,7 +5,6 @@ import os
 import base64
 import requests
 import logging
-import mimetypes
 from ..file_manager import file_manager
 from ..config import Config
 from ..capture_manager import list_minutes, get_minute, capture_files, zip_minute_folder
@@ -73,28 +72,6 @@ def download_file(file_path):
 
         return response
 
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
-
-
-@bp.route('/view/<path:file_path>', methods=['GET'])
-def view_file(file_path):
-    """View a file inline from the capture data directory."""
-    try:
-        file_path = file_manager.get_file(file_path)
-        if not file_path:
-            abort(404, description="File not found or access denied")
-
-        mimetype, _ = mimetypes.guess_type(str(file_path))
-        return send_file(
-            file_path,
-            as_attachment=False,
-            download_name=file_path.name,
-            mimetype=mimetype or 'application/octet-stream'
-        )
     except Exception as e:
         return jsonify({
             'status': 'error',

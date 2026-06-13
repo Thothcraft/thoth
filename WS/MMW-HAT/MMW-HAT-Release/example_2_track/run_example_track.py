@@ -1,16 +1,17 @@
 import multiprocessing
 import time
 import subprocess
+import sys
 
 
 def run_script1():
     # Start the first Python script
-    subprocess.run(["python", "location_gui.py"])
+    subprocess.run([sys.executable, "location_gui.py"])
 
 
 def run_script2():
     # Start the second Python script
-    subprocess.run(["python", "run_udp_streaming_track.py"])
+    subprocess.run([sys.executable, "run_udp_streaming_track.py"])
 
 
 if __name__ == "__main__":
