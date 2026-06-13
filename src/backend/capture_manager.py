@@ -9,7 +9,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -184,22 +183,6 @@ def _read_ffmpeg_frame(stdout, buffer: bytearray) -> Optional[bytes]:
         buffer.extend(chunk)
 
 
-def tail_binary_file(path: Path, poll_interval: float = 0.15, chunk_size: int = 65536) -> Iterable[bytes]:
-    if not path.exists():
-        return
-
-    with open(path, 'rb') as handle:
-        offset = 0
-        while True:
-            handle.seek(offset)
-            chunk = handle.read(chunk_size)
-            if chunk:
-                offset = handle.tell()
-                yield chunk
-                continue
-            time.sleep(poll_interval)
-
-
 def mjpeg_stream(device: Optional[str] = None, width: Optional[int] = None, height: Optional[int] = None, fps: Optional[int] = None) -> Iterable[bytes]:
     device = device or Config.CAPTURE_CAMERA_DEVICE
     width = width or Config.CAPTURE_CAMERA_WIDTH
@@ -246,42 +229,3 @@ def mjpeg_stream(device: Optional[str] = None, width: Optional[int] = None, heig
                 proc.kill()
             except Exception:
                 pass
-
-
-def tail_text_file(path: Path, poll_interval: float = 0.15) -> Iterable[str]:
-    last_size = path.stat().st_size if path.exists() else 0
-    while True:
-        if not path.exists():
-            time.sleep(poll_interval)
-            continue
-        size = path.stat().st_size
-        if size < last_size:
-            last_size = 0
-        if size > last_size:
-            with open(path, "r", encoding="utf-8", errors="replace") as handle:
-                handle.seek(last_size)
-                chunk = handle.read()
-                last_size = handle.tell()
-                if chunk:
-                    for line in chunk.splitlines():
-                        yield line
-        time.sleep(poll_interval)
-
-
-def sse_tail(path: Path, label: str, mode: str = "text") -> Iterable[bytes]:
-    if mode == "binary":
-        last_offset = path.stat().st_size if path.exists() else 0
-        while True:
-            if not path.exists():
-                time.sleep(0.15)
-                continue
-            new_offset, hex_data = read_binary_tail(path, last_offset, 4096)
-            if hex_data:
-                last_offset = new_offset
-                yield f"event: {label}\ndata: {hex_data}\n\n".encode("utf-8")
-            else:
-                time.sleep(0.15)
-    else:
-        for line in tail_text_file(path):
-            payload = line.replace("\r", "")
-            yield f"event: {label}\ndata: {payload}\n\n".encode("utf-8")

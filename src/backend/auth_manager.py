@@ -102,9 +102,6 @@ class AuthManager:
         # Check if token is expired
         if self.token_expiry and datetime.utcnow() >= self.token_expiry:
             logger.info("Authentication token expired")
-            # Try to refresh the token if we have a refresh token
-            if self.refresh_token:
-                return self.refresh_auth_token()
             return False
 
         return True
@@ -143,41 +140,18 @@ class AuthManager:
             raise Exception("Brain server URL not configured")
 
         try:
-            candidates = [
+            response = requests.post(
                 f"{self.config.BRAIN_SERVER_URL}/api/token",
-                f"{self.config.BRAIN_SERVER_URL}/token",
-            ]
-
-            response = None
-            last_error = None
-            for url in candidates:
-                try:
-                    response = requests.post(
-                        url,
-                        json={
-                            'username': username,
-                            'password': password
-                        },
-                        headers={
-                            'accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        timeout=10
-                    )
-                except RequestException as e:
-                    last_error = e
-                    continue
-
-                if response.status_code == 200:
-                    break
-
-                if response.status_code not in (404, 405):
-                    break
-
-                last_error = Exception(f"{url} -> {response.status_code} {response.text}")
-
-            if response is None:
-                raise Exception(f"Error connecting to Brain server: {last_error}")
+                json={
+                    'username': username,
+                    'password': password
+                },
+                headers={
+                    'accept': 'application/json',
+                    'Content-Type': 'application/json'
+                },
+                timeout=10
+            )
 
             if response.status_code == 200:
                 result = response.json()

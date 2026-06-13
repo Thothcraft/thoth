@@ -162,10 +162,7 @@ class DeviceManager:
         if not self.config.BRAIN_SERVER_URL:
             return False, "Brain server URL not configured"
 
-        urls = [
-            f"{self.config.BRAIN_SERVER_URL}/api/device/register",
-            f"{self.config.BRAIN_SERVER_URL}/device/register",
-        ]
+        url = f"{self.config.BRAIN_SERVER_URL}/api/device/register"
 
         # Get device information
         try:
@@ -186,9 +183,6 @@ class DeviceManager:
             # Get local IP address
             local_ip = self._get_local_ip()
 
-            # Get list of data files to send to Brain
-            files_list = self._get_data_files_list()
-
             # Prepare registration data
             data = {
                 "device_id": self.device_id,
@@ -201,8 +195,7 @@ class DeviceManager:
                 "hardware_info": {
                     "local_ip": local_ip,
                     "hostname": platform.node()
-                },
-                "files": files_list  # Push file list to Brain
+                }
             }
 
             # Send registration request
@@ -211,41 +204,29 @@ class DeviceManager:
                 "Content-Type": "application/json"
             }
 
-            last_response = None
-            for url in urls:
-                response = self.session.post(
-                    url,
-                    json=data,
-                    headers=headers,
-                    timeout=10
-                )
-                last_response = response
+            response = self.session.post(
+                url,
+                json=data,
+                headers=headers,
+                timeout=10
+            )
 
-                if response.status_code in (404, 405) and url != urls[-1]:
-                    logger.warning(
-                        f"Device registration returned {response.status_code} for {url}, trying next endpoint"
-                    )
-                    continue
+            if response.status_code in (200, 201):
+                result = response.json()
+                self.registered = True
+                self.auth_token = user_token
 
-                if response.status_code in (200, 201):
-                    result = response.json()
-                    self.registered = True
-                    self.auth_token = user_token
+                if 'device_name' in result:
+                    data['device_name'] = result['device_name']
 
-                    if 'device_name' in result:
-                        data['device_name'] = result['device_name']
+                self._save_registration_info(data, user_token)
 
-                    self._save_registration_info(data, user_token)
+                logger.info(f"Device registered successfully: {self.device_id}")
+                return True, "Device registered successfully"
 
-                    logger.info(f"Device registered successfully: {self.device_id}")
-                    return True, "Device registered successfully"
-
-                error_msg = f"Registration failed: {response.status_code} - {response.text}"
-                logger.error(error_msg)
-                return False, error_msg
-
-            if last_response is not None:
-                return False, f"Registration failed: {last_response.status_code}"
+            error_msg = f"Registration failed: {response.status_code} - {response.text}"
+            logger.error(error_msg)
+            return False, error_msg
 
         except requests.exceptions.RequestException as e:
             error_msg = f"Error connecting to Brain server: {str(e)}"
@@ -355,7 +336,7 @@ class DeviceManager:
             data['timestamp'] = datetime.utcnow().isoformat()
 
         try:
-            url = f"{self.config.BRAIN_SERVER_URL}/device/heartbeat"
+            url = f"{self.config.BRAIN_SERVER_URL}/api/device/heartbeat"
 
             headers = {
                 "Authorization": f"Bearer {self.auth_token}",

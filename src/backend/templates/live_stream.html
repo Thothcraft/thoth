@@ -6,7 +6,7 @@
 {% set kind_label = 'Video' if kind == 'video' else 'CSI' if kind == 'csi' else 'Radar' %}
 <div class="space-y-6">
     <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div class="flex items-center justify-between gap-3">
+        <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
             <div>
                 <div class="text-xs uppercase tracking-[0.22em] text-slate-500">Live view</div>
                 <h1 class="mt-1 text-3xl font-semibold text-slate-950">{{ kind_label }} stream</h1>
@@ -26,14 +26,11 @@
     <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         {% if kind == 'video' %}
         <div class="overflow-hidden rounded-xl border border-slate-200 bg-black">
-            <video
+            <img
                 src="{{ stream_url }}?t={{ now.timestamp() | int }}"
-                controls
-                autoplay
-                muted
-                playsinline
+                alt="Live camera stream"
                 class="h-auto w-full bg-black object-contain"
-            ></video>
+            />
         </div>
         {% elif kind == 'csi' %}
         <div class="rounded-xl border border-slate-200 bg-slate-950 p-4">

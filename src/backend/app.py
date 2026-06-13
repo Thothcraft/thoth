@@ -7,6 +7,9 @@ including REST API endpoints and WebSocket support for real-time data streaming.
 import os
 import sys
 import json
+import io
+import math
+import html
 import subprocess
 import threading
 import time
@@ -18,10 +21,9 @@ import platform
 import netifaces
 import requests
 import tempfile
-import math
-import html
 from datetime import datetime, timedelta
 from pathlib import Path
+from functools import lru_cache
 from apscheduler.schedulers.background import BackgroundScheduler
 from typing import Dict, List, Optional, Any, Tuple
 from dotenv import load_dotenv
@@ -65,13 +67,23 @@ from backend.capture_manager import (
     cleanup_old_minutes,
     zip_minute_folder,
     mjpeg_stream,
-    tail_binary_file,
-    sse_tail,
     preview_text,
 )
 
-RADAR_PLOTS = ('range-doppler', 'azimuth-range', 'azimuth-doppler')
-RADAR_RENDERER = Path(__file__).resolve().parents[2] / 'thoth_rpi' / 'render_radar_plot.py'
+THOTH_ROOT = Path(__file__).resolve().parents[2]
+MMW_RELEASE = THOTH_ROOT / 'WS' / 'MMW-HAT' / 'MMW-HAT-Release'
+if str(MMW_RELEASE) not in sys.path:
+    sys.path.append(str(MMW_RELEASE))
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover - import may fail on minimal installs
+    np = None
+
+try:
+    from utility.mmw_cube_proc_v0 import CubeProcessor
+except Exception:  # pragma: no cover - import may fail on minimal installs
+    CubeProcessor = None
 
 # Set up logging
 logging.basicConfig(
@@ -82,6 +94,14 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+RADAR_PLOTS = ('range-doppler', 'azimuth-range', 'azimuth-doppler')
+RADAR_PLOT_AXES = {
+    'range-doppler': ('Range', 'Doppler'),
+    'azimuth-range': ('Azimuth', 'Range'),
+    'azimuth-doppler': ('Azimuth', 'Doppler'),
+}
+RADAR_CONFIG_DIR = MMW_RELEASE / 'radar_config' / 'config_3rx_3m'
 
 # Initialize Flask app
 app = Flask(__name__, template_folder='templates', static_folder='static')
@@ -293,17 +313,55 @@ def detect_sensor_inventory() -> List[Dict[str, Any]]:
     ]
 
 
+@lru_cache(maxsize=1)
+def _radar_setting_path() -> Optional[Path]:
+    if not RADAR_CONFIG_DIR.exists():
+        return None
+    matches = sorted(RADAR_CONFIG_DIR.glob('BGT60TR13C_settings_*.json'))
+    return matches[0] if matches else None
+
+
+@lru_cache(maxsize=1)
+def _radar_setting() -> Optional[Dict[str, Any]]:
+    setting_path = _radar_setting_path()
+    if not setting_path:
+        return None
+    try:
+        with open(setting_path, 'r', encoding='utf-8') as handle:
+            return json.load(handle)
+    except Exception as exc:
+        logger.error(f"Failed to load radar setting {setting_path}: {exc}")
+        return None
+
+
+def _iter_radar_frames(path: Path):
+    with open(path, 'rb') as handle:
+        while True:
+            version_bytes = handle.read(4)
+            if not version_bytes or len(version_bytes) < 4:
+                break
+            version = int.from_bytes(version_bytes, byteorder='little', signed=False)
+            if version != 0:
+                break
+            seq = int.from_bytes(handle.read(4), byteorder='little', signed=False)
+            data_len = int.from_bytes(handle.read(4), byteorder='little', signed=False)
+            raw_data = handle.read(data_len)
+            if len(raw_data) != data_len:
+                break
+            yield seq, raw_data
+
+
 def _split_csv_line(line: str) -> List[str]:
     cells: List[str] = []
-    current = []
+    current: List[str] = []
     in_quotes = False
-    i = 0
-    while i < len(line):
-        char = line[i]
+    idx = 0
+    while idx < len(line):
+        char = line[idx]
         if char == '"':
-            if in_quotes and i + 1 < len(line) and line[i + 1] == '"':
+            if in_quotes and idx + 1 < len(line) and line[idx + 1] == '"':
                 current.append('"')
-                i += 2
+                idx += 2
                 continue
             in_quotes = not in_quotes
         elif char == ',' and not in_quotes:
@@ -311,7 +369,7 @@ def _split_csv_line(line: str) -> List[str]:
             current = []
         else:
             current.append(char)
-        i += 1
+        idx += 1
     cells.append(''.join(current))
     return cells
 
@@ -320,7 +378,6 @@ def _parse_csi_average_series(path: Path, limit: int = 180) -> List[float]:
     if not path.exists():
         return []
 
-    series: List[float] = []
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as handle:
             lines = [line.strip() for line in handle if line.strip()]
@@ -340,7 +397,7 @@ def _parse_csi_average_series(path: Path, limit: int = 180) -> List[float]:
             return None
         if len(values) < 2:
             return None
-        mags = []
+        mags: List[float] = []
         for idx in range(0, len(values) - 1, 2):
             imag = values[idx]
             real = values[idx + 1]
@@ -349,6 +406,7 @@ def _parse_csi_average_series(path: Path, limit: int = 180) -> List[float]:
             return None
         return sum(mags) / len(mags)
 
+    series: List[float] = []
     first = lines[0]
     if first.startswith('{'):
         for line in lines:
@@ -409,6 +467,56 @@ def _build_csi_svg(points: List[float]) -> str:
         f'<text x="20" y="48" fill="#94a3b8" font-size="11">Packets: {len(points)}</text>'
         '</svg>'
     )
+
+
+def _render_live_radar_png(radar_path: Path, plot: str) -> bytes:
+    if np is None or CubeProcessor is None:
+        raise RuntimeError('Radar plotting dependencies are unavailable')
+
+    setting = _radar_setting()
+    if not setting:
+        raise RuntimeError('Radar settings not found')
+
+    axis_names = RADAR_PLOT_AXES.get(plot)
+    if not axis_names:
+        raise RuntimeError(f'Unsupported radar plot kind: {plot}')
+
+    mmw_proc = CubeProcessor(setting, num_azimuth_bin=16, num_elevation_bin=16)
+    for _seq, raw_data in _iter_radar_frames(radar_path):
+        mmw_proc.process_raw_data(raw_data)
+
+    if mmw_proc.data_cube_fft is None:
+        raise RuntimeError('No radar frames available')
+
+    img = mmw_proc.vis_2d(axis_names[0], axis_names[1])
+    img = np.log10(np.maximum(img, 1e-9))
+
+    try:
+        import matplotlib
+        matplotlib.use('Agg', force=True)
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # pragma: no cover - handled at runtime
+        raise RuntimeError(f'matplotlib unavailable: {exc}') from exc
+
+    fig, ax = plt.subplots(figsize=(6.4, 4.2), dpi=160)
+    ax.imshow(img, aspect='auto', cmap='viridis')
+    ax.set_axis_off()
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def _cached_radar_plot_path(radar_path: Path, plot: str, cache_name: str) -> Path:
+    cache_dir = Path(tempfile.gettempdir()) / cache_name
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f'{radar_path.stem}-{plot}.png'
+    radar_mtime = radar_path.stat().st_mtime
+    if not cache_path.exists() or cache_path.stat().st_mtime < radar_mtime:
+        png_bytes = _render_live_radar_png(radar_path, plot)
+        with open(cache_path, 'wb') as handle:
+            handle.write(png_bytes)
+    return cache_path
 
 
 def get_capture_overview() -> Dict[str, Any]:
@@ -607,253 +715,23 @@ def get_device_info() -> Dict[str, Any]:
         return {}
 
 def register_device_periodically():
-    """Register device with Brain server every minute."""
+    """Register the current Thoth device with Brain."""
     try:
-        # Get device info
-        device_info = get_device_info()
-
-        # Get device ID from session or generate one
-        device_id = session.get('device_id')
-        if not device_id:
-            # Try to get MAC address as device ID
-            mac_address = next(iter(device_info.get('network_interfaces', {}).values()), None)
-            device_id = mac_address or str(uuid.uuid4())
-            session['device_id'] = device_id
-
-        # Get device name from session or use hostname
-        device_name = session.get('device_name', device_info.get('hostname', 'Thoth Device'))
-
-        # Get access token from environment
-        access_token = os.getenv('BRAIN_AUTH_TOKEN')
-        if not access_token:
-            logger.error("No BRAIN_AUTH_TOKEN found in environment variables")
-            return
-
-        # Prepare request data
-        data = {
-            'device_id': device_id,
-            'device_name': device_name,
-            'device_type': 'thoth',
-            'hardware_info': device_info
-        }
-
-        # Send registration request
-        headers = {
-            'Authorization': f'Bearer {access_token}',
-            'Content-Type': 'application/json'
-        }
-
-        for url in (
-            f"{Config.BRAIN_SERVER_URL}/api/device/register",
-            f"{Config.BRAIN_SERVER_URL}/device/register",
-        ):
-            response = requests.post(
-                url,
-                json=data,
-                headers=headers,
-                timeout=10
-            )
-            if response.status_code in (404, 405):
-                logger.warning(f"Device registration returned {response.status_code} for {url}")
-                continue
-            response.raise_for_status()
-            logger.info(f"Device registration successful: {response.json()}")
-            break
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Network error during device registration: {str(e)}")
-        if hasattr(e, 'response') and e.response is not None:
-            logger.error(f"Response: {e.response.status_code} - {e.response.text}")
-    except Exception as e:
-        logger.error(f"Unexpected error in device registration: {str(e)}", exc_info=True)
-
-
-def _process_pending_uploads(filenames: list, auth_token: str):
-    """Process pending upload requests by uploading files to Brain server.
-
-    Args:
-        filenames: List of filenames to upload
-        auth_token: User authentication token
-    """
-    import base64
-    import threading
-
-    def upload_files():
-        for filename in filenames:
-            try:
-                # Get file path
-                file_path = os.path.join(Config.DATA_DIR, filename)
-                if not os.path.exists(file_path):
-                    logger.warning(f"File not found for upload: {filename}")
-                    continue
-
-                # Read file content
-                with open(file_path, 'rb') as f:
-                    content = f.read()
-
-                # Encode as base64
-                content_b64 = base64.b64encode(content).decode('utf-8')
-
-                # Determine content type
-                ext = os.path.splitext(filename)[1].lower()
-                content_type = 'application/json' if ext == '.json' else 'text/csv' if ext == '.csv' else 'application/octet-stream'
-
-                # Get device ID
-                device_id = getattr(Config, 'DEVICE_ID', None)
-
-                # Upload to Brain
-                brain_url = f"{Config.BRAIN_SERVER_URL}/file/upload"
-                headers = {
-                    'Authorization': f'Bearer {auth_token}',
-                    'Content-Type': 'application/json'
-                }
-
-                payload = {
-                    'filename': filename,
-                    'content': content_b64,
-                    'is_base64': True,
-                    'device_id': device_id,
-                    'content_type': content_type
-                }
-
-                logger.info(f"Uploading {filename} ({len(content)} bytes) to Brain cloud")
-
-                response = requests.post(brain_url, json=payload, headers=headers, timeout=120)
-
-                if response.status_code in (200, 201):
-                    result = response.json()
-                    logger.info(f"File uploaded successfully: {filename} -> cloud_file_id={result.get('file_id')}")
-                else:
-                    logger.error(f"Upload failed for {filename}: {response.status_code} - {response.text}")
-
-            except Exception as e:
-                logger.error(f"Error uploading {filename}: {e}")
-
-    # Run uploads in background thread to not block registration
-    thread = threading.Thread(target=upload_files, daemon=True)
-    thread.start()
-
-
-def register_device_periodically():
-    """Register device with Brain server every minute (only if user is authenticated)."""
-    try:
-        # Skip if Brain server URL is not configured
         if not getattr(Config, 'BRAIN_SERVER_URL', None):
             logger.warning("Brain server URL not configured, skipping device registration")
-            return
+            return False
 
-        # Get authentication token from the authenticated user's session
-        # This is stored globally after successful login
         auth_token = getattr(Config, 'USER_AUTH_TOKEN', None)
         if not auth_token:
             logger.debug("No authenticated user token available, skipping device registration")
-            return
+            return False
 
-        # Get device information
-        device_info = get_device_info()
-
-        # Prepare headers with the authentication token
-        headers = {
-            'Authorization': f'Bearer {auth_token.strip()}',
-            'Content-Type': 'application/json',
-            'User-Agent': 'Thoth-Device/1.0'
-        }
-
-        # Get or generate device ID
-        device_id = getattr(Config, 'DEVICE_ID', None)
-        if not device_id:
-            # Try to get MAC address and generate a UUID from it
-            mac_address = next(iter(device_info.get('network_interfaces', {}).values()), None)
-            if mac_address:
-                # Create a UUID from the MAC address (version 5 with DNS namespace)
-                device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, mac_address))
-            else:
-                device_id = str(uuid.uuid4())
-
-            Config.DEVICE_ID = device_id
-            logger.info(f"Generated new device ID: {device_id}")
-
-        # Prepare registration data with a display name based on MAC if available
-        mac_display = next(iter(device_info.get('network_interfaces', {}).values()), '')[:8]
-
-        # Get list of data files to send to Brain
-        files_list = device_manager._get_data_files_list()
-
-        registration_data = {
-            'device_id': device_id,
-            'device_name': f"Thoth-{mac_display}" if mac_display else f"Thoth-{device_id[:8]}",
-            'device_type': 'thoth',
-            'hardware_info': device_info,
-            'files': files_list  # Push file list to Brain
-        }
-
-        # Log the request for debugging
-        logger.info(f"Registering device with data: {json.dumps(registration_data, indent=2)}")
-
-        # Send registration request with retry logic
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = requests.post(
-                    f"{Config.BRAIN_SERVER_URL}/device/register",
-                    json=registration_data,
-                    headers=headers,
-                    timeout=30
-                )
-
-                # Handle response - consider it successful if we get a 200/201 or 400 with the logging error
-                if response.status_code in (200, 201) or \
-                   (response.status_code == 400 and 'log_response() takes 3 positional arguments but 4 were given' in response.text):
-
-                    # Try to parse the response as JSON
-                    try:
-                        result = response.json()
-                        logger.info(f"Registration response JSON: {result}")
-                        if result.get('success') == True or 'device_id' in result:
-                            logger.info(f"Device registration successful")
-
-                            # Check for pending upload requests
-                            pending_uploads = result.get('pending_uploads', [])
-                            logger.info(f"Pending uploads in response: {pending_uploads}")
-                            if pending_uploads:
-                                logger.info(f"Processing {len(pending_uploads)} pending uploads...")
-                                _process_pending_uploads(pending_uploads, auth_token)
-
-                            return True
-                    except ValueError:
-                        # If we can't parse JSON but got a 200, consider it a success
-                        if response.status_code in (200, 201):
-                            logger.info("Device registration successful (non-JSON response)")
-                            return True
-
-                    logger.warning(f"Unexpected response format: {response.text}")
-                    return True  # Still consider it a success since the device was registered
-
-                logger.warning(f"Registration attempt {attempt + 1} failed with status {response.status_code}")
-                logger.warning(f"Response body: {response.text}")
-
-                # If we're out of retries, log the final error
-                if attempt == max_retries - 1:
-                    logger.error(f"Device registration failed after {max_retries} attempts")
-                    return False
-
-                # Wait before retrying
-                time.sleep(2)
-
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"Network error during registration (attempt {attempt + 1}): {str(e)}")
-                if attempt == max_retries - 1:
-                    logger.error("Max retries reached, giving up")
-                    return False
-                time.sleep(2)
-
-        return False
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Network error during device registration: {str(e)}")
-        if hasattr(e, 'response') and e.response is not None:
-            logger.error(f"Response: {e.response.status_code} - {e.response.text}")
-        return False
+        success, message = device_manager.register_device(auth_token.strip())
+        if success:
+            logger.info(message)
+        else:
+            logger.warning(message)
+        return success
     except Exception as e:
         logger.error(f"Unexpected error in device registration: {str(e)}", exc_info=True)
         return False
@@ -881,14 +759,6 @@ device_scheduler.start()
 # Load registration info if available
 device_manager.load_registration_info()
 cleanup_old_minutes(Config.CAPTURE_KEEP_MINUTES)
-
-# Start device heartbeat if registered
-if device_manager.registered:
-    try:
-        device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
-        logger.info("Started device heartbeat")
-    except Exception as e:
-        logger.error(f"Failed to start device heartbeat: {e}")
 
 # WiFi credentials storage file
 WIFI_CREDENTIALS_FILE = os.path.join(Config.CONFIG_DIR, 'wifi_credentials.json')
@@ -1508,7 +1378,6 @@ def status():
         available_networks = scan_wifi_networks()
         capture_overview = get_capture_overview()
         sensors = detect_sensor_inventory()
-        recent_minutes = list_minutes()[:8]
 
         return render_template('status.html',
                             system_status=system_status,
@@ -1519,8 +1388,7 @@ def status():
                             username=session.get('username'),
                             available_networks=available_networks,
                             capture_overview=capture_overview,
-                            sensors=sensors,
-                            recent_minutes=recent_minutes)
+                            sensors=sensors)
 
     except Exception as e:
         logger.error(f"Error in status route: {str(e)}", exc_info=True)
@@ -1556,6 +1424,9 @@ def capture_detail(minute):
     files = capture_files(minute_dir)
     detail = minute_summary(minute_dir)
     video_preview = f"/api/captures/{minute}/file/video" if files.get("video") else None
+    radar_preview = preview_text(files.get("radar"), 12000)
+    csi_preview = preview_text(files.get("csi_timestamped") or files.get("csi_csv"), 12000)
+    serial_preview = preview_text(files.get("csi_serial"), 12000)
 
     return render_template(
         'capture_detail.html',
@@ -1566,6 +1437,9 @@ def capture_detail(minute):
         video_url=video_preview,
         radar_plot_urls=[url_for('api_capture_radar_plot', minute=minute_dir.name, plot=plot) for plot in RADAR_PLOTS],
         csi_plot_url=url_for('api_capture_csi_plot', minute=minute_dir.name),
+        radar_preview=radar_preview,
+        csi_preview=csi_preview,
+        serial_preview=serial_preview,
         username=session.get('username'),
         active_minute=current_minute().name if current_minute() else None,
     )
@@ -1664,6 +1538,9 @@ def api_capture_file(minute, kind):
 @app.route('/api/captures/<minute>/csi/plot')
 def api_capture_csi_plot(minute):
     """Render a CSI amplitude plot for a saved minute."""
+    if request.method == 'HEAD':
+        return Response(status=200)
+
     minute_dir = get_minute(minute)
     if not minute_dir:
         abort(404, description='Minute folder not found')
@@ -1681,6 +1558,9 @@ def api_capture_csi_plot(minute):
 @app.route('/api/captures/<minute>/radar/plot/<plot>')
 def api_capture_radar_plot(minute, plot):
     """Render a radar plot for a saved minute."""
+    if request.method == 'HEAD':
+        return Response(status=200)
+
     minute_dir = get_minute(minute)
     if not minute_dir:
         abort(404, description='Minute folder not found')
@@ -1694,21 +1574,11 @@ def api_capture_radar_plot(minute, plot):
     if not radar_path or not radar_path.exists():
         abort(404, description='No radar data available')
 
-    if not RADAR_RENDERER.exists():
-        abort(500, description='Radar renderer not found')
-
-    cache_dir = Path(tempfile.gettempdir()) / 'thoth-capture-radar'
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    out_path = cache_dir / f'{minute}-{plot}.png'
-
-    radar_mtime = radar_path.stat().st_mtime
-    renderer_mtime = RADAR_RENDERER.stat().st_mtime
-    if not out_path.exists() or out_path.stat().st_mtime < radar_mtime or out_path.stat().st_mtime < renderer_mtime:
-        subprocess.run(
-            [sys.executable, str(RADAR_RENDERER), str(radar_path), plot, str(out_path)],
-            check=True,
-            capture_output=True,
-        )
+    try:
+        out_path = _cached_radar_plot_path(radar_path, plot, 'thoth-capture-radar')
+    except Exception as exc:
+        logger.exception(f"Failed to render saved radar plot {plot}: {exc}")
+        abort(500, description=str(exc))
 
     return send_file(out_path, mimetype='image/png', conditional=False, max_age=0)
 
@@ -1780,7 +1650,7 @@ def upload_capture_minute(minute):
 
 @app.route('/captures/live/<kind>')
 def live_capture_stream(kind):
-    """Show a live capture page for the selected sensor."""
+    """Render the live sensor view for the selected modality."""
     if 'username' not in session:
         return redirect(url_for('login', next=url_for('captures')))
 
@@ -1788,68 +1658,58 @@ def live_capture_stream(kind):
     if kind not in {'video', 'csi', 'radar'}:
         abort(404, description=f'Unsupported live stream kind: {kind}')
 
+    minute_dir = current_minute()
+    files = capture_files(minute_dir) if minute_dir else {}
+
     return render_template(
         'live_stream.html',
         kind=kind,
-        active_minute=current_minute().name if current_minute() else None,
+        active_minute=minute_dir.name if minute_dir else None,
         username=session.get('username'),
-        stream_url=url_for('api_live_capture_stream', kind=kind),
-        csi_plot_url=url_for('api_live_capture_csi_plot') if kind == 'csi' else None,
-        plot_urls=[url_for('api_live_capture_plot', plot=plot) for plot in RADAR_PLOTS] if kind == 'radar' else [],
+        stream_url=url_for('api_live_capture_video'),
+        csi_plot_url=url_for('api_live_capture_csi_plot'),
+        plot_urls=[url_for('api_live_capture_plot', plot=plot) for plot in RADAR_PLOTS],
+        has_video=bool(files.get('video') and files['video'].exists()) if minute_dir else False,
+        has_csi=bool(files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial')),
+        has_radar=bool(files.get('radar')),
     )
 
-@app.route('/api/captures/live/<kind>')
-def api_live_capture_stream(kind):
-    """Stream the current live sensor feed."""
+
+@app.route('/api/captures/live/video')
+def api_live_capture_video():
+    """Stream the live USB camera feed as MJPEG."""
     if 'username' not in session:
         return redirect(url_for('login', next=url_for('captures')))
 
-    kind = kind.lower()
-    if kind == 'video':
-        minute_dir = current_minute()
-        if not minute_dir:
-            abort(404, description='No live capture minute available')
-        files = capture_files(minute_dir)
-        path = files.get('video')
-        if not path or not path.exists():
-            abort(404, description='No live video available')
-        return Response(
-            stream_with_context(tail_binary_file(path)),
-            mimetype='video/mp4',
-            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
-        )
+    return Response(
+        stream_with_context(mjpeg_stream()),
+        mimetype='multipart/x-mixed-replace; boundary=frame',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
 
-    minute_dir = current_minute()
-    if not minute_dir:
-        abort(404, description='No live capture minute available')
 
-    files = capture_files(minute_dir)
-    if kind == 'csi':
-        path = files.get('csi_timestamped') or files.get('csi_csv') or files.get('csi_serial')
-        if not path:
-            abort(404, description='No CSI stream available')
-        return Response(
-            stream_with_context(sse_tail(path, 'csi')),
-            mimetype='text/event-stream',
-            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
-        )
+@app.route('/api/captures/live/csi')
+def api_live_capture_csi():
+    """Redirect to the live CSI plot view."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('captures')))
+    return redirect(url_for('live_capture_stream', kind='csi'))
 
-    if kind == 'radar':
-        path = files.get('radar')
-        if not path:
-            abort(404, description='No radar stream available')
-        return Response(
-            stream_with_context(sse_tail(path, 'radar', mode='binary')),
-            mimetype='text/event-stream',
-            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
-        )
 
-    return jsonify({'status': 'error', 'message': f'Unsupported live stream kind: {kind}'}), 400
+@app.route('/api/captures/live/radar')
+def api_live_capture_radar():
+    """Redirect to the live radar plot view."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('captures')))
+    return redirect(url_for('live_capture_stream', kind='radar'))
 
 
 @app.route('/api/captures/live/csi/plot')
 def api_live_capture_csi_plot():
     """Render a live CSI amplitude SVG from the active minute."""
+    if request.method == 'HEAD':
+        return Response(status=200)
+
     if 'username' not in session:
         return redirect(url_for('login', next=url_for('captures')))
 
@@ -1870,6 +1730,9 @@ def api_live_capture_csi_plot():
 @app.route('/api/captures/live/radar/plot/<plot>')
 def api_live_capture_plot(plot):
     """Render the current minute radar plot as PNG."""
+    if request.method == 'HEAD':
+        return Response(status=200)
+
     if 'username' not in session:
         return redirect(url_for('login', next=url_for('captures')))
 
@@ -1884,23 +1747,13 @@ def api_live_capture_plot(plot):
     files = capture_files(minute_dir)
     radar_path = files.get('radar')
     if not radar_path or not radar_path.exists():
-        abort(404, description='No radar file available')
+        abort(404, description='No radar data available')
 
-    if not RADAR_RENDERER.exists():
-        abort(500, description='Radar renderer not found')
-
-    cache_dir = Path(tempfile.gettempdir()) / 'thoth-live-radar'
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    out_path = cache_dir / f'{minute_dir.name}-{plot}.png'
-
-    radar_mtime = radar_path.stat().st_mtime
-    renderer_mtime = RADAR_RENDERER.stat().st_mtime
-    if not out_path.exists() or out_path.stat().st_mtime < radar_mtime or out_path.stat().st_mtime < renderer_mtime:
-        subprocess.run(
-            [sys.executable, str(RADAR_RENDERER), str(radar_path), plot, str(out_path)],
-            check=True,
-            capture_output=True,
-        )
+    try:
+        out_path = _cached_radar_plot_path(radar_path, plot, 'thoth-live-radar')
+    except Exception as exc:
+        logger.exception(f"Failed to render live radar plot {plot}: {exc}")
+        abort(500, description=str(exc))
 
     return send_file(out_path, mimetype='image/png', conditional=False, max_age=0)
 
