@@ -1555,9 +1555,6 @@ def capture_detail(minute):
     files = capture_files(minute_dir)
     detail = minute_summary(minute_dir)
     video_preview = f"/api/captures/{minute}/file/video" if files.get("video") else None
-    radar_preview = preview_text(files.get("radar"), 12000)
-    csi_preview = preview_text(files.get("csi_timestamped") or files.get("csi_csv"), 12000)
-    serial_preview = preview_text(files.get("csi_serial"), 12000)
 
     return render_template(
         'capture_detail.html',
@@ -1566,9 +1563,8 @@ def capture_detail(minute):
         minute_info=detail,
         files=files,
         video_url=video_preview,
-        radar_preview=radar_preview,
-        csi_preview=csi_preview,
-        serial_preview=serial_preview,
+        radar_plot_urls=[url_for('api_capture_radar_plot', minute=minute_dir.name, plot=plot) for plot in RADAR_PLOTS],
+        csi_plot_url=url_for('api_capture_csi_plot', minute=minute_dir.name),
         username=session.get('username'),
         active_minute=current_minute().name if current_minute() else None,
     )
@@ -1664,6 +1660,58 @@ def api_capture_file(minute, kind):
     return send_file(file_path, as_attachment=False, mimetype=mime, conditional=True)
 
 
+@app.route('/api/captures/<minute>/csi/plot')
+def api_capture_csi_plot(minute):
+    """Render a CSI amplitude plot for a saved minute."""
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        abort(404, description='Minute folder not found')
+
+    files = capture_files(minute_dir)
+    path = files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial')
+    if not path or not path.exists():
+        abort(404, description='No CSI data available')
+
+    points = _parse_csi_average_series(path)
+    svg = _build_csi_svg(points)
+    return Response(svg, mimetype='image/svg+xml', headers={'Cache-Control': 'no-cache'})
+
+
+@app.route('/api/captures/<minute>/radar/plot/<plot>')
+def api_capture_radar_plot(minute, plot):
+    """Render a radar plot for a saved minute."""
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        abort(404, description='Minute folder not found')
+
+    plot = plot.lower()
+    if plot not in RADAR_PLOTS:
+        abort(404, description=f'Unsupported radar plot kind: {plot}')
+
+    files = capture_files(minute_dir)
+    radar_path = files.get('radar')
+    if not radar_path or not radar_path.exists():
+        abort(404, description='No radar data available')
+
+    if not RADAR_RENDERER.exists():
+        abort(500, description='Radar renderer not found')
+
+    cache_dir = Path(tempfile.gettempdir()) / 'thoth-capture-radar'
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out_path = cache_dir / f'{minute}-{plot}.png'
+
+    radar_mtime = radar_path.stat().st_mtime
+    renderer_mtime = RADAR_RENDERER.stat().st_mtime
+    if not out_path.exists() or out_path.stat().st_mtime < radar_mtime or out_path.stat().st_mtime < renderer_mtime:
+        subprocess.run(
+            [sys.executable, str(RADAR_RENDERER), str(radar_path), plot, str(out_path)],
+            check=True,
+            capture_output=True,
+        )
+
+    return send_file(out_path, mimetype='image/png', conditional=False, max_age=0)
+
+
 @app.route('/api/captures/<minute>/upload', methods=['POST'])
 def upload_capture_minute(minute):
     """Upload all files in a capture minute to Brain."""
@@ -1757,6 +1805,12 @@ def api_live_capture_stream(kind):
 
     kind = kind.lower()
     if kind == 'video':
+        minute_dir = current_minute()
+        if minute_dir:
+            files = capture_files(minute_dir)
+            path = files.get('video')
+            if path and path.exists():
+                return send_file(path, mimetype='video/mp4', conditional=False, max_age=0)
         try:
             return Response(
                 stream_with_context(mjpeg_stream()),
@@ -1764,14 +1818,7 @@ def api_live_capture_stream(kind):
                 headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
             )
         except Exception:
-            minute_dir = current_minute()
-            if not minute_dir:
-                abort(404, description='No live capture minute available')
-            files = capture_files(minute_dir)
-            path = files.get('video')
-            if not path or not path.exists():
-                abort(404, description='No live video available')
-            return send_file(path, mimetype='video/mp4', conditional=False, max_age=0)
+            abort(404, description='No live video available')
 
     minute_dir = current_minute()
     if not minute_dir:
