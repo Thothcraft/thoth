@@ -103,6 +103,10 @@ iptables -t nat -A POSTROUTING -j MASQUERADE
 log "Starting Thoth web application..."
 systemctl start thoth-web || log "Warning: thoth-web failed to start"
 
+log "Starting Thoth continuous collector..."
+systemctl enable thoth-collector.service 2>/dev/null || true
+systemctl start thoth-collector.service || log "Warning: thoth-collector failed to start"
+
 log "=========================================="
 log "  Thoth Hotspot Active!"
 log "=========================================="

@@ -15,6 +15,10 @@ sudo dpkg-reconfigure openssh-server 2>/dev/null || true
 sudo systemctl enable thoth.service
 sudo systemctl start thoth.service
 
+# Ensure continuous collector is enabled and started
+sudo systemctl enable thoth-collector.service
+sudo systemctl start thoth-collector.service
+
 # Remove the first-boot flag
 sudo rm -f /var/run/thoth-firstboot
 

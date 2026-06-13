@@ -33,6 +33,7 @@ pip install -r "$RPI_DIR/requirements.txt" -q
 # --- systemd service ---
 echo "➤ Installing systemd service …"
 sudo cp "$SCRIPT_DIR/thoth.service" /etc/systemd/system/thoth.service
+sudo cp "$SCRIPT_DIR/thoth-collector.service" /etc/systemd/system/thoth-collector.service
 
 # Patch paths in the service file
 sudo sed -i "s|__PYTHON__|$VENV_DIR/bin/python|g" /etc/systemd/system/thoth.service
@@ -40,9 +41,17 @@ sudo sed -i "s|__APP__|$RPI_DIR/app.py|g" /etc/systemd/system/thoth.service
 sudo sed -i "s|__WORKDIR__|$RPI_DIR|g" /etc/systemd/system/thoth.service
 sudo sed -i "s|__THOTH_ROOT__|$THOTH_ROOT|g" /etc/systemd/system/thoth.service
 
+sudo sed -i "s|__PYTHON__|$VENV_DIR/bin/python|g" /etc/systemd/system/thoth-collector.service
+sudo sed -i "s|__COLLECTOR__|$RPI_DIR/collector.py|g" /etc/systemd/system/thoth-collector.service
+sudo sed -i "s|__WORKDIR__|$RPI_DIR|g" /etc/systemd/system/thoth-collector.service
+sudo sed -i "s|__THOTH_ROOT__|$THOTH_ROOT|g" /etc/systemd/system/thoth-collector.service
+sudo sed -i "s|__CAPTURE_SCRIPT__|/home/pi/Desktop/capture_dreamhat_minute.py|g" /etc/systemd/system/thoth-collector.service
+
 sudo systemctl daemon-reload
 sudo systemctl enable thoth.service
 sudo systemctl start thoth.service
+sudo systemctl enable thoth-collector.service
+sudo systemctl start thoth-collector.service
 
 echo ""
 echo "✅  Thoth installed and running on port 8000"
