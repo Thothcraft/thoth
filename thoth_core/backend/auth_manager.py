@@ -141,23 +141,43 @@ class AuthManager:
         if not self.config.BRAIN_SERVER_URL:
             raise Exception("Brain server URL not configured")
             
-        url = f"{self.config.BRAIN_SERVER_URL}/api/token"
-        
         try:
-            # Send login request
-            response = requests.post(
-                url,
-                json={
-                    'username': username,
-                    'password': password
-                },
-                headers={
-                    'accept': 'application/json',
-                    'Content-Type': 'application/json'
-                },
-                timeout=10
-            )
-            
+            candidates = [
+                f"{self.config.BRAIN_SERVER_URL}/api/token",
+                f"{self.config.BRAIN_SERVER_URL}/token",
+            ]
+
+            response = None
+            last_error = None
+            for url in candidates:
+                try:
+                    response = requests.post(
+                        url,
+                        json={
+                            "username": username,
+                            "password": password
+                        },
+                        headers={
+                            "accept": "application/json",
+                            "Content-Type": "application/json"
+                        },
+                        timeout=10
+                    )
+                except RequestException as e:
+                    last_error = e
+                    continue
+
+                if response.status_code == 200:
+                    break
+
+                if response.status_code not in (404, 405):
+                    break
+
+                last_error = Exception(f"{url} -> {response.status_code} {response.text}")
+
+            if response is None:
+                raise Exception(f"Error connecting to Brain server: {last_error}")
+
             if response.status_code == 200:
                 result = response.json()
                 
@@ -172,6 +192,7 @@ class AuthManager:
                     'username': result.get('username') or token_data.get('username'),
                     'user_id': result.get('user_id') or token_data.get('user_id') or token_data.get('sub'),
                     'email': token_data.get('email'),
+                    'role': result.get('role', token_data.get('role')),
                     'scopes': token_data.get('scopes', [])
                 }
                 
