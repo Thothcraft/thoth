@@ -32,21 +32,24 @@
     <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         {% if kind == 'video' %}
         <div class="space-y-3">
-            <video
-                id="live-video"
-                class="w-full rounded-2xl bg-black shadow-inner"
-                controls
-                autoplay
-                muted
-                playsinline
-                preload="auto"
-                src="{{ video_url }}?t={{ now.timestamp() | int }}"
-            ></video>
-            <div class="flex items-center justify-between text-xs text-slate-500">
-                <span>Current minute MP4 preview</span>
-                <button type="button" id="reload-video" class="rounded-lg border border-slate-200 px-3 py-1.5 text-slate-700 hover:bg-slate-50">
-                    Reload
-                </button>
+            <div class="overflow-hidden rounded-2xl border border-slate-200 bg-black shadow-inner">
+                <img
+                    id="live-video-frame"
+                    class="w-full h-auto block"
+                    alt="Live video preview"
+                    src="{{ video_frame_url }}?t={{ now.timestamp() | int }}"
+                >
+            </div>
+            <div class="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+                <span>Current minute video preview refreshes automatically.</span>
+                <div class="flex items-center gap-2">
+                    <button type="button" id="reload-video" class="rounded-lg border border-slate-200 px-3 py-1.5 text-slate-700 hover:bg-slate-50">
+                        Refresh
+                    </button>
+                    <a href="{{ video_url }}" target="_blank" class="rounded-lg border border-slate-200 px-3 py-1.5 text-slate-700 hover:bg-slate-50">
+                        Open MP4
+                    </a>
+                </div>
             </div>
         </div>
         {% elif kind == 'csi' %}
@@ -88,7 +91,7 @@
 const kind = {{ kind|tojson }};
 const csiDataUrl = {{ csi_data_url|tojson }};
 const radarDataUrls = {{ radar_data_urls|tojson }};
-const videoEl = document.getElementById('live-video');
+const videoFrame = document.getElementById('live-video-frame');
 const videoReload = document.getElementById('reload-video');
 
 function plotConfig() {
@@ -188,35 +191,23 @@ async function renderRadar() {
 }
 
 function refreshVideo() {
-  if (!videoEl) return;
-  const base = {{ video_url|tojson }};
-  videoEl.src = `${base}?t=${Date.now()}`;
-  videoEl.load();
-  videoEl.play().catch(() => {});
-}
-
-if (videoEl) {
-  videoEl.addEventListener('error', () => {
-    const parent = videoEl.parentElement;
-    if (parent) {
-      const note = document.createElement('p');
-      note.className = 'text-sm text-rose-600';
-      note.textContent = 'Video preview is unavailable.';
-      parent.appendChild(note);
-    }
-  });
+  if (!videoFrame) return;
+  const base = {{ video_frame_url|tojson }};
+  videoFrame.src = `${base}?t=${Date.now()}`;
 }
 
 if (videoReload) {
   videoReload.addEventListener('click', refreshVideo);
 }
 
-if (kind === 'csi') {
+if (kind === 'video') {
+  setInterval(refreshVideo, 1500);
+} else if (kind === 'csi') {
   renderCsi();
-  setInterval(renderCsi, 2500);
+  setInterval(renderCsi, 1500);
 } else if (kind === 'radar') {
   renderRadar();
-  setInterval(renderRadar, 2500);
+  setInterval(renderRadar, 1500);
 }
 </script>
 {% endblock %}

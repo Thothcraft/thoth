@@ -11,6 +11,7 @@ import io
 import math
 import html
 import subprocess
+import shutil
 import threading
 import time
 import logging
@@ -464,6 +465,76 @@ def _current_live_video_path() -> Optional[Path]:
     if video_path and video_path.exists():
         return video_path
     return None
+
+
+def _best_live_minute_for_kind(kind: str) -> tuple[Optional[Path], Dict[str, Optional[Path]]]:
+    """Return the best available minute folder and file map for a live kind."""
+    def _has_kind(files: Dict[str, Optional[Path]]) -> bool:
+        if kind == 'video':
+            return bool(files.get('video') and files['video'].exists())
+        if kind == 'csi':
+            return bool(
+                (files.get('csi_csv') and files['csi_csv'].exists())
+                or (files.get('csi_timestamped') and files['csi_timestamped'].exists())
+                or (files.get('csi_serial') and files['csi_serial'].exists())
+            )
+        if kind == 'radar':
+            return bool(files.get('radar') and files['radar'].exists())
+        return False
+
+    current = current_minute()
+    if current:
+        current_files = capture_files(current)
+        if _has_kind(current_files):
+            return current, current_files
+
+    for minute in list_minutes():
+        minute_dir = get_minute(minute.get('minute', ''))
+        if not minute_dir:
+            continue
+        files = capture_files(minute_dir)
+        if _has_kind(files):
+            return minute_dir, files
+
+    return current, capture_files(current) if current else {}
+
+
+def _render_video_frame(video_path: Path) -> bytes:
+    ffmpeg = shutil.which('ffmpeg')
+    if ffmpeg is None:
+        raise RuntimeError('ffmpeg was not found in PATH.')
+
+    attempts = [
+        ['-sseof', '-1'],
+        ['-sseof', '-0.5'],
+        [],
+    ]
+    last_error = None
+    for seek_args in attempts:
+        cmd = [
+            ffmpeg,
+            '-hide_banner',
+            '-loglevel',
+            'error',
+            *seek_args,
+            '-i',
+            str(video_path),
+            '-frames:v',
+            '1',
+            '-f',
+            'image2pipe',
+            '-vcodec',
+            'mjpeg',
+            'pipe:1',
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=12)
+            if result.returncode == 0 and result.stdout:
+                return result.stdout
+            last_error = result.stderr.decode('utf-8', errors='replace').strip()
+        except Exception as exc:
+            last_error = str(exc)
+    raise RuntimeError(last_error or 'Unable to render video frame')
 
 
 def _csi_plot_payload(path: Path, limit: int = 180) -> Dict[str, Any]:
@@ -1274,8 +1345,10 @@ def live_capture_stream(kind):
     if kind not in {'video', 'csi', 'radar'}:
         abort(404, description=f'Unsupported live stream kind: {kind}')
 
-    minute_dir = current_minute()
-    files = capture_files(minute_dir) if minute_dir else {}
+    minute_dir, files = _best_live_minute_for_kind(kind)
+    has_video = bool(files.get('video') and files['video'].exists()) if minute_dir else False
+    has_csi = bool(files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial'))
+    has_radar = bool(files.get('radar'))
 
     return render_template(
         'live_stream.html',
@@ -1283,11 +1356,12 @@ def live_capture_stream(kind):
         active_minute=minute_dir.name if minute_dir else None,
         username=session.get('username'),
         video_url=url_for('api_live_capture_video'),
+        video_frame_url=url_for('api_live_capture_video_frame'),
         csi_data_url=url_for('api_live_capture_csi_data'),
         radar_data_urls=[url_for('api_live_capture_radar_data', plot=plot) for plot in RADAR_PLOTS],
-        has_video=bool(files.get('video') and files['video'].exists()) if minute_dir else False,
-        has_csi=bool(files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial')),
-        has_radar=bool(files.get('radar')),
+        has_video=has_video,
+        has_csi=has_csi,
+        has_radar=has_radar,
     )
 
 
@@ -1297,11 +1371,32 @@ def api_live_capture_video():
     if 'username' not in session:
         return redirect(url_for('login', next=url_for('captures')))
 
-    video_path = _current_live_video_path()
-    if not video_path:
+    minute_dir, files = _best_live_minute_for_kind('video')
+    video_path = files.get('video') if files else None
+    if not minute_dir or not video_path or not video_path.exists():
         abort(404, description='No live video available')
 
     return send_file(video_path, mimetype='video/mp4', conditional=True, max_age=0)
+
+
+@app.route('/api/captures/live/video/frame')
+def api_live_capture_video_frame():
+    """Render a live JPEG preview from the current or latest video minute."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('captures')))
+
+    minute_dir, files = _best_live_minute_for_kind('video')
+    video_path = files.get('video') if files else None
+    if not minute_dir or not video_path or not video_path.exists():
+        abort(404, description='No live video available')
+
+    try:
+        jpeg_bytes = _render_video_frame(video_path)
+    except Exception as exc:
+        logger.exception(f"Failed to render live video frame: {exc}")
+        abort(500, description=str(exc))
+
+    return Response(jpeg_bytes, mimetype='image/jpeg', headers={'Cache-Control': 'no-cache'})
 
 
 @app.route('/api/captures/live/csi')
@@ -1326,11 +1421,10 @@ def api_live_capture_csi_data():
     if 'username' not in session:
         return redirect(url_for('login', next=url_for('captures')))
 
-    minute_dir = current_minute()
+    minute_dir, files = _best_live_minute_for_kind('csi')
     if not minute_dir:
         abort(404, description='No live capture minute available')
 
-    files = capture_files(minute_dir)
     path = files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial')
     if not path or not path.exists():
         abort(404, description='No CSI data available')
@@ -1347,11 +1441,10 @@ def api_live_capture_csi_plot():
     if 'username' not in session:
         return redirect(url_for('login', next=url_for('captures')))
 
-    minute_dir = current_minute()
+    minute_dir, files = _best_live_minute_for_kind('csi')
     if not minute_dir:
         abort(404, description='No live capture minute available')
 
-    files = capture_files(minute_dir)
     path = files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial')
     if not path or not path.exists():
         abort(404, description='No CSI data available')
@@ -1371,11 +1464,10 @@ def api_live_capture_radar_data(plot):
     if plot not in RADAR_PLOTS:
         abort(404, description=f'Unsupported radar plot kind: {plot}')
 
-    minute_dir = current_minute()
+    minute_dir, files = _best_live_minute_for_kind('radar')
     if not minute_dir:
         abort(404, description='No live capture minute available')
 
-    files = capture_files(minute_dir)
     radar_path = files.get('radar')
     if not radar_path or not radar_path.exists():
         abort(404, description='No radar data available')
@@ -1402,11 +1494,10 @@ def api_live_capture_plot(plot):
     if plot not in RADAR_PLOTS:
         abort(404, description=f'Unsupported radar plot kind: {plot}')
 
-    minute_dir = current_minute()
+    minute_dir, files = _best_live_minute_for_kind('radar')
     if not minute_dir:
         abort(404, description='No live capture minute available')
 
-    files = capture_files(minute_dir)
     radar_path = files.get('radar')
     if not radar_path or not radar_path.exists():
         abort(404, description='No radar data available')
