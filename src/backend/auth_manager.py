@@ -50,21 +50,14 @@ class AuthManager:
             auth_file = os.path.join(self.config.CONFIG_DIR, 'auth.json')
 
             if os.path.exists(auth_file):
+                # Do not restore a previous login automatically.
+                # The device should only be considered online after a fresh
+                # login during the current session.
                 with open(auth_file, 'r') as f:
-                    auth_data = json.load(f)
+                    _ = json.load(f)
 
-                    self.token = auth_data.get('token')
-                    self.refresh_token = auth_data.get('refresh_token')
-                    self.token_expiry = datetime.fromisoformat(auth_data.get('token_expiry')) \
-                        if auth_data.get('token_expiry') else None
-                    self.user_info = auth_data.get('user_info')
-
-                    # Set token on Config for device registration
-                    if self.token:
-                        self.config.USER_AUTH_TOKEN = self.token
-                        logger.info("Loaded authentication data from disk and set USER_AUTH_TOKEN")
-                    else:
-                        logger.info("Loaded authentication data from disk (no token)")
+                self.logout()
+                logger.info("Ignored persisted authentication data; login is required for online state")
 
         except Exception as e:
             logger.error(f"Error loading auth data: {e}")

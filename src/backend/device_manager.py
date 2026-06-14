@@ -297,9 +297,12 @@ class DeviceManager:
 
                     # Update instance state
                     self.device_id = config_data.get('device_id', self.device_id)
-                    self.auth_token = config_data.get('auth_token')
-                    self.registered = True
+                    self.auth_token = None
+                    self.registered = False
 
+                    # Keep only the stable device identity; online state must
+                    # come from a fresh login in the current session.
+                    config_data.pop('auth_token', None)
                     return config_data
 
             return None
@@ -307,6 +310,38 @@ class DeviceManager:
         except Exception as e:
             logger.error(f"Error loading registration info: {e}")
             return None
+
+    def mark_device_offline(self) -> bool:
+        """Notify Brain that the device is offline and stop local registration state."""
+        try:
+            if self.heartbeat_thread and self.heartbeat_thread.is_alive():
+                self.stop_heartbeat()
+
+            self.status['online'] = False
+            self.status['last_seen'] = datetime.utcnow().isoformat()
+            self.registered = False
+
+            if not self.config.BRAIN_SERVER_URL:
+                return False
+
+            url = f"{self.config.BRAIN_SERVER_URL}/api/device/{self.device_id}/offline"
+            headers = {"Content-Type": "application/json"}
+            if self.auth_token:
+                headers["Authorization"] = f"Bearer {self.auth_token}"
+            response = self.session.post(url, headers=headers, timeout=10)
+            if response.status_code in (200, 201, 204):
+                logger.info(f"Device {self.device_id} marked offline on Brain")
+                return True
+
+            logger.warning(
+                "Failed to mark device offline on Brain: %s - %s",
+                response.status_code,
+                response.text,
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Error marking device offline: {e}", exc_info=True)
+            return False
 
     def update_status(self, status_updates: Dict[str, Any]) -> bool:
         """Update device status on the Brain server.

@@ -802,6 +802,11 @@ device_scheduler.start()
 # Load registration info if available
 device_manager.load_registration_info()
 cleanup_old_minutes(Config.CAPTURE_KEEP_MINUTES)
+if not auth_manager.is_authenticated():
+    try:
+        device_manager.mark_device_offline()
+    except Exception as e:
+        logger.error(f"Error forcing offline state at startup: {e}")
 
 # WiFi credentials storage file
 WIFI_CREDENTIALS_FILE = os.path.join(Config.CONFIG_DIR, 'wifi_credentials.json')
@@ -1602,14 +1607,16 @@ def logout():
     """Log out the current user."""
     # Update device status
     try:
-        device_manager.update_status({
-            'online': False,
-            'last_seen': datetime.utcnow().isoformat()
-        })
+        device_manager.mark_device_offline()
     except Exception as e:
         logger.error(f"Error updating device status on logout: {e}")
 
-    # Clear the user's auth token so device registration stops
+    # Clear auth state so the device cannot remain online without a fresh login
+    try:
+        auth_manager.logout()
+    except Exception as e:
+        logger.error(f"Error clearing auth state on logout: {e}")
+
     Config.USER_AUTH_TOKEN = None
 
     session.clear()
