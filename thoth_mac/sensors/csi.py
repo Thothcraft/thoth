@@ -1,12 +1,4 @@
-"""macOS WiFi CSI Sensor — scaffolded for future ESP32 USB extension.
-
-This sensor detects ESP32 devices connected via USB on macOS
-(/dev/tty.usbserial-*, /dev/tty.SLAB*) and reads streamed
-Channel State Information (CSI) from the receiver ESP32.
-
-Currently scaffolded; will be fully functional once ESP32 CSI
-firmware and USB detection are integrated.
-"""
+"""macOS WiFi CSI Sensor."""
 
 import glob
 import logging
@@ -36,7 +28,6 @@ class MacCSISensor(BaseSensor):
         super().__init__(config)
         self._serial_port: Optional[str] = None
         self._serial_connection = None
-        self._mock_mode = False
         self._reader_thread: Optional[threading.Thread] = None
         self._running = False
         self._num_subcarriers = config.custom_params.get("num_subcarriers", 64) if config else 64
@@ -80,17 +71,13 @@ class MacCSISensor(BaseSensor):
             except Exception as e:
                 logger.error("Failed to open serial port: %s", e)
 
-        # Fall back to mock mode
-        logger.info("CSI running in mock mode (no ESP32 detected on macOS)")
-        self._mock_mode = True
-        self.status = SensorStatus.AVAILABLE
-        return True
+        logger.error("No ESP32 CSI receiver detected on macOS")
+        self.status = SensorStatus.UNAVAILABLE
+        return False
 
     def read_sample(self) -> Optional[np.ndarray]:
         if self._serial_connection:
             return self._read_from_serial()
-        if self._mock_mode:
-            return self._generate_mock_sample()
         return None
 
     def _read_from_serial(self) -> Optional[np.ndarray]:
@@ -115,15 +102,6 @@ class MacCSISensor(BaseSensor):
             logger.debug("Serial read error: %s", e)
             return None
 
-    def _generate_mock_sample(self) -> np.ndarray:
-        base = np.random.uniform(20, 40, self._num_subcarriers)
-        noise = np.random.normal(0, 2, self._num_subcarriers)
-        amplitude = base + noise
-        if self._include_phase:
-            phase = np.random.uniform(-np.pi, np.pi, self._num_subcarriers)
-            return np.concatenate([amplitude, phase]).astype(self.data_dtype)
-        return amplitude.astype(self.data_dtype)
-
     def cleanup(self):
         self._running = False
         if self._reader_thread:
@@ -135,13 +113,11 @@ class MacCSISensor(BaseSensor):
             except Exception:
                 pass
             self._serial_connection = None
-        self._mock_mode = False
 
     def get_info(self) -> Dict[str, Any]:
         info = super().get_info()
         info.update({
             "serial_port": self._serial_port,
-            "mock_mode": self._mock_mode,
             "num_subcarriers": self._num_subcarriers,
             "include_phase": self._include_phase,
             "detected_esp32_ports": self.find_esp32_ports(),

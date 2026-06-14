@@ -1,8 +1,8 @@
 # Thoth for Windows
 
 A system-tray application that runs a local Thoth server, exposes built-in
-sensors (camera, microphone, IMU mock), and provides a browser-based
-dashboard for data collection and model predictions.
+sensors (camera and microphone) plus external sensor support, and provides
+a browser-based dashboard for data collection and model predictions.
 
 ## Quick Install
 
@@ -33,8 +33,8 @@ This will:
 |------------|---------------|----------------------------------------------|
 | Camera     | ✅ Working    | DirectShow backend, built-in or USB          |
 | Microphone | ✅ Working    | PyAudio                                      |
-| IMU        | 🔶 Mock mode  | Simulated; extend for external USB/BLE       |
-| WiFi CSI   | 🔶 Scaffolded | Detects ESP32 via COM ports; mock when absent|
+| IMU        | ☐ External    | Extend for external USB/BLE hardware       |
+| WiFi CSI   | ☐ External    | Detects ESP32 via COM ports                 |
 
 ## Uninstall
 

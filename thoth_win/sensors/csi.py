@@ -1,7 +1,4 @@
-"""Windows WiFi CSI Sensor — scaffolded for future ESP32 USB extension.
-
-Detects ESP32 on Windows COM ports and reads CSI data.
-"""
+"""Windows WiFi CSI Sensor."""
 
 import logging
 import os
@@ -30,7 +27,6 @@ class WinCSISensor(BaseSensor):
         super().__init__(config)
         self._serial_port: Optional[str] = None
         self._serial_connection = None
-        self._mock_mode = False
         self._num_subcarriers = config.custom_params.get("num_subcarriers", 64) if config else 64
         self._include_phase = config.custom_params.get("include_phase", True) if config else True
 
@@ -71,16 +67,13 @@ class WinCSISensor(BaseSensor):
                 logger.warning("pyserial not installed")
             except Exception as e:
                 logger.error("Failed to open serial port: %s", e)
-        logger.info("CSI running in mock mode (no ESP32 detected)")
-        self._mock_mode = True
-        self.status = SensorStatus.AVAILABLE
-        return True
+        logger.error("No ESP32 CSI receiver detected on Windows")
+        self.status = SensorStatus.UNAVAILABLE
+        return False
 
     def read_sample(self) -> Optional[np.ndarray]:
         if self._serial_connection:
             return self._read_from_serial()
-        if self._mock_mode:
-            return self._generate_mock_sample()
         return None
 
     def _read_from_serial(self) -> Optional[np.ndarray]:
@@ -105,15 +98,6 @@ class WinCSISensor(BaseSensor):
             logger.debug("Serial read error: %s", e)
             return None
 
-    def _generate_mock_sample(self) -> np.ndarray:
-        base = np.random.uniform(20, 40, self._num_subcarriers)
-        noise = np.random.normal(0, 2, self._num_subcarriers)
-        amplitude = base + noise
-        if self._include_phase:
-            phase = np.random.uniform(-np.pi, np.pi, self._num_subcarriers)
-            return np.concatenate([amplitude, phase]).astype(self.data_dtype)
-        return amplitude.astype(self.data_dtype)
-
     def cleanup(self):
         if self._serial_connection:
             try:
@@ -121,13 +105,11 @@ class WinCSISensor(BaseSensor):
             except Exception:
                 pass
             self._serial_connection = None
-        self._mock_mode = False
 
     def get_info(self) -> Dict[str, Any]:
         info = super().get_info()
         info.update({
             "serial_port": self._serial_port,
-            "mock_mode": self._mock_mode,
             "num_subcarriers": self._num_subcarriers,
             "detected_esp32_ports": self.find_esp32_ports(),
         })

@@ -17,13 +17,13 @@ thoth/
 │
 ├── thoth_mac/           # macOS status-bar application
 │   ├── app.py           #   rumps menu-bar app + Flask launcher
-│   ├── sensors/         #   Camera, mic, IMU (mock), CSI (scaffolded)
+│   ├── sensors/         #   Camera, mic, IMU, CSI
 │   ├── install.sh       #   One-click installer (LaunchAgent)
 │   └── README.md
 │
 ├── thoth_win/           # Windows system-tray application
 │   ├── app.py           #   pystray tray app + Flask launcher
-│   ├── sensors/         #   Camera, mic, IMU (mock), CSI (scaffolded)
+│   ├── sensors/         #   Camera, mic, IMU, CSI
 │   ├── install.ps1      #   One-click installer (Scheduled Task)
 │   └── README.md
 │
@@ -47,7 +47,7 @@ Use the release DMG for guided installation:
 1. Download `Thoth-macOS-Installer.dmg` from releases.
 2. Open the DMG and run `Install Thoth.command`.
 
-Manual fallback:
+Manual install:
 
 ```bash
 cd thoth_mac
@@ -88,8 +88,8 @@ Each platform adds:
 
 | Platform | Status Bar | Sensors | Boot | WiFi CSI |
 |----------|-----------|---------|------|----------|
-| **macOS** | rumps (menu bar) | Camera, Mic, IMU (mock) | LaunchAgent | ESP32 via `/dev/tty.usbserial*` |
-| **Windows** | pystray (tray) | Camera, Mic, IMU (mock) | Scheduled Task | ESP32 via COM ports |
+| **macOS** | rumps (menu bar) | Camera, Mic, IMU | LaunchAgent | ESP32 via `/dev/tty.usbserial*` |
+| **Windows** | pystray (tray) | Camera, Mic, IMU | Scheduled Task | ESP32 via COM ports |
 | **RPi** | headless | picamera2, CSI | systemd | ESP32 via `/dev/ttyUSB*` |
 
 ## WiFi Sensing (ESP32 CSI)

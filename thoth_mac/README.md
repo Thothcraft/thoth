@@ -1,9 +1,9 @@
 # Thoth for macOS
 
 A status-bar application that runs a local Thoth server, exposes built-in
-sensors (camera, microphone, IMU mock), and provides a browser-based
-dashboard for data collection, labelling, and viewing deployed model
-predictions.
+sensors (camera and microphone) plus external sensor support, and provides
+a browser-based dashboard for data collection, labelling, and viewing
+deployed model predictions.
 
 ## Quick Install (DMG + GUI)
 
@@ -11,7 +11,7 @@ predictions.
 2. Open the DMG and run `Install Thoth.command`.
 3. Follow the GUI prompts to complete setup.
 
-## Manual Install (CLI fallback)
+## Manual Install
 
 ```bash
 chmod +x install.sh
@@ -41,8 +41,8 @@ After install, look for **Thoth** in your menu bar and click **Open Dashboard**.
 |------------|---------------|---------------------------------------|
 | Camera     | ✅ Working    | FaceTime HD, Continuity Camera        |
 | Microphone | ✅ Working    | Built-in mic, requires sox or ffmpeg  |
-| IMU        | 🔶 Mock mode  | Simulated; extend for external USB/BLE|
-| WiFi CSI   | 🔶 Scaffolded | Detects ESP32 via `/dev/tty.usbserial*`; mock data when absent |
+| IMU        | ☐ External   | Extend for external USB/BLE hardware |
+| WiFi CSI   | ☐ External   | Detects ESP32 via `/dev/tty.usbserial*` |
 
 ## Uninstall
 

@@ -43,15 +43,15 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # Add src directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Try to import Sense HAT, fall back to mock if not available
+# Try to import Sense HAT; do not substitute mock sensor data.
 try:
     from sense_hat import SenseHat
     sense = SenseHat()
     SENSE_HAT_AVAILABLE = True
     print("Using real Sense HAT")
 except (ImportError, OSError):
-    print("Sense HAT not found, using mock implementation")
-    from backend.mock_sense_hat import sense
+    print("Sense HAT not found")
+    sense = None
     SENSE_HAT_AVAILABLE = False
 
 from backend.config import Config, BUTTON_ACTIONS, SENSOR_CONFIG
@@ -561,7 +561,7 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
         except Exception:
             wifi_connected = False
 
-        # Check collection status (Linux only, mock on Windows)
+        # Check collection status on Linux.
         collection_status = False
         if not is_windows:
             try:
@@ -572,7 +572,7 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
             except Exception:
                 collection_status = False
 
-        # Get battery level (mock for now)
+        # Get battery level.
         battery_level = None
         try:
             battery = psutil.sensors_battery()
