@@ -880,8 +880,8 @@ def index():
     if 'username' in session:
         return redirect(url_for('status'))
 
-    # Render the setup page directly so the root path shows content.
-    return setup()
+    # Show a lightweight local landing page at the root path.
+    return render_template('root.html')
 
 @app.route('/setup')
 def setup():
