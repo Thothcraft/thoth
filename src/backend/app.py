@@ -161,78 +161,65 @@ USERS = {
     }
 }
 
-def scan_wifi_networks():
-    """Scan for available WiFi networks."""
-    networks = []
+def get_active_wifi_state() -> Dict[str, Any]:
+    """Return the live WiFi state from NetworkManager."""
+    state = {
+        'connected': False,
+        'ssid': None,
+        'connection': None,
+        'interface': 'wlan0',
+        'ip_address': None,
+    }
+
+    if platform.system() != 'Linux':
+        return state
 
     try:
-        if platform.system() == 'Windows':
-            # Use netsh on Windows to scan for networks
-            result = subprocess.run(
-                ['netsh', 'wlan', 'show', 'networks', 'mode=bssid'],
-                capture_output=True, text=True, timeout=10
-            )
+        status = subprocess.run(
+            ['nmcli', '-t', '-f', 'DEVICE,TYPE,STATE,CONNECTION', 'device', 'status'],
+            capture_output=True, text=True, timeout=5
+        )
+        if status.returncode == 0:
+            for line in status.stdout.splitlines():
+                parts = line.split(':', 3)
+                if len(parts) < 4:
+                    continue
+                device, dev_type, dev_state, connection = parts
+                if device == 'wlan0' and dev_type == 'wifi':
+                    state['connected'] = dev_state == 'connected'
+                    if connection and connection != '--':
+                        state['connection'] = connection
+                        state['ssid'] = connection
+                    break
 
-            if result.returncode == 0:
-                current_ssid = None
-                current_secure = False
-                current_signal = 0
+        detail = subprocess.run(
+            ['nmcli', '-t', '-f', 'GENERAL.CONNECTION,IP4.ADDRESS[1]', 'device', 'show', 'wlan0'],
+            capture_output=True, text=True, timeout=5
+        )
+        if detail.returncode == 0:
+            for line in detail.stdout.splitlines():
+                if line.startswith('GENERAL.CONNECTION:') and not state['ssid']:
+                    connection = line.split(':', 1)[1].strip()
+                    if connection and connection != '--':
+                        state['ssid'] = connection
+                        state['connection'] = connection
+                elif line.startswith('IP4.ADDRESS[1]:'):
+                    ip_value = line.split(':', 1)[1].strip()
+                    if ip_value:
+                        state['ip_address'] = ip_value.split('/', 1)[0]
 
-                for line in result.stdout.split('\n'):
-                    line = line.strip()
-                    if line.startswith('SSID') and ':' in line and 'BSSID' not in line:
-                        # Save previous network if exists
-                        if current_ssid:
-                            networks.append({
-                                'ssid': current_ssid,
-                                'secure': current_secure,
-                                'signal': current_signal
-                            })
-                        # Parse new SSID
-                        current_ssid = line.split(':', 1)[1].strip()
-                        current_secure = False
-                        current_signal = 0
-                    elif 'Authentication' in line and ':' in line:
-                        auth = line.split(':', 1)[1].strip()
-                        current_secure = auth.lower() != 'open'
-                    elif 'Signal' in line and ':' in line:
-                        try:
-                            signal_str = line.split(':', 1)[1].strip().replace('%', '')
-                            current_signal = int(signal_str)
-                        except ValueError:
-                            current_signal = 50
-
-                # Add last network
-                if current_ssid:
-                    networks.append({
-                        'ssid': current_ssid,
-                        'secure': current_secure,
-                        'signal': current_signal
-                    })
-        else:
-            # Linux - use iwlist or nmcli
-            result = subprocess.run(
-                ['iwlist', 'wlan0', 'scan'],
-                capture_output=True, text=True, timeout=15
-            )
-            # Parse Linux output (simplified)
-            for line in result.stdout.split('\n'):
-                if 'ESSID:' in line:
-                    ssid = line.split('ESSID:')[1].strip().strip('"')
-                    if ssid:
-                        networks.append({'ssid': ssid, 'secure': True, 'signal': 50})
+        if not state['ip_address']:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.connect(('1.1.1.1', 80))
+                state['ip_address'] = sock.getsockname()[0]
+                state['connected'] = True
+            finally:
+                sock.close()
     except Exception as e:
-        logger.error(f"Error scanning WiFi networks: {e}")
+        logger.debug(f"Unable to determine active WiFi state: {e}")
 
-    # Remove duplicates and empty SSIDs
-    seen = set()
-    unique_networks = []
-    for net in networks:
-        if net['ssid'] and net['ssid'] not in seen:
-            seen.add(net['ssid'])
-            unique_networks.append(net)
-
-    return unique_networks if unique_networks else []
+    return state
 
 def get_system_uptime() -> str:
     """Get system uptime in a human-readable format."""
@@ -589,20 +576,8 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
     try:
         is_windows = platform.system() == 'Windows'
 
-        # Check WiFi connection (platform-aware)
-        try:
-            if is_windows:
-                wifi_connected = subprocess.run(
-                    ["ping", "-n", "1", "8.8.8.8"],
-                    capture_output=True, timeout=5
-                ).returncode == 0
-            else:
-                wifi_connected = subprocess.run(
-                    ["ping", "-c1", "8.8.8.8"],
-                    capture_output=True, timeout=5
-                ).returncode == 0
-        except Exception:
-            wifi_connected = False
+        wifi_state = get_active_wifi_state()
+        wifi_connected = bool(wifi_state.get('connected'))
 
         # Check collection status on Linux.
         collection_status = False
@@ -633,15 +608,15 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
             except Exception:
                 pass  # Temperature not available on this system
 
-        # Get IP address
-        ip_address = None
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip_address = s.getsockname()[0]
-            s.close()
-        except Exception as e:
-            logger.debug(f"Could not get IP address: {e}")
+        ip_address = wifi_state.get('ip_address')
+        if not ip_address:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("1.1.1.1", 80))
+                ip_address = s.getsockname()[0]
+                s.close()
+            except Exception as e:
+                logger.debug(f"Could not get IP address: {e}")
 
         # Get disk usage
         disk_usage = None
@@ -808,75 +783,6 @@ if not auth_manager.is_authenticated():
     except Exception as e:
         logger.error(f"Error forcing offline state at startup: {e}")
 
-# WiFi credentials storage file
-WIFI_CREDENTIALS_FILE = os.path.join(Config.CONFIG_DIR, 'wifi_credentials.json')
-WIFI_CONFIGURED_FILE = os.path.join(Config.CONFIG_DIR, 'wifi_configured.flag')
-
-def load_wifi_credentials():
-    """Load saved WiFi credentials."""
-    try:
-        if os.path.exists(WIFI_CREDENTIALS_FILE):
-            with open(WIFI_CREDENTIALS_FILE, 'r') as f:
-                return json.load(f)
-    except Exception as e:
-        logger.error(f"Error loading WiFi credentials: {e}")
-    return {}
-
-def save_wifi_credentials(ssid, password):
-    """Save WiFi credentials for future use."""
-    try:
-        os.makedirs(Config.CONFIG_DIR, exist_ok=True)
-        creds = load_wifi_credentials()
-        creds[ssid] = password
-        creds['_active_ssid'] = ssid  # Track the active network
-        with open(WIFI_CREDENTIALS_FILE, 'w') as f:
-            json.dump(creds, f)
-        # Mark WiFi as configured
-        with open(WIFI_CONFIGURED_FILE, 'w') as f:
-            f.write(ssid)
-        logger.info(f"WiFi credentials saved for {ssid}")
-    except Exception as e:
-        logger.error(f"Error saving WiFi credentials: {e}")
-
-def is_wifi_configured():
-    """Check if WiFi has been explicitly configured by user."""
-    return os.path.exists(WIFI_CONFIGURED_FILE)
-
-def get_configured_ssid():
-    """Get the SSID of the configured WiFi network."""
-    try:
-        if os.path.exists(WIFI_CONFIGURED_FILE):
-            with open(WIFI_CONFIGURED_FILE, 'r') as f:
-                return f.read().strip()
-    except Exception:
-        pass
-    return None
-
-def clear_wifi_configuration():
-    """Clear WiFi configuration (disconnect from network)."""
-    try:
-        if os.path.exists(WIFI_CONFIGURED_FILE):
-            os.remove(WIFI_CONFIGURED_FILE)
-            logger.info("WiFi configuration cleared")
-    except Exception as e:
-        logger.error(f"Error clearing WiFi configuration: {e}")
-
-def check_wifi_connected():
-    """Check if WiFi is connected AND configured."""
-    # First check if WiFi has been explicitly configured
-    if not is_wifi_configured():
-        return False
-
-    try:
-        # Try to connect to Google DNS to check internet connectivity
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(2)
-        s.connect(("8.8.8.8", 80))
-        s.close()
-        return True
-    except Exception:
-        return False
-
 # Routes
 @app.route('/')
 def index():
@@ -890,108 +796,31 @@ def index():
 
 @app.route('/setup')
 def setup():
-    """Show the setup page for WiFi and login."""
+    """Show the setup page and current network state."""
     # If already authenticated, go to status
     if 'username' in session:
         return redirect(url_for('status'))
-
-    # Check if user wants to change WiFi
-    change_wifi = request.args.get('change_wifi') == '1'
-    if change_wifi:
-        clear_wifi_configuration()
-
-    wifi_connected = check_wifi_connected()
-    available_networks = scan_wifi_networks()
-
-    # Get current SSID from saved configuration
-    current_ssid = get_configured_ssid()
-
-    return render_template('setup.html',
-                         wifi_connected=wifi_connected,
-                         available_networks=available_networks,
-                         current_ssid=current_ssid,
-                         version=Config.VERSION)
+    return render_template(
+        'setup.html',
+        wifi_state=get_active_wifi_state(),
+        version=Config.VERSION,
+        boot_flow=[
+            "Set WiFi in Raspberry Pi Imager before first boot.",
+            "Boot the Pi and let it join the saved WiFi automatically.",
+            "Open http://thoth.local:5000 from any device on the LAN.",
+            "Log in once to activate device registration and heartbeat.",
+        ],
+    )
 
 @app.route('/api/wifi/scan', methods=['GET'])
 def api_wifi_scan():
-    """Scan for available WiFi networks."""
-    try:
-        networks = scan_wifi_networks()
-        return jsonify({'status': 'success', 'networks': networks})
-    except Exception as e:
-        logger.error(f"Error scanning WiFi: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'error': str(e), 'networks': []}), 500
-
-def connect_wifi_raspberry_pi(ssid: str, password: str) -> tuple:
-    """Connect to WiFi on Raspberry Pi using the connect-wifi.sh script."""
-    try:
-        script_path = os.path.join(os.path.dirname(__file__), '..', '..', 'setup', 'connect-wifi.sh')
-        if os.path.exists(script_path):
-            result = subprocess.run(
-                ['sudo', script_path, ssid, password],
-                capture_output=True, text=True, timeout=60
-            )
-            if result.returncode == 0:
-                # Extract IP from output
-                ip_address = None
-                for line in result.stdout.split('\n'):
-                    if 'IP Address:' in line:
-                        ip_address = line.split(':')[1].strip()
-                return True, ip_address
-            else:
-                return False, result.stderr
-        else:
-            return False, "connect-wifi.sh not found"
-    except Exception as e:
-        return False, str(e)
+    """Legacy WiFi setup endpoint removed."""
+    return jsonify({'status': 'error', 'error': 'WiFi setup is handled through Raspberry Pi Imager.'}), 410
 
 @app.route('/api/wifi/connect', methods=['POST'])
 def api_wifi_connect():
-    """Connect to a WiFi network and save credentials."""
-    try:
-        data = request.get_json() or request.form
-        ssid = data.get('ssid')
-        password = data.get('password', '')
-
-        if not ssid:
-            return jsonify({'status': 'error', 'error': 'SSID is required'}), 400
-
-        logger.info(f"Attempting to connect to WiFi: {ssid}")
-
-        # Save credentials for future use
-        save_wifi_credentials(ssid, password)
-
-        # Store in session
-        session['wifi_ssid'] = ssid
-
-        # On Raspberry Pi, use the connect script
-        if platform.system() == 'Linux' and os.path.exists('/etc/hostapd'):
-            success, result = connect_wifi_raspberry_pi(ssid, password)
-            if success:
-                ip_address = result
-                return jsonify({
-                    'status': 'success',
-                    'message': f'Connected to {ssid}',
-                    'wifi_connected': True,
-                    'ip_address': ip_address
-                })
-            else:
-                return jsonify({
-                    'status': 'error',
-                    'error': f'Failed to connect: {result}'
-                }), 500
-
-        # On Windows/Mac dev, simulate success
-        return jsonify({
-            'status': 'success',
-            'message': f'WiFi credentials saved for {ssid}',
-            'wifi_connected': True,
-            'ip_address': '127.0.0.1'  # Dev mode
-        })
-
-    except Exception as e:
-        logger.error(f"Error connecting to WiFi: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'error': str(e)}), 500
+    """Legacy WiFi setup endpoint removed."""
+    return jsonify({'status': 'error', 'error': 'WiFi setup is handled through Raspberry Pi Imager.'}), 410
 
 @app.route('/api/setup/login', methods=['POST'])
 def api_setup_login():
@@ -1117,18 +946,7 @@ def status():
             except Exception:
                 pass
 
-        # Get IP address
-        ip_address = None
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(('8.8.8.8', 80))
-            ip_address = s.getsockname()[0]
-            s.close()
-        except Exception as e:
-            logger.error(f"Error getting IP address: {e}")
-
-        # Get list of available WiFi networks
-        available_networks = scan_wifi_networks()
+        wifi_state = get_active_wifi_state()
         capture_overview = get_capture_overview()
         sensors = detect_sensor_inventory()
 
@@ -1137,9 +955,8 @@ def status():
                             device_info=device_info,
                             disk_usage=disk_usage,
                             cpu_temp=cpu_temp,
-                            ip_address=ip_address,
+                            wifi_state=wifi_state,
                             username=session.get('username'),
-                            available_networks=available_networks,
                             capture_overview=capture_overview,
                             sensors=sensors)
 
@@ -1625,67 +1442,8 @@ def logout():
 
 @app.route('/wifi/config', methods=['POST'])
 def wifi_config():
-    """Handle WiFi configuration from captive portal."""
-    try:
-        ssid = request.form.get('ssid')
-        password = request.form.get('password')
-        username = request.form.get('username')
-        user_password = request.form.get('user_password')
-
-        if not ssid:
-            return jsonify({"error": "SSID required"}), 400
-
-        # Configure the WiFi network
-        logger.info(f"Configuring WiFi network: {ssid}")
-
-        # In a real implementation, you would configure the WiFi here
-        # For example:
-        # configure_wifi(ssid, password)
-
-        # If user credentials were provided, log in and register the device
-        response_data = {'status': 'success', 'message': f'Successfully connected to {ssid}'}
-
-        if username and user_password:
-            try:
-                result = auth_manager.login(username, user_password)
-
-                if result.get('success'):
-                    # Register the device with the Brain server
-                    success, message = device_manager.register_device(result['token'])
-
-                    if success:
-                        # Start the heartbeat to send periodic status updates
-                        device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
-                        logger.info("Device registered and heartbeat started")
-
-                        # Store user session
-                        session['user_id'] = result['user'].get('user_id')
-                        session['username'] = username
-                        session['token'] = result['token']
-
-                        # Update device status with initial information
-                        device_manager.update_status({
-                            'online': True,
-                            'wifi_connected': True,
-                            'ip_address': request.remote_addr,
-                            'last_seen': datetime.utcnow().isoformat()
-                        })
-
-                        response_data['redirect'] = url_for('status')
-                    else:
-                        response_data['error'] = f'Device registration failed: {message}'
-                else:
-                    response_data['error'] = 'Invalid username or password'
-
-            except Exception as e:
-                logger.error(f"Login/registration error: {str(e)}", exc_info=True)
-                response_data['error'] = 'An error occurred during login. Please try again.'
-
-        return jsonify(response_data)
-
-    except Exception as e:
-        logger.error(f"Error configuring WiFi: {str(e)}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+    """Legacy WiFi configuration endpoint removed."""
+    return jsonify({"status": "error", "error": "WiFi setup is handled through Raspberry Pi Imager."}), 410
 
 @app.route('/api/collection/<action>', methods=['POST'])
 def collection_action(action):

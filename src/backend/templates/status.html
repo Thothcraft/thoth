@@ -136,7 +136,13 @@
             <div class="mt-4 space-y-3 text-sm">
                 <div class="flex justify-between gap-3">
                     <span class="text-slate-500">WiFi</span>
-                    <span class="font-medium">{{ 'Connected' if system_status.wifi_connected else 'Disconnected' }}</span>
+                    <span class="font-medium">
+                        {% if system_status.wifi_connected %}
+                            Connected{% if wifi_state and wifi_state.ssid %} to {{ wifi_state.ssid }}{% endif %}
+                        {% else %}
+                            Disconnected
+                        {% endif %}
+                    </span>
                 </div>
                 <div class="flex justify-between gap-3">
                     <span class="text-slate-500">Uptime</span>
@@ -144,7 +150,7 @@
                 </div>
                 <div class="flex justify-between gap-3">
                     <span class="text-slate-500">IP</span>
-                    <span class="font-medium">{{ system_status.ip_address or 'N/A' }}</span>
+                    <span class="font-medium">{{ wifi_state.ip_address if wifi_state and wifi_state.ip_address else system_status.ip_address or 'N/A' }}</span>
                 </div>
                 <div class="flex justify-between gap-3">
                     <span class="text-slate-500">Temperature</span>

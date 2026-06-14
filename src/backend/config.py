@@ -19,7 +19,7 @@ class Config:
     # Flask configuration
     SECRET_KEY = os.getenv('FLASK_SECRET_KEY', 'thoth-dev-secret-key')
     HOST = os.getenv('FLASK_HOST', '0.0.0.0')
-    PORT = int(os.getenv('FLASK_PORT', 80))
+    PORT = int(os.getenv('FLASK_PORT', 5000))
     DEBUG = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
 
     # Device configuration
@@ -71,7 +71,7 @@ class Config:
     MAX_HEARTBEAT_FAILURES = int(os.getenv('MAX_HEARTBEAT_FAILURES', 3))
 
     # Captive portal
-    CAPTIVE_PORTAL_PORT = int(os.getenv('CAPTIVE_PORTAL_PORT', 80))
+    CAPTIVE_PORTAL_PORT = int(os.getenv('CAPTIVE_PORTAL_PORT', 5000))
     CAPTIVE_PORTAL_TIMEOUT = int(os.getenv('CAPTIVE_PORTAL_TIMEOUT', 300))  # seconds
 
 # Button action configuration (can be modified via API)
