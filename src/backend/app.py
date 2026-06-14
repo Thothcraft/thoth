@@ -33,7 +33,7 @@ load_dotenv()
 
 from flask import (
     Flask, jsonify, request, render_template,
-    redirect, url_for, flash, session, send_from_directory, abort, send_file, Response, stream_with_context, after_this_request
+    redirect, url_for, flash, session, send_from_directory, abort, send_file, Response, after_this_request
 )
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
@@ -66,7 +66,6 @@ from backend.capture_manager import (
     minute_summary,
     cleanup_old_minutes,
     zip_minute_folder,
-    mjpeg_stream,
     preview_text,
 )
 
@@ -469,7 +468,30 @@ def _build_csi_svg(points: List[float]) -> str:
     )
 
 
-def _render_live_radar_png(radar_path: Path, plot: str) -> bytes:
+def _current_live_video_path() -> Optional[Path]:
+    minute_dir = current_minute()
+    if not minute_dir:
+        return None
+    files = capture_files(minute_dir)
+    video_path = files.get('video')
+    if video_path and video_path.exists():
+        return video_path
+    return None
+
+
+def _csi_plot_payload(path: Path, limit: int = 180) -> Dict[str, Any]:
+    points = _parse_csi_average_series(path, limit=limit)
+    return {
+        'points': points,
+        'sample_count': len(points),
+        'title': 'Average CSI amplitude',
+        'x_label': 'Packet',
+        'y_label': 'Average magnitude',
+        'updated': datetime.utcnow().isoformat(),
+    }
+
+
+def _radar_plot_payload(radar_path: Path, plot: str) -> Dict[str, Any]:
     if np is None or CubeProcessor is None:
         raise RuntimeError('Radar plotting dependencies are unavailable')
 
@@ -490,6 +512,27 @@ def _render_live_radar_png(radar_path: Path, plot: str) -> bytes:
 
     img = mmw_proc.vis_2d(axis_names[0], axis_names[1])
     img = np.log10(np.maximum(img, 1e-9))
+
+    x_name = axis_names[1].lower()
+    y_name = axis_names[0].lower()
+    x_values = np.asarray(mmw_proc.proc_param.get(f'{x_name}_bin', []), dtype=float).tolist()
+    y_values = np.asarray(mmw_proc.proc_param.get(f'{y_name}_bin', []), dtype=float).tolist()
+
+    return {
+        'plot': plot,
+        'title': f'{axis_names[0]} vs {axis_names[1]}',
+        'x_label': axis_names[1],
+        'y_label': axis_names[0],
+        'x': x_values,
+        'y': y_values,
+        'z': img.tolist(),
+        'updated': datetime.utcnow().isoformat(),
+    }
+
+
+def _render_live_radar_png(radar_path: Path, plot: str) -> bytes:
+    payload = _radar_plot_payload(radar_path, plot)
+    img = np.asarray(payload['z'], dtype=float)
 
     try:
         import matplotlib
@@ -1435,8 +1478,8 @@ def capture_detail(minute):
         minute_info=detail,
         files=files,
         video_url=video_preview,
-        radar_plot_urls=[url_for('api_capture_radar_plot', minute=minute_dir.name, plot=plot) for plot in RADAR_PLOTS],
-        csi_plot_url=url_for('api_capture_csi_plot', minute=minute_dir.name),
+        radar_data_urls=[url_for('api_capture_radar_data', minute=minute_dir.name, plot=plot) for plot in RADAR_PLOTS],
+        csi_data_url=url_for('api_capture_csi_data', minute=minute_dir.name),
         radar_preview=radar_preview,
         csi_preview=csi_preview,
         serial_preview=serial_preview,
@@ -1555,6 +1598,24 @@ def api_capture_csi_plot(minute):
     return Response(svg, mimetype='image/svg+xml', headers={'Cache-Control': 'no-cache'})
 
 
+@app.route('/api/captures/<minute>/csi/data')
+def api_capture_csi_data(minute):
+    """Return interactive CSI data for a saved minute."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('captures')))
+
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        abort(404, description='Minute folder not found')
+
+    files = capture_files(minute_dir)
+    path = files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial')
+    if not path or not path.exists():
+        abort(404, description='No CSI data available')
+
+    return jsonify({'status': 'success', 'minute': minute, 'data': _csi_plot_payload(path)})
+
+
 @app.route('/api/captures/<minute>/radar/plot/<plot>')
 def api_capture_radar_plot(minute, plot):
     """Render a radar plot for a saved minute."""
@@ -1581,6 +1642,34 @@ def api_capture_radar_plot(minute, plot):
         abort(500, description=str(exc))
 
     return send_file(out_path, mimetype='image/png', conditional=False, max_age=0)
+
+
+@app.route('/api/captures/<minute>/radar/data/<plot>')
+def api_capture_radar_data(minute, plot):
+    """Return interactive radar data for a saved minute."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('captures')))
+
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        abort(404, description='Minute folder not found')
+
+    plot = plot.lower()
+    if plot not in RADAR_PLOTS:
+        abort(404, description=f'Unsupported radar plot kind: {plot}')
+
+    files = capture_files(minute_dir)
+    radar_path = files.get('radar')
+    if not radar_path or not radar_path.exists():
+        abort(404, description='No radar data available')
+
+    try:
+        payload = _radar_plot_payload(radar_path, plot)
+    except Exception as exc:
+        logger.exception(f"Failed to build radar data {plot}: {exc}")
+        abort(500, description=str(exc))
+
+    return jsonify({'status': 'success', 'minute': minute, 'data': payload})
 
 
 @app.route('/api/captures/<minute>/upload', methods=['POST'])
@@ -1621,7 +1710,7 @@ def upload_capture_minute(minute):
                 'Content-Type': 'application/json',
             }
             payload = {
-                'filename': f'{minute_dir.name}/{path.name}',
+                'filename': f'{minute_dir.name}_{path.name}',
                 'content': content,
                 'is_base64': True,
                 'device_id': getattr(Config, 'DEVICE_ID', None),
@@ -1666,9 +1755,9 @@ def live_capture_stream(kind):
         kind=kind,
         active_minute=minute_dir.name if minute_dir else None,
         username=session.get('username'),
-        stream_url=url_for('api_live_capture_video'),
-        csi_plot_url=url_for('api_live_capture_csi_plot'),
-        plot_urls=[url_for('api_live_capture_plot', plot=plot) for plot in RADAR_PLOTS],
+        video_url=url_for('api_live_capture_video'),
+        csi_data_url=url_for('api_live_capture_csi_data'),
+        radar_data_urls=[url_for('api_live_capture_radar_data', plot=plot) for plot in RADAR_PLOTS],
         has_video=bool(files.get('video') and files['video'].exists()) if minute_dir else False,
         has_csi=bool(files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial')),
         has_radar=bool(files.get('radar')),
@@ -1677,15 +1766,15 @@ def live_capture_stream(kind):
 
 @app.route('/api/captures/live/video')
 def api_live_capture_video():
-    """Stream the live USB camera feed as MJPEG."""
+    """Serve the current minute video file."""
     if 'username' not in session:
         return redirect(url_for('login', next=url_for('captures')))
 
-    return Response(
-        stream_with_context(mjpeg_stream()),
-        mimetype='multipart/x-mixed-replace; boundary=frame',
-        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
-    )
+    video_path = _current_live_video_path()
+    if not video_path:
+        abort(404, description='No live video available')
+
+    return send_file(video_path, mimetype='video/mp4', conditional=True, max_age=0)
 
 
 @app.route('/api/captures/live/csi')
@@ -1702,6 +1791,24 @@ def api_live_capture_radar():
     if 'username' not in session:
         return redirect(url_for('login', next=url_for('captures')))
     return redirect(url_for('live_capture_stream', kind='radar'))
+
+
+@app.route('/api/captures/live/csi/data')
+def api_live_capture_csi_data():
+    """Return interactive live CSI data."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('captures')))
+
+    minute_dir = current_minute()
+    if not minute_dir:
+        abort(404, description='No live capture minute available')
+
+    files = capture_files(minute_dir)
+    path = files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial')
+    if not path or not path.exists():
+        abort(404, description='No CSI data available')
+
+    return jsonify({'status': 'success', 'minute': minute_dir.name, 'data': _csi_plot_payload(path)})
 
 
 @app.route('/api/captures/live/csi/plot')
@@ -1725,6 +1832,34 @@ def api_live_capture_csi_plot():
     points = _parse_csi_average_series(path)
     svg = _build_csi_svg(points)
     return Response(svg, mimetype='image/svg+xml', headers={'Cache-Control': 'no-cache'})
+
+
+@app.route('/api/captures/live/radar/data/<plot>')
+def api_live_capture_radar_data(plot):
+    """Return interactive live radar data."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('captures')))
+
+    plot = plot.lower()
+    if plot not in RADAR_PLOTS:
+        abort(404, description=f'Unsupported radar plot kind: {plot}')
+
+    minute_dir = current_minute()
+    if not minute_dir:
+        abort(404, description='No live capture minute available')
+
+    files = capture_files(minute_dir)
+    radar_path = files.get('radar')
+    if not radar_path or not radar_path.exists():
+        abort(404, description='No radar data available')
+
+    try:
+        payload = _radar_plot_payload(radar_path, plot)
+    except Exception as exc:
+        logger.exception(f"Failed to build live radar data {plot}: {exc}")
+        abort(500, description=str(exc))
+
+    return jsonify({'status': 'success', 'minute': minute_dir.name, 'data': payload})
 
 
 @app.route('/api/captures/live/radar/plot/<plot>')
@@ -1928,9 +2063,9 @@ if __name__ == '__main__':
     # Run the application with threading mode (more compatible on Windows)
     socketio.run(
         app,
-        host='0.0.0.0',
-        port=5000,
-        debug=True,
+        host=Config.HOST,
+        port=Config.PORT,
+        debug=Config.DEBUG,
         use_reloader=False,
         allow_unsafe_werkzeug=True
     )

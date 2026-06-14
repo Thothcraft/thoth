@@ -19,7 +19,7 @@ class Config:
     # Flask configuration
     SECRET_KEY = os.getenv('FLASK_SECRET_KEY', 'thoth-dev-secret-key')
     HOST = os.getenv('FLASK_HOST', '0.0.0.0')
-    PORT = int(os.getenv('FLASK_PORT', 5000))
+    PORT = int(os.getenv('FLASK_PORT', 80))
     DEBUG = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
 
     # Device configuration

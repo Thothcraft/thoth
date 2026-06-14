@@ -163,8 +163,9 @@ def upload_to_cloud(filename):
             'Content-Type': 'application/json'
         }
 
+        safe_filename = filename.replace('/', '__').replace('\\', '__')
         payload = {
-            'filename': filename,
+            'filename': safe_filename,
             'content': content_b64,
             'is_base64': True,
             'device_id': device_id,
@@ -182,7 +183,7 @@ def upload_to_cloud(filename):
                 'status': 'success',
                 'message': 'File uploaded to cloud',
                 'cloud_file_id': result.get('file_id'),
-                'filename': filename
+                'filename': safe_filename
             })
         else:
             logger.error(f"Upload failed: {response.status_code} - {response.text}")

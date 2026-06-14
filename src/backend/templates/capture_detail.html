@@ -2,91 +2,112 @@
 
 {% block title %}{{ minute }} - {{ super() }}{% endblock %}
 
+{% block extra_head %}
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+{% endblock %}
+
 {% block content %}
 <div class="space-y-6">
-    <div class="card">
-        <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+    <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
             <div>
-                <h2 class="text-2xl font-semibold text-gray-900 font-mono">{{ minute }}</h2>
-                <p class="text-sm text-gray-600 mt-1">Minute folder on disk: <code>{{ capture }}</code></p>
+                <div class="text-xs uppercase tracking-[0.22em] text-slate-500">Minute folder</div>
+                <h1 class="mt-1 text-3xl font-semibold text-slate-950 font-mono">{{ minute }}</h1>
+                <p class="mt-2 text-sm text-slate-600">
+                    Folder on disk: <code>{{ capture }}</code>
+                </p>
             </div>
-            <div class="flex flex-wrap gap-3">
-                <a href="{{ url_for('download_capture_minute', minute=minute) }}" class="btn btn-primary">
-                    <i class="fas fa-download mr-2"></i>Download ZIP
+            <div class="flex flex-wrap gap-2">
+                <a href="{{ url_for('download_capture_minute', minute=minute) }}" class="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-3.5 py-2 text-sm font-medium text-white hover:bg-slate-800">
+                    <i class="fas fa-download"></i>
+                    Download ZIP
                 </a>
-                <button class="btn btn-secondary" onclick="uploadMinute('{{ minute }}')">
-                    <i class="fas fa-cloud-upload-alt mr-2"></i>Upload to Cloud
+                <button type="button" class="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50" onclick="uploadMinute('{{ minute }}')">
+                    <i class="fas fa-cloud-upload-alt"></i>
+                    Upload to Cloud
                 </button>
                 {% if minute == active_minute %}
-                <a href="/captures/live/video" target="_blank" class="btn btn-secondary">
-                    <i class="fas fa-video mr-2"></i>Live Video
+                <a href="/captures/live/video" target="_blank" class="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                    <i class="fas fa-video"></i>
+                    Live Video
                 </a>
-                <a href="/captures/live/csi" target="_blank" class="btn btn-secondary">
-                    <i class="fas fa-wifi mr-2"></i>Live CSI
+                <a href="/captures/live/csi" target="_blank" class="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                    <i class="fas fa-wifi"></i>
+                    Live CSI
                 </a>
-                <a href="/captures/live/radar" target="_blank" class="btn btn-secondary">
-                    <i class="fas fa-wave-square mr-2"></i>Live Radar
+                <a href="/captures/live/radar" target="_blank" class="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                    <i class="fas fa-wave-square"></i>
+                    Live Radar
                 </a>
                 {% endif %}
             </div>
         </div>
-    </div>
+    </section>
 
-    <div class="card">
-        <div class="flex flex-wrap gap-2 mb-4">
-            <button class="btn btn-secondary" onclick="showTab('video')">Video</button>
-            <button class="btn btn-secondary" onclick="showTab('radar')">Radar</button>
-            <button class="btn btn-secondary" onclick="showTab('csi')">CSI</button>
-            <button class="btn btn-secondary" onclick="showTab('manifest')">Manifest</button>
+    <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="flex flex-wrap gap-2 border-b border-slate-200 pb-4">
+            <button class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50" onclick="showTab('video')">Video</button>
+            <button class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50" onclick="showTab('radar')">Radar</button>
+            <button class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50" onclick="showTab('csi')">CSI</button>
+            <button class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50" onclick="showTab('manifest')">Manifest</button>
         </div>
 
-        <div id="tab-video" class="tab-panel">
+        <div id="tab-video" class="tab-panel pt-5">
             {% if video_url %}
-            <video controls class="w-full max-h-[70vh] bg-black" src="{{ video_url }}"></video>
+            <video id="minute-video" controls autoplay muted playsinline class="w-full rounded-2xl bg-black shadow-inner" src="{{ video_url }}"></video>
             {% else %}
-            <p class="text-sm text-gray-500">No video file found.</p>
+            <p class="text-sm text-slate-500">No video file found.</p>
             {% endif %}
         </div>
 
-        <div id="tab-radar" class="tab-panel hidden">
+        <div id="tab-radar" class="tab-panel hidden pt-5">
             {% if files.radar %}
-            <div class="mb-4 flex flex-wrap gap-3 text-sm">
-                <a class="text-blue-600 hover:text-blue-800" href="{{ url_for('api_capture_file', minute=minute, kind='radar') }}">Download raw radar bin</a>
-            </div>
-            <div class="grid gap-4 lg:grid-cols-3">
-                {% for plot_url in radar_plot_urls %}
-                <img src="{{ plot_url }}" alt="Radar plot" class="w-full rounded-xl border border-gray-200 bg-black" />
-                {% endfor %}
+            <div class="grid gap-4 xl:grid-cols-3">
+                <div class="rounded-2xl border border-slate-200 p-3">
+                    <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Range / Doppler</div>
+                    <div id="capture-radar-range-doppler" class="h-[420px]" data-url="{{ radar_data_urls[0] }}"></div>
+                </div>
+                <div class="rounded-2xl border border-slate-200 p-3">
+                    <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Azimuth / Range</div>
+                    <div id="capture-radar-azimuth-range" class="h-[420px]" data-url="{{ radar_data_urls[1] }}"></div>
+                </div>
+                <div class="rounded-2xl border border-slate-200 p-3">
+                    <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Azimuth / Doppler</div>
+                    <div id="capture-radar-azimuth-doppler" class="h-[420px]" data-url="{{ radar_data_urls[2] }}"></div>
+                </div>
             </div>
             {% else %}
-            <p class="text-sm text-gray-500">No radar file found.</p>
+            <p class="text-sm text-slate-500">No radar file found.</p>
             {% endif %}
         </div>
 
-        <div id="tab-csi" class="tab-panel hidden">
+        <div id="tab-csi" class="tab-panel hidden pt-5">
             <div class="space-y-4">
                 {% if files.csi %}
-                <div class="mb-3 flex flex-wrap gap-3 text-sm">
-                    {% if files.csi_csv %}<a class="text-blue-600 hover:text-blue-800" href="{{ url_for('api_capture_file', minute=minute, kind='csi_csv') }}">Download raw CSV</a>{% endif %}
-                    {% if files.csi_timestamped %}<a class="text-blue-600 hover:text-blue-800" href="{{ url_for('api_capture_file', minute=minute, kind='csi_timestamped') }}">Download timestamped CSV</a>{% endif %}
-                    {% if files.csi_serial %}<a class="text-blue-600 hover:text-blue-800" href="{{ url_for('api_capture_file', minute=minute, kind='csi_serial') }}">Download serial JSONL</a>{% endif %}
-                </div>
-                <img src="{{ csi_plot_url }}" alt="CSI amplitude plot" class="w-full rounded-xl border border-gray-200 bg-black" />
+                <div id="capture-csi-chart" class="h-[520px]" data-url="{{ csi_data_url }}"></div>
                 {% else %}
-                <p class="text-sm text-gray-500">No CSI files found.</p>
+                <p class="text-sm text-slate-500">No CSI files found.</p>
                 {% endif %}
             </div>
         </div>
 
-        <div id="tab-manifest" class="tab-panel hidden">
-            <pre class="bg-gray-900 text-green-200 text-xs p-4 rounded overflow-x-auto whitespace-pre-wrap">{{ minute_info|tojson(indent=2) }}</pre>
+        <div id="tab-manifest" class="tab-panel hidden pt-5">
+            <pre class="overflow-x-auto whitespace-pre-wrap rounded-2xl bg-slate-950 p-4 text-xs text-emerald-200">{{ minute_info|tojson(indent=2) }}</pre>
         </div>
-    </div>
+    </section>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+const activeMinute = {{ (minute == active_minute)|tojson }};
+const radarTargets = [
+  ['capture-radar-range-doppler', {{ radar_data_urls[0]|tojson if radar_data_urls|length > 0 else 'null' }}],
+  ['capture-radar-azimuth-range', {{ radar_data_urls[1]|tojson if radar_data_urls|length > 1 else 'null' }}],
+  ['capture-radar-azimuth-doppler', {{ radar_data_urls[2]|tojson if radar_data_urls|length > 2 else 'null' }}],
+];
+const csiTarget = ['capture-csi-chart', {{ csi_data_url|tojson }}];
+
 function showTab(name) {
     document.querySelectorAll('.tab-panel').forEach(el => el.classList.add('hidden'));
     const panel = document.getElementById(`tab-${name}`);
@@ -102,9 +123,95 @@ async function uploadMinute(minute) {
         showAlert(data.message || 'Upload failed', 'error');
         return;
     }
-    showAlert(`Uploaded ${data.uploaded.length} files${data.errors.length ? ' with errors' : ''}`, data.errors.length ? 'error' : 'success');
+    const uploaded = data.uploaded?.length || 0;
+    const errors = data.errors?.length || 0;
+    showAlert(`Uploaded ${uploaded} files${errors ? ` with ${errors} errors` : ''}`, errors ? 'error' : 'success');
 }
 
-document.addEventListener('DOMContentLoaded', () => showTab('video'));
+function plotConfig() {
+  return {responsive: true, displayModeBar: true, displaylogo: false};
+}
+
+function plotLayout(title, xLabel, yLabel) {
+  return {
+    title: {text: title, font: {size: 15}},
+    margin: {l: 54, r: 20, t: 48, b: 48},
+    paper_bgcolor: '#ffffff',
+    plot_bgcolor: '#ffffff',
+    xaxis: {title: {text: xLabel}, gridcolor: '#e2e8f0', zeroline: false},
+    yaxis: {title: {text: yLabel}, gridcolor: '#e2e8f0', zeroline: false},
+  };
+}
+
+async function fetchJson(url) {
+  const response = await fetch(`${url}?t=${Date.now()}`, {cache: 'no-store'});
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  return response.json();
+}
+
+async function renderCsi() {
+  const [id, url] = csiTarget;
+  const host = document.getElementById(id);
+  if (!host || !url) return;
+  try {
+    const payload = await fetchJson(url);
+    const data = payload.data || {};
+    const points = Array.isArray(data.points) ? data.points : [];
+    const x = points.map((_, idx) => idx + 1);
+    await Plotly.react(host, [{
+      x,
+      y: points,
+      mode: 'lines',
+      line: {color: '#2563eb', width: 2.5},
+      hovertemplate: 'Packet %{x}<br>Magnitude %{y:.3f}<extra></extra>',
+    }], {
+      ...plotLayout('Average CSI magnitude', 'Packet', 'Magnitude'),
+      uirevision: 'capture-csi',
+    }, plotConfig());
+  } catch (error) {
+    host.innerHTML = `<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">${String(error).replace(/[<>&]/g, '')}</div>`;
+  }
+}
+
+async function renderRadar() {
+  await Promise.all(radarTargets.map(async ([id, url]) => {
+    const host = document.getElementById(id);
+    if (!host || !url) return;
+    try {
+      const payload = await fetchJson(url);
+      const data = payload.data || {};
+      await Plotly.react(host, [{
+        type: 'heatmap',
+        x: Array.isArray(data.x) ? data.x : [],
+        y: Array.isArray(data.y) ? data.y : [],
+        z: Array.isArray(data.z) ? data.z : [],
+        colorscale: 'Viridis',
+        hoverongaps: false,
+        hovertemplate: `${data.y_label || 'Y'}: %{y}<br>${data.x_label || 'X'}: %{x}<br>Power %{z:.2f}<extra></extra>`,
+      }], {
+        ...plotLayout(data.title || 'Radar', data.x_label || 'X', data.y_label || 'Y'),
+        uirevision: 'capture-radar',
+      }, plotConfig());
+    } catch (error) {
+      host.innerHTML = `<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">${String(error).replace(/[<>&]/g, '')}</div>`;
+    }
+  }));
+}
+
+function initTabs() {
+  showTab('video');
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+  initTabs();
+  await renderCsi();
+  await renderRadar();
+  if (activeMinute) {
+    setInterval(renderCsi, 2500);
+    setInterval(renderRadar, 2500);
+  }
+});
 </script>
 {% endblock %}

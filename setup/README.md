@@ -9,7 +9,7 @@ This guide explains how to create a custom Raspberry Pi image with Thoth pre-ins
 1. Flash the Thoth image to an SD card
 2. Insert SD card into Raspberry Pi and power on
 3. On your phone/laptop, connect to WiFi: **Thoth-AP** (password: `thoth123`)
-4. A captive portal will automatically open (or go to http://192.168.4.1:5000)
+4. A captive portal will automatically open (or go to http://192.168.4.1)
 5. Select your home WiFi network and enter password
 6. Login with your Thoth platform credentials
 7. Device connects to your WiFi and shows its new IP address
@@ -139,8 +139,8 @@ thoth/
    - If YES: Skips hotspot, normal WiFi connects
 
 2. **thoth-web.service** starts after
-   - Runs Flask app on port 5000
-   - In hotspot mode: accessible at http://192.168.4.1:5000
+   - Runs Flask app on port 80
+   - In hotspot mode: accessible at http://192.168.4.1
    - In WiFi mode: accessible at assigned IP
 
 ### Setup Flow

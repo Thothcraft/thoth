@@ -469,7 +469,7 @@ class DeviceManager:
 
             # Upload files not already on cloud
             for minute_name, file_path in local_files:
-                filename = f"{minute_name}/{file_path.name}"
+                filename = f"{minute_name}_{file_path.name}"
                 if filename in cloud_files:
                     skipped += 1
                     continue

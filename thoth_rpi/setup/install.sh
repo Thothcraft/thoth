@@ -54,5 +54,5 @@ sudo systemctl enable thoth-collector.service
 sudo systemctl start thoth-collector.service
 
 echo ""
-echo "✅  Thoth installed and running on port 8000"
-echo "    Access at: http://$(hostname -I | awk '{print $1}'):8000"
+echo "✅  Thoth installed and running on port 80"
+echo "    Access at: http://$(hostname -I | awk '{print $1}')"

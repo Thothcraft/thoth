@@ -58,7 +58,7 @@ app.py reads /boot/firmware/thoth_credentials.json
     └── No file → use previously saved auth
     │
     ▼
-Flask dashboard available at http://<pi-ip>:8000
+Flask dashboard available at http://<pi-ip>
 ```
 
 ## Manual Installation

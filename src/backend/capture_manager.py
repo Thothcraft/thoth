@@ -7,13 +7,12 @@ import io
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .config import Config
 
@@ -165,67 +164,3 @@ def cleanup_old_minutes(keep: Optional[int] = None) -> Dict[str, object]:
         removed.append(minute_dir.name)
 
     return {"kept": min(keep, len(folders)), "removed": removed}
-
-
-def _read_ffmpeg_frame(stdout, buffer: bytearray) -> Optional[bytes]:
-    start_marker = b"\xff\xd8"
-    end_marker = b"\xff\xd9"
-    while True:
-        start = buffer.find(start_marker)
-        end = buffer.find(end_marker, start + 2)
-        if start != -1 and end != -1:
-            frame = bytes(buffer[start:end + 2])
-            del buffer[:end + 2]
-            return frame
-        chunk = stdout.read(4096)
-        if not chunk:
-            return None
-        buffer.extend(chunk)
-
-
-def mjpeg_stream(device: Optional[str] = None, width: Optional[int] = None, height: Optional[int] = None, fps: Optional[int] = None) -> Iterable[bytes]:
-    device = device or Config.CAPTURE_CAMERA_DEVICE
-    width = width or Config.CAPTURE_CAMERA_WIDTH
-    height = height or Config.CAPTURE_CAMERA_HEIGHT
-    fps = fps or Config.CAPTURE_CAMERA_FPS
-    cmd = [
-        "ffmpeg",
-        "-loglevel",
-        "error",
-        "-f",
-        "v4l2",
-        "-framerate",
-        str(fps),
-        "-video_size",
-        f"{width}x{height}",
-        "-i",
-        device,
-        "-f",
-        "mjpeg",
-        "pipe:1",
-    ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    buffer = bytearray()
-    try:
-        while True:
-            if proc.stdout is None:
-                break
-            frame = _read_ffmpeg_frame(proc.stdout, buffer)
-            if frame is None:
-                break
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-            )
-    finally:
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-        try:
-            proc.wait(timeout=2)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass

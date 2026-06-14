@@ -96,8 +96,8 @@ systemctl start dnsmasq || log "Warning: dnsmasq failed to start"
 echo 1 > /proc/sys/net/ipv4/ip_forward
 
 # Set up iptables for captive portal redirect
-iptables -t nat -A PREROUTING -i wlan0 -p tcp --dport 80 -j DNAT --to-destination 192.168.4.1:5000
-iptables -t nat -A PREROUTING -i wlan0 -p tcp --dport 443 -j DNAT --to-destination 192.168.4.1:5000
+iptables -t nat -A PREROUTING -i wlan0 -p tcp --dport 80 -j DNAT --to-destination 192.168.4.1:80
+iptables -t nat -A PREROUTING -i wlan0 -p tcp --dport 443 -j DNAT --to-destination 192.168.4.1:80
 iptables -t nat -A POSTROUTING -j MASQUERADE
 
 log "Starting Thoth web application..."
@@ -112,7 +112,7 @@ log "  Thoth Hotspot Active!"
 log "=========================================="
 log "SSID: Thoth"
 log "Password: thoth123"
-log "Portal: http://192.168.4.1:5000"
+log "Portal: http://192.168.4.1"
 log "=========================================="
 
 # Mark first boot as complete (but not WiFi configured yet)
