@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+
+{% block title %}Models - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+  <section class="rounded-2xl bg-slate-950 px-6 py-6 text-white shadow-lg">
+    <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+      <div class="max-w-3xl">
+        <div class="text-xs uppercase tracking-[0.28em] text-slate-400">Models</div>
+        <h1 class="mt-2 text-3xl font-semibold">Deployments and timelines</h1>
+        <p class="mt-2 text-sm leading-6 text-slate-300">
+          Pending deployments arrive from Brain. Accepted models are tracked locally and their minute timelines are shown below.
+        </p>
+      </div>
+      <a href="{{ url_for('settings') }}" class="inline-flex items-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-medium text-slate-950 hover:bg-slate-100">
+        <i class="fas fa-sliders"></i>
+        Device settings
+      </a>
+    </div>
+  </section>
+
+  <section class="grid gap-4 lg:grid-cols-3">
+    <div class="rounded-2xl border border-slate-800 bg-slate-900 p-5 text-slate-100 shadow-xl shadow-black/10">
+      <div class="text-xs uppercase tracking-[0.18em] text-slate-400">Pending</div>
+      <div class="mt-1 text-3xl font-semibold text-white">{{ pending_deployments|length }}</div>
+    </div>
+    <div class="rounded-2xl border border-slate-800 bg-slate-900 p-5 text-slate-100 shadow-xl shadow-black/10">
+      <div class="text-xs uppercase tracking-[0.18em] text-slate-400">Running</div>
+      <div class="mt-1 text-3xl font-semibold text-emerald-300">{{ running_models|length }}</div>
+    </div>
+    <div class="rounded-2xl border border-slate-800 bg-slate-900 p-5 text-slate-100 shadow-xl shadow-black/10">
+      <div class="text-xs uppercase tracking-[0.18em] text-slate-400">Timeline groups</div>
+      <div class="mt-1 text-3xl font-semibold text-cyan-300">{{ prediction_timelines|length }}</div>
+    </div>
+  </section>
+
+  <section class="grid gap-6 xl:grid-cols-2">
+    <div class="rounded-2xl border border-slate-800 bg-slate-900 p-5 text-slate-100 shadow-xl shadow-black/10">
+      <div class="flex items-center justify-between">
+        <div>
+          <div class="text-xs uppercase tracking-[0.18em] text-slate-400">Pending requests</div>
+          <h2 class="mt-1 text-2xl font-semibold text-white">Approve or decline</h2>
+        </div>
+      </div>
+
+      <div class="mt-4 space-y-3">
+        {% for deployment in pending_deployments %}
+        <article class="rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
+          <div class="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div class="min-w-0">
+              <div class="text-sm font-semibold text-white">{{ deployment.model_name }}</div>
+              <div class="mt-1 text-xs text-slate-400">{{ deployment.model_type or 'model' }} · {{ deployment.device_name or deployment.device_id }}</div>
+              <div class="mt-2 text-xs text-slate-500">Deployment ID: {{ deployment.deployment_id }}</div>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button type="button" class="rounded-xl bg-emerald-500 px-3 py-2 text-sm font-medium text-slate-950 hover:bg-emerald-400" onclick="acceptDeployment('{{ deployment.deployment_id }}')">
+                Accept
+              </button>
+              <button type="button" class="rounded-xl border border-slate-700 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800" onclick="declineDeployment('{{ deployment.deployment_id }}')">
+                Decline
+              </button>
+            </div>
+          </div>
+        </article>
+        {% else %}
+        <div class="rounded-2xl border border-dashed border-slate-700 bg-slate-950/70 p-6 text-sm text-slate-400">
+          No pending deployment requests.
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="rounded-2xl border border-slate-800 bg-slate-900 p-5 text-slate-100 shadow-xl shadow-black/10">
+      <div class="flex items-center justify-between">
+        <div>
+          <div class="text-xs uppercase tracking-[0.18em] text-slate-400">Running models</div>
+          <h2 class="mt-1 text-2xl font-semibold text-white">Local active registry</h2>
+        </div>
+      </div>
+
+      <div class="mt-4 space-y-4">
+        {% for model in running_models %}
+        {% set timeline = prediction_timelines.get(model.model_name) or prediction_timelines.get('default') or [] %}
+        <article class="rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="text-sm font-semibold text-white">{{ model.model_name }}</div>
+              <div class="mt-1 text-xs text-slate-400">{{ model.model_type or 'model' }} · {{ model.status or 'running' }}</div>
+            </div>
+            <span class="rounded-full bg-emerald-500/15 px-2.5 py-1 text-xs font-medium text-emerald-200">Running</span>
+          </div>
+          <div class="mt-3 grid gap-2">
+            {% for entry in timeline[:8] %}
+            <div class="rounded-xl border border-slate-800 bg-white/5 p-3 text-xs text-slate-200">
+              <div class="flex items-center justify-between gap-3">
+                <span class="font-mono text-slate-400">{{ entry.minute }}</span>
+                <span>{{ entry.prediction or entry.label or ('occupied' if entry.occupied else 'empty' if entry.occupied is not none else 'N/A') }}</span>
+              </div>
+              <div class="mt-1 flex flex-wrap gap-2 text-[11px] text-slate-400">
+                {% if entry.probability is not none %}<span>Probability: {{ entry.probability }}</span>{% endif %}
+                {% if entry.confidence is not none %}<span>Confidence: {{ entry.confidence }}</span>{% endif %}
+                {% if entry.labels %}<span>Labels: {{ entry.labels|join(', ') }}</span>{% endif %}
+              </div>
+            </div>
+            {% else %}
+            <div class="rounded-xl border border-dashed border-slate-700 p-3 text-sm text-slate-400">
+              No prediction timeline found yet for this model.
+            </div>
+            {% endfor %}
+          </div>
+        </article>
+        {% else %}
+        <div class="rounded-2xl border border-dashed border-slate-700 bg-slate-950/70 p-6 text-sm text-slate-400">
+          No running models are active yet.
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function mutateDeployment(id, action) {
+  const response = await fetch(`/api/models/deployments/${id}/${action}`, {method: 'POST'});
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    showAlert(data.message || `Failed to ${action} deployment`, 'error');
+    return;
+  }
+  showAlert(data.message || `Deployment ${action}ed`, 'success');
+  window.location.reload();
+}
+
+function acceptDeployment(id) {
+  return mutateDeployment(id, 'accept');
+}
+
+function declineDeployment(id) {
+  return mutateDeployment(id, 'decline');
+}
+</script>
+{% endblock %}

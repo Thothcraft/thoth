@@ -150,6 +150,18 @@
                     <span class="text-slate-400">Capture service</span>
                     <span class="font-medium text-slate-100">{{ 'Active' if system_status.collection_active else 'Inactive' }}</span>
                 </div>
+                <div class="flex justify-between gap-3">
+                    <span class="text-slate-400">Portal uploads</span>
+                    <span class="font-medium text-slate-100">{{ 'Allowed' if device_settings.portal_upload_allowed else 'Disabled' }}</span>
+                </div>
+                <div class="flex justify-between gap-3">
+                    <span class="text-slate-400">Model requests</span>
+                    <span class="font-medium text-slate-100">{{ 'Allowed' if device_settings.deployment_requests_allowed else 'Disabled' }}</span>
+                </div>
+                <div class="flex justify-between gap-3">
+                    <span class="text-slate-400">Cloud sync</span>
+                    <span class="font-medium text-slate-100">{{ 'Allowed' if device_settings.cloud_sync_allowed else 'Disabled' }}</span>
+                </div>
             </div>
         </aside>
     </section>

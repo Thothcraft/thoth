@@ -546,6 +546,75 @@ def zip_minute_folder(minute_dir: Path) -> Path:
     return zip_path
 
 
+def read_prediction_file(minute_dir: Path) -> Optional[Dict[str, object]]:
+    path = minute_dir / "predictions.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def collect_prediction_timelines() -> Dict[str, List[Dict[str, object]]]:
+    timelines: Dict[str, List[Dict[str, object]]] = {}
+    for minute_dir in list_minute_folders():
+        prediction = read_prediction_file(minute_dir)
+        if not isinstance(prediction, dict):
+            continue
+
+        minute = minute_dir.name
+        generated_at = prediction.get("generated_at")
+        labels = _normalize_labels(prediction.get("labels", []))
+        deployed_models = prediction.get("deployed_models") or []
+        timeline = prediction.get("timeline") or []
+
+        if isinstance(timeline, list) and timeline:
+            for entry in timeline:
+                if not isinstance(entry, dict):
+                    continue
+                model_name = str(
+                    entry.get("model_name")
+                    or entry.get("model")
+                    or entry.get("deployment_name")
+                    or (deployed_models[0].get("model_name") if deployed_models and isinstance(deployed_models[0], dict) else "")
+                    or "default"
+                ).strip() or "default"
+                timelines.setdefault(model_name, []).append({
+                    "minute": minute,
+                    "generated_at": generated_at,
+                    "labels": labels,
+                    **entry,
+                })
+        elif isinstance(deployed_models, list) and deployed_models:
+            for model in deployed_models:
+                if not isinstance(model, dict):
+                    continue
+                model_name = str(model.get("model_name") or model.get("name") or "default").strip() or "default"
+                timelines.setdefault(model_name, []).append({
+                    "minute": minute,
+                    "generated_at": generated_at,
+                    "labels": labels,
+                    "prediction": model.get("prediction"),
+                    "probability": model.get("probability"),
+                    "confidence": model.get("confidence"),
+                    "occupied": model.get("occupied"),
+                    "status": model.get("status"),
+                })
+        else:
+            timelines.setdefault("default", []).append({
+                "minute": minute,
+                "generated_at": generated_at,
+                "labels": labels,
+                "prediction": prediction.get("prediction") or prediction.get("label") or prediction.get("occupied"),
+                "probability": prediction.get("probability") or prediction.get("confidence"),
+                "confidence": prediction.get("confidence"),
+                "occupied": prediction.get("occupied"),
+                "status": prediction.get("status"),
+            })
+    return timelines
+
+
 def cleanup_old_minutes(keep: Optional[int] = None) -> Dict[str, object]:
     keep = int(keep or Config.CAPTURE_KEEP_MINUTES)
     folders = list_minute_folders()

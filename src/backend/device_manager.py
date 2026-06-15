@@ -13,6 +13,7 @@ import uuid
 import time
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Optional, Any, Tuple, List
 
 import requests
@@ -40,6 +41,7 @@ class DeviceManager:
         self.session = self._create_session()
         self.stop_event = threading.Event()
         self.heartbeat_thread = None
+        self.device_settings = self.load_device_settings()
 
         # Device status
         self.status = {
@@ -116,6 +118,174 @@ class DeviceManager:
         except Exception as e:
             logger.error(f"Error getting MAC address: {e}")
             return None
+
+    def _config_dir(self) -> Path:
+        base_dir = getattr(self.config, 'CAPTURE_DATA_DIR', None) or getattr(self.config, 'DATA_DIR', None) or self.config.DATA_DIR
+        return Path(base_dir).expanduser() / 'config'
+
+    def _settings_path(self) -> Path:
+        return self._config_dir() / 'device_settings.json'
+
+    def _model_registry_path(self) -> Path:
+        return self._config_dir() / 'deployed_models.json'
+
+    def _default_device_settings(self) -> Dict[str, Any]:
+        return {
+            'portal_upload_allowed': True,
+            'deployment_requests_allowed': True,
+            'cloud_sync_allowed': True,
+            'auto_registration_enabled': True,
+        }
+
+    def _coerce_setting_value(self, key: str, value: Any) -> Any:
+        if key.endswith('_allowed') or key.startswith('auto_'):
+            if isinstance(value, bool):
+                return value
+            if value is None:
+                return False
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str):
+                return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+            return bool(value)
+        return value
+
+    def load_device_settings(self) -> Dict[str, Any]:
+        settings = self._default_device_settings()
+        try:
+            path = self._settings_path()
+            if path.exists():
+                with open(path, 'r', encoding='utf-8') as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    settings.update({k: self._coerce_setting_value(k, v) for k, v in loaded.items()})
+        except Exception as e:
+            logger.error(f"Error loading device settings: {e}")
+        self.device_settings = settings
+        return settings
+
+    def save_device_settings(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        settings = self.load_device_settings()
+        settings.update({k: self._coerce_setting_value(k, v) for k, v in (updates or {}).items()})
+        try:
+            path = self._settings_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as handle:
+                json.dump(settings, handle, indent=2)
+            self.device_settings = settings
+            if self.registered and self.auth_token:
+                self.update_status({'online': True, 'hardware_info': self._build_hardware_info()})
+        except Exception as e:
+            logger.error(f"Error saving device settings: {e}")
+        return settings
+
+    def _build_hardware_info(self) -> Dict[str, Any]:
+        import platform
+        hardware_info = {
+            'local_ip': self._get_local_ip(),
+            'hostname': platform.node(),
+            'system': platform.system(),
+            'machine': platform.machine(),
+            'processor': platform.processor(),
+            'platform': platform.platform(),
+            'is_raspberry_pi': platform.system() == 'Linux' and (
+                'arm' in platform.machine().lower() or os.path.exists('/proc/device-tree/model')
+            ),
+            'portal_upload_allowed': bool(self.device_settings.get('portal_upload_allowed', True)),
+            'deployment_requests_allowed': bool(self.device_settings.get('deployment_requests_allowed', True)),
+            'cloud_sync_allowed': bool(self.device_settings.get('cloud_sync_allowed', True)),
+        }
+        try:
+            if os.path.exists('/proc/device-tree/model'):
+                with open('/proc/device-tree/model', 'rb') as handle:
+                    hardware_info['raspberry_pi_model'] = handle.read().decode('utf-8', errors='replace').strip('\x00\r\n ')
+        except Exception:
+            pass
+        return hardware_info
+
+    def get_device_settings(self) -> Dict[str, Any]:
+        return self.load_device_settings()
+
+    def load_model_registry(self) -> Dict[str, Any]:
+        default = {'models': []}
+        try:
+            path = self._model_registry_path()
+            if path.exists():
+                return json.loads(path.read_text(encoding='utf-8'))
+        except Exception as e:
+            logger.error(f"Error loading model registry: {e}")
+        return default
+
+    def save_model_registry(self, registry: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            path = self._model_registry_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(registry, indent=2), encoding='utf-8')
+        except Exception as e:
+            logger.error(f"Error saving model registry: {e}")
+        return registry
+
+    def get_running_models(self) -> List[Dict[str, Any]]:
+        registry = self.load_model_registry()
+        models = []
+        for item in registry.get('models', []):
+            if not isinstance(item, dict):
+                continue
+            if item.get('status') not in {'running', 'delivered'}:
+                continue
+            models.append(item)
+        return models
+
+    def list_pending_deployments(self) -> List[Dict[str, Any]]:
+        if not self.registered or not self.auth_token:
+            return []
+        try:
+            response = self.session.get(
+                f"{self.config.BRAIN_SERVER_URL}/api/datasets/models/deployments",
+                headers={"Authorization": f"Bearer {self.auth_token}"},
+                timeout=15,
+            )
+            if response.status_code != 200:
+                return []
+            data = response.json()
+            deployments = data.get('deployments', []) if isinstance(data, dict) else []
+            pending = []
+            for deployment in deployments:
+                if isinstance(deployment, dict) and deployment.get('device_id') == self.device_id and deployment.get('status') == 'pending':
+                    pending.append(deployment)
+            return pending
+        except Exception as e:
+            logger.error(f"Error listing pending deployments: {e}")
+            return []
+
+    def acknowledge_deployment(self, deployment: Dict[str, Any], accepted: bool = True) -> bool:
+        deployment_id = str(deployment.get('deployment_id') or '')
+        if not deployment_id:
+            return False
+        try:
+            url = f"{self.config.BRAIN_SERVER_URL}/api/device/{self.device_id}/deployment/{deployment_id}/ack"
+            response = self.session.post(url, params={'status': 'delivered' if accepted else 'declined'}, timeout=15)
+            if response.status_code not in (200, 201):
+                logger.error("Failed to acknowledge deployment %s: %s", deployment_id, response.text)
+                return False
+            registry = self.load_model_registry()
+            models = [item for item in registry.get('models', []) if item.get('deployment_id') != deployment_id]
+            models.append({
+                'deployment_id': deployment_id,
+                'model_name': deployment.get('model_name') or 'Unknown model',
+                'model_type': deployment.get('model_type') or 'unknown',
+                'device_id': self.device_id,
+                'device_name': deployment.get('device_name') or self.device_id,
+                'status': 'running' if accepted else 'declined',
+                'accepted_at': datetime.utcnow().isoformat() if accepted else None,
+                'timeline': [],
+            })
+            registry['models'] = models
+            self.save_model_registry(registry)
+            return True
+        except Exception as e:
+            logger.error(f"Error acknowledging deployment: {e}")
+            return False
 
     def _get_local_ip(self) -> Optional[str]:
         """Get the device's local IP address."""
@@ -194,6 +364,7 @@ class DeviceManager:
             local_ip = self._get_local_ip()
 
             # Prepare registration data
+            hardware_info = self._build_hardware_info()
             data = {
                 "device_id": self.device_id,
                 "device_name": f"Thoth-{self.device_id[:8]}",
@@ -202,16 +373,7 @@ class DeviceManager:
                 "app_version": self.config.VERSION if hasattr(self.config, 'VERSION') else "1.0.0",
                 "mac_address": self.status['mac_address'],
                 "ip_address": local_ip,
-                "hardware_info": {
-                    "local_ip": local_ip,
-                    "hostname": platform.node(),
-                    "system": platform.system(),
-                    "machine": platform.machine(),
-                    "processor": platform.processor(),
-                    "platform": platform.platform(),
-                    "is_raspberry_pi": is_raspberry_pi,
-                    "raspberry_pi_model": raspberry_pi_model,
-                }
+                "hardware_info": hardware_info,
             }
 
             # Send registration request
@@ -236,6 +398,7 @@ class DeviceManager:
                     data['device_name'] = result['device_name']
 
                 self._save_registration_info(data, user_token)
+                self.status['online'] = True
 
                 logger.info(f"Device registered successfully: {self.device_id}")
                 return True, "Device registered successfully"
@@ -436,7 +599,8 @@ class DeviceManager:
                         'battery_level': self.status.get('battery_level'),
                         'wifi_connected': self.status.get('wifi_connected', False),
                         'collection_active': self.status.get('collection_active', False),
-                        'online': True
+                        'online': True,
+                        'hardware_info': self._build_hardware_info(),
                     })
                 except Exception as e:
                     logger.error(f"Error in heartbeat loop: {e}")
@@ -477,6 +641,10 @@ class DeviceManager:
         if not self.registered or not self.auth_token:
             logger.warning("Cannot sync files: Device not registered")
             return 0, 0, ["Device not registered"]
+
+        if not bool(self.device_settings.get('cloud_sync_allowed', True)):
+            logger.info("Cloud sync is disabled in device settings")
+            return 0, 0, ["Cloud sync disabled"]
 
         import base64
 

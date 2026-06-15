@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+  <section class="rounded-2xl bg-slate-950 px-6 py-6 text-white shadow-lg">
+    <div class="max-w-3xl">
+      <div class="text-xs uppercase tracking-[0.28em] text-slate-400">Settings</div>
+      <h1 class="mt-2 text-3xl font-semibold">Device control</h1>
+      <p class="mt-2 text-sm leading-6 text-slate-300">
+        These toggles control how the device exposes data and accepts work from the Research Portal.
+      </p>
+    </div>
+  </section>
+
+  <section class="rounded-2xl border border-slate-800 bg-slate-900 p-5 text-slate-100 shadow-xl shadow-black/10">
+    <form id="settings-form" class="space-y-4">
+      <label class="flex items-start justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
+        <span>
+          <span class="block text-base font-semibold text-white">Portal uploads</span>
+          <span class="block text-sm text-slate-400">Allow Research Portal to request uploads from this device.</span>
+        </span>
+        <input type="checkbox" name="portal_upload_allowed" class="mt-1 h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" {% if device_settings.portal_upload_allowed %}checked{% endif %}>
+      </label>
+
+      <label class="flex items-start justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
+        <span>
+          <span class="block text-base font-semibold text-white">Model deployment requests</span>
+          <span class="block text-sm text-slate-400">Allow Brain to queue new model deployments for this device.</span>
+        </span>
+        <input type="checkbox" name="deployment_requests_allowed" class="mt-1 h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" {% if device_settings.deployment_requests_allowed %}checked{% endif %}>
+      </label>
+
+      <label class="flex items-start justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
+        <span>
+          <span class="block text-base font-semibold text-white">Cloud sync</span>
+          <span class="block text-sm text-slate-400">Allow the device to push minute folders to Brain automatically.</span>
+        </span>
+        <input type="checkbox" name="cloud_sync_allowed" class="mt-1 h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" {% if device_settings.cloud_sync_allowed %}checked{% endif %}>
+      </label>
+
+      <div class="flex flex-wrap gap-3 pt-2">
+        <button type="submit" class="inline-flex items-center gap-2 rounded-xl bg-cyan-400 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-cyan-300">
+          <i class="fas fa-save"></i>
+          Save settings
+        </button>
+        <a href="{{ url_for('status') }}" class="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800">
+          Back to dashboard
+        </a>
+      </div>
+    </form>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('settings-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.target);
+  const payload = Object.fromEntries(form.entries());
+  payload.portal_upload_allowed = event.target.portal_upload_allowed.checked;
+  payload.deployment_requests_allowed = event.target.deployment_requests_allowed.checked;
+  payload.cloud_sync_allowed = event.target.cloud_sync_allowed.checked;
+
+  const response = await fetch('/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    showAlert(data.error || 'Failed to save settings', 'error');
+    return;
+  }
+  showAlert('Settings saved', 'success');
+});
+</script>
+{% endblock %}

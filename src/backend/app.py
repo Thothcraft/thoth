@@ -68,6 +68,7 @@ from backend.capture_manager import (
     current_minute,
     minute_summary,
     minute_metrics,
+    collect_prediction_timelines,
     cleanup_old_minutes,
     zip_minute_folder,
     update_minute_labels,
@@ -839,7 +840,8 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
                     'online': True,
                     'ip_address': ip_address,
                     'temperature': cpu_temp,
-                    'disk_usage': disk_usage
+                    'disk_usage': disk_usage,
+                    'hardware_info': device_manager._build_hardware_info(),
                 })
             except Exception as e:
                 logger.error(f"Error updating device status: {e}")
@@ -1214,12 +1216,101 @@ def status():
                             wifi_state=wifi_state,
                             username=session.get('username'),
                             capture_overview=capture_overview,
-                            sensors=sensors)
+                            sensors=sensors,
+                            device_settings=device_manager.get_device_settings())
 
     except Exception as e:
         logger.error(f"Error in status route: {str(e)}", exc_info=True)
         flash('An error occurred while loading the status page.', 'error')
         return redirect(url_for('index'))
+
+
+@app.route('/settings', methods=['GET', 'POST'])
+def settings():
+    """Device settings page."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('settings')))
+
+    if request.method == 'POST':
+        payload = request.get_json(silent=True) or request.form
+        updates = {
+            'portal_upload_allowed': str(payload.get('portal_upload_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
+            'deployment_requests_allowed': str(payload.get('deployment_requests_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
+            'cloud_sync_allowed': str(payload.get('cloud_sync_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
+        }
+        saved = device_manager.save_device_settings(updates)
+        if request.is_json:
+            return jsonify({'success': True, 'settings': saved})
+        flash('Settings saved', 'success')
+        return redirect(url_for('settings'))
+
+    return render_template(
+        'settings.html',
+        username=session.get('username'),
+        device_settings=device_manager.get_device_settings(),
+    )
+
+
+@app.route('/models')
+def models():
+    """Device model management page."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('models')))
+
+    pending = device_manager.list_pending_deployments()
+    running = device_manager.get_running_models()
+    timelines = collect_prediction_timelines()
+
+    return render_template(
+        'models.html',
+        username=session.get('username'),
+        pending_deployments=pending,
+        running_models=running,
+        prediction_timelines=timelines,
+        device_settings=device_manager.get_device_settings(),
+    )
+
+
+@app.route('/api/settings', methods=['GET', 'PATCH'])
+def api_settings():
+    if 'username' not in session:
+        return jsonify({'success': False, 'message': 'Authentication required'}), 401
+    if request.method == 'GET':
+        return jsonify({'success': True, 'settings': device_manager.get_device_settings()})
+    payload = request.get_json(silent=True) or {}
+    saved = device_manager.save_device_settings(payload)
+    return jsonify({'success': True, 'settings': saved})
+
+
+@app.route('/api/models/deployments/pending', methods=['GET'])
+def api_pending_model_deployments():
+    if 'username' not in session:
+        return jsonify({'success': False, 'message': 'Authentication required'}), 401
+    return jsonify({'success': True, 'deployments': device_manager.list_pending_deployments()})
+
+
+@app.route('/api/models/deployments/<deployment_id>/accept', methods=['POST'])
+def api_accept_model_deployment(deployment_id: str):
+    if 'username' not in session:
+        return jsonify({'success': False, 'message': 'Authentication required'}), 401
+    deployment = next((item for item in device_manager.list_pending_deployments() if item.get('deployment_id') == deployment_id), None)
+    if not deployment:
+        return jsonify({'success': False, 'message': 'Deployment not found'}), 404
+    if not device_manager.acknowledge_deployment(deployment, accepted=True):
+        return jsonify({'success': False, 'message': 'Failed to accept deployment'}), 500
+    return jsonify({'success': True, 'message': 'Deployment accepted'})
+
+
+@app.route('/api/models/deployments/<deployment_id>/decline', methods=['POST'])
+def api_decline_model_deployment(deployment_id: str):
+    if 'username' not in session:
+        return jsonify({'success': False, 'message': 'Authentication required'}), 401
+    deployment = next((item for item in device_manager.list_pending_deployments() if item.get('deployment_id') == deployment_id), None)
+    if not deployment:
+        return jsonify({'success': False, 'message': 'Deployment not found'}), 404
+    if not device_manager.acknowledge_deployment(deployment, accepted=False):
+        return jsonify({'success': False, 'message': 'Failed to decline deployment'}), 500
+    return jsonify({'success': True, 'message': 'Deployment declined'})
 
 @app.route('/captures')
 def captures():
