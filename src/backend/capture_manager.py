@@ -46,14 +46,18 @@ def list_minute_folders() -> List[Path]:
 
 def _file_map(minute_dir: Path) -> Dict[str, Path]:
     files = {item.name: item for item in minute_dir.iterdir() if item.is_file()}
+    csi_csv = files.get("wifi_csi_raw.csv")
+    csi_timestamped = files.get("wifi_csi_timestamped.csv")
+    csi_serial = files.get("wifi_csi_serial_all.jsonl")
     result = {
         "manifest": files.get("manifest.json"),
         "video": files.get("usb_camera.mp4"),
         "video_log": files.get("usb_camera.ffmpeg.log"),
         "radar": None,
-        "csi_csv": files.get("wifi_csi_raw.csv"),
-        "csi_timestamped": files.get("wifi_csi_timestamped.csv"),
-        "csi_serial": files.get("wifi_csi_serial_all.jsonl"),
+        "csi_csv": csi_csv,
+        "csi_timestamped": csi_timestamped,
+        "csi_serial": csi_serial,
+        "csi": csi_timestamped or csi_csv or csi_serial,
     }
     radar_candidates = sorted(
         [item for item in minute_dir.iterdir() if item.is_file() and item.name.startswith("mmw_radar_raw_") and item.suffix == ".bin"],
