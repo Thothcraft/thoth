@@ -381,7 +381,7 @@ def _parse_csi_payload(raw: str) -> List[float]:
     return values
 
 
-def _parse_csi_average_series(path: Path, limit: int = 180) -> List[float]:
+def _parse_csi_average_series(path: Path, limit: int = 5000) -> List[float]:
     if not path.exists():
         return []
 
@@ -551,7 +551,7 @@ def _render_video_frame(video_path: Path) -> bytes:
     raise RuntimeError(last_error or 'Unable to render video frame')
 
 
-def _csi_plot_payload(path: Path, limit: int = 180) -> Dict[str, Any]:
+def _csi_plot_payload(path: Path, limit: int = 5000) -> Dict[str, Any]:
     points = _parse_csi_average_series(path, limit=limit)
     frames = _sample_series_frames(points)
     return {
@@ -567,7 +567,7 @@ def _csi_plot_payload(path: Path, limit: int = 180) -> Dict[str, Any]:
     }
 
 
-def _sample_series_frames(points: List[float], max_frames: int = 30) -> List[Dict[str, Any]]:
+def _sample_series_frames(points: List[float], max_frames: int = 60) -> List[Dict[str, Any]]:
     if not points:
         return []
     if len(points) <= 1:
@@ -619,7 +619,7 @@ def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str
         raise RuntimeError('No radar frames available')
 
     mmw_proc = CubeProcessor(setting, num_azimuth_bin=16, num_elevation_bin=16)
-    max_frames = min(18, total_frames)
+    max_frames = min(60, total_frames)
     sample_indices = {1, total_frames}
     if max_frames > 2:
         for slot in range(1, max_frames - 1):

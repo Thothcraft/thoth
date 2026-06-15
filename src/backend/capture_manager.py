@@ -85,6 +85,7 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
         "path": str(minute_dir),
         "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
         "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
+        "labels": list(manifest.get("labels") or []) if isinstance(manifest, dict) else [],
         "files": {
             "video": bool(files["video"] and files["video"].exists()),
             "radar": bool(files["radar"] and files["radar"].exists()),

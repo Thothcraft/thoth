@@ -46,6 +46,7 @@ def sleep_until(target: datetime) -> None:
 
 
 def run_capture(python: str, capture_script: str) -> int:
+    labels = [label.strip() for label in os.environ.get("THOTH_MINUTE_LABELS", "").split(",") if label.strip()]
     cmd = [
         python,
         capture_script,
@@ -53,6 +54,8 @@ def run_capture(python: str, capture_script: str) -> int:
         "--duration",
         "58.5",
     ]
+    for label in labels:
+        cmd.extend(["--label", label])
     proc = subprocess.run(cmd)
     return proc.returncode
 

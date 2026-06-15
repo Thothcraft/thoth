@@ -11,6 +11,9 @@
   }
   .terminal-input {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    color: #ffffff;
+    caret-color: #ffffff;
+    -webkit-text-fill-color: #ffffff;
   }
 </style>
 {% endblock %}
@@ -67,6 +70,7 @@
           class="terminal-input w-full bg-transparent text-sm text-white outline-none placeholder:text-slate-500"
           type="text"
           autocomplete="off"
+          autofocus
           spellcheck="false"
           placeholder="Type a command and press Enter"
         />
@@ -107,6 +111,7 @@
       return;
     }
     socket.emit('terminal_open', { rows: 34, cols: 132 });
+    input.focus();
   }
 
   connectBtn.addEventListener('click', openSession);
@@ -128,6 +133,7 @@
 
   socket.on('terminal_ready', (payload) => {
     setStatus(`Connected as ${payload.ssh_user}@${payload.host}`);
+    input.focus();
   });
 
   socket.on('terminal_output', (payload) => {
@@ -149,6 +155,10 @@
   socket.on('disconnect', () => {
     connected = false;
     setStatus('Socket disconnected');
+  });
+
+  window.addEventListener('load', () => {
+    input.focus();
   });
 
   input.addEventListener('keydown', (event) => {
