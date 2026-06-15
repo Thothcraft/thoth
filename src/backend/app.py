@@ -9,6 +9,7 @@ import sys
 import json
 import io
 import math
+import re
 import html
 import subprocess
 import shutil
@@ -103,6 +104,7 @@ RADAR_PLOT_AXES = {
     'azimuth-doppler': ('Azimuth', 'Doppler'),
 }
 RADAR_CONFIG_DIR = MMW_RELEASE / 'radar_config' / 'config_3rx_3m'
+CSI_NUMBER_RE = re.compile(r'[-+]?\d+(?:\.\d+)?')
 
 # Initialize Flask app
 app = Flask(__name__, template_folder='templates', static_folder='static')
@@ -363,6 +365,22 @@ def _split_csv_line(line: str) -> List[str]:
     return cells
 
 
+def _extract_csi_payload(raw: str) -> str:
+    payloads = re.findall(r'\[([^\]]*)\]', raw or '')
+    return payloads[-1] if payloads else (raw or '')
+
+
+def _parse_csi_payload(raw: str) -> List[float]:
+    payload = _extract_csi_payload(raw)
+    values: List[float] = []
+    for token in CSI_NUMBER_RE.findall(payload):
+        try:
+            values.append(float(token))
+        except ValueError:
+            continue
+    return values
+
+
 def _parse_csi_average_series(path: Path, limit: int = 180) -> List[float]:
     if not path.exists():
         return []
@@ -377,13 +395,7 @@ def _parse_csi_average_series(path: Path, limit: int = 180) -> List[float]:
         return []
 
     def _mean_from_payload(payload: str) -> Optional[float]:
-        payload = payload.strip().strip('[]')
-        if not payload:
-            return None
-        try:
-            values = [float(value) for value in payload.split(',') if value.strip()]
-        except ValueError:
-            return None
+        values = _parse_csi_payload(payload)
         if len(values) < 2:
             return None
         mags: List[float] = []
@@ -607,13 +619,19 @@ def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str
         raise RuntimeError('No radar frames available')
 
     mmw_proc = CubeProcessor(setting, num_azimuth_bin=16, num_elevation_bin=16)
-    stride = max(1, math.ceil(total_frames / 18))
+    max_frames = min(18, total_frames)
+    sample_indices = {1, total_frames}
+    if max_frames > 2:
+        for slot in range(1, max_frames - 1):
+            target = round(1 + (total_frames - 1) * (slot / (max_frames - 1)))
+            sample_indices.add(max(1, min(total_frames, target)))
+    sample_indices = set(sorted(sample_indices))
     frames_by_plot: Dict[str, List[Dict[str, Any]]] = {plot: [] for plot in RADAR_PLOTS}
 
     for index, (seq, raw_data) in enumerate(_iter_radar_frames(radar_path), start=1):
-        mmw_proc.process_raw_data(raw_data)
-        if index % stride != 0 and index != total_frames:
+        if index not in sample_indices:
             continue
+        mmw_proc.process_raw_data(raw_data)
         if mmw_proc.data_cube_fft is None:
             continue
 
@@ -923,6 +941,21 @@ def _provision_terminal_login(username: str) -> None:
         logger.error("Failed to provision SSH access for %s: %s", username, exc, exc_info=True)
         session['ssh_user'] = username
 
+
+def _activate_device_session(username: str, token: str) -> None:
+    """Persist the authenticated session and bring the device online."""
+    session['username'] = username
+    session['token'] = token
+    Config.USER_AUTH_TOKEN = token
+    _provision_terminal_login(username)
+
+    success, message = device_manager.register_device(token)
+    if success:
+        device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
+        logger.info("Login successful for user: %s, device registered", username)
+    else:
+        logger.warning("Device registration failed: %s", message)
+
 # Start background tasks
 socketio.start_background_task(tail_sensor_data)
 
@@ -1023,24 +1056,8 @@ def api_setup_login():
         result = auth_manager.login(username, password)
 
         if result.get('success'):
-            # Store user session
             session['user_id'] = result['user'].get('user_id')
-            session['username'] = username
-            session['token'] = result['token']
-
-            # Store token globally for device registration
-            Config.USER_AUTH_TOKEN = result['token']
-
-            _provision_terminal_login(username)
-
-            # Register the device
-            success, message = device_manager.register_device(result['token'])
-
-            if success:
-                device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
-                logger.info(f"Login successful for user: {username}, device registered")
-            else:
-                logger.warning(f"Device registration failed: {message}")
+            _activate_device_session(username, result['token'])
 
             return jsonify({
                 'status': 'success',
@@ -1077,28 +1094,21 @@ def login():
         # Authenticate with the Brain server
         try:
             result = auth_manager.login(username, password)
-
             if result.get('success'):
-                # Store user session
                 session['user_id'] = result['user'].get('user_id')
-                session['username'] = username
-                session['token'] = result['token']
-
-                # Store token globally for device registration
-                Config.USER_AUTH_TOKEN = result['token']
-
-                _provision_terminal_login(username)
+                _activate_device_session(username, result['token'])
 
                 logger.info(f"Login successful for user: {username}")
                 logger.info("Device registration will now use this user's token")
 
-                # Show the token on success page
-                return render_template('login_success.html',
-                                     username=username,
-                                     access_token=result['token'],
-                                     user_info=result['user'])
-            else:
-                flash('Invalid username or password', 'error')
+                return render_template(
+                    'login_success.html',
+                    username=username,
+                    access_token=result['token'],
+                    user_info=result['user'],
+                )
+
+            flash('Invalid username or password', 'error')
 
         except Exception as e:
             logger.error(f"Login error: {str(e)}", exc_info=True)

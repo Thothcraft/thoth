@@ -41,6 +41,16 @@ def _ensure_directory(path: Path, mode: int = 0o700) -> None:
         pass
 
 
+def _resolve_command(*names: str) -> Optional[str]:
+    for name in names:
+        if os.path.isabs(name) and os.path.exists(name):
+            return name
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
+    return None
+
+
 @dataclass
 class TerminalSession:
     sid: str
@@ -93,12 +103,32 @@ class SSHTerminalManager:
 
         if not user_exists:
             logger.info("Creating local SSH user: %s", ssh_user)
-            subprocess.run(
-                ["useradd", "-m", "-s", "/bin/bash", "-U", ssh_user],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            useradd_bin = _resolve_command("/usr/sbin/useradd", "useradd")
+            adduser_bin = _resolve_command("/usr/sbin/adduser", "adduser")
+            if useradd_bin:
+                subprocess.run(
+                    [useradd_bin, "-m", "-s", "/bin/bash", "-U", ssh_user],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            elif adduser_bin:
+                subprocess.run(
+                    [
+                        adduser_bin,
+                        "--disabled-password",
+                        "--gecos",
+                        "",
+                        "--shell",
+                        "/bin/bash",
+                        ssh_user,
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                raise RuntimeError("No local user creation command found (useradd/adduser)")
 
         for group in HARDWARE_GROUPS:
             try:

@@ -178,6 +178,16 @@ class DeviceManager:
             # Get Python version
             import platform
             python_version = platform.python_version()
+            is_raspberry_pi = platform.system() == 'Linux' and (
+                'arm' in platform.machine().lower() or os.path.exists('/proc/device-tree/model')
+            )
+            raspberry_pi_model = None
+            try:
+                if os.path.exists('/proc/device-tree/model'):
+                    with open('/proc/device-tree/model', 'rb') as handle:
+                        raspberry_pi_model = handle.read().decode('utf-8', errors='replace').strip('\x00\r\n ')
+            except Exception:
+                raspberry_pi_model = None
 
 
             # Get local IP address
@@ -194,7 +204,13 @@ class DeviceManager:
                 "ip_address": local_ip,
                 "hardware_info": {
                     "local_ip": local_ip,
-                    "hostname": platform.node()
+                    "hostname": platform.node(),
+                    "system": platform.system(),
+                    "machine": platform.machine(),
+                    "processor": platform.processor(),
+                    "platform": platform.platform(),
+                    "is_raspberry_pi": is_raspberry_pi,
+                    "raspberry_pi_model": raspberry_pi_model,
                 }
             }
 
