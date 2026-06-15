@@ -15,12 +15,12 @@ class Config:
     
     # Application info
     APP_NAME = 'Thoth Device'
-    VERSION = '1.3.1'
+    VERSION = '1.3.2'
     
     # Flask configuration
     SECRET_KEY = os.getenv('FLASK_SECRET_KEY', 'thoth-dev-secret-key')
     HOST = os.getenv('FLASK_HOST', '0.0.0.0')
-    PORT = int(os.getenv('FLASK_PORT', 8000))
+    PORT = int(os.getenv('FLASK_PORT', 5000))
     DEBUG = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
     
     # Device configuration

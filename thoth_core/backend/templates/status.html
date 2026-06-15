@@ -12,6 +12,9 @@
                 <p class="text-sm text-gray-600 mt-2">DreamHat radar, USB camera, ESP32 CSI, and Sense HAT status are detected automatically. Offline sources stay visible but dimmed.</p>
             </div>
             <div class="flex flex-wrap gap-3">
+                <a href="{{ url_for('connect') }}" class="btn btn-secondary">
+                    <i class="fas fa-terminal mr-2"></i>Connect
+                </a>
                 <a href="{{ url_for('captures') }}" class="btn btn-primary">
                     <i class="fas fa-folder-open mr-2"></i>Browse Minutes
                 </a>

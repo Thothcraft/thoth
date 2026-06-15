@@ -59,6 +59,7 @@ from backend.config import Config, BUTTON_ACTIONS, SENSOR_CONFIG
 from backend.models import SensorReading, SystemStatus, ButtonConfig, UploadResult
 from backend.device_manager import DeviceManager
 from backend.auth_manager import AuthManager
+from backend.terminal_manager import SSHTerminalManager
 from backend.capture_manager import (
     list_minutes,
     get_minute,
@@ -145,6 +146,7 @@ os.makedirs(Config.CAPTURE_DATA_DIR, exist_ok=True)
 # Initialize managers
 auth_manager = AuthManager(Config)
 device_manager = DeviceManager(Config)
+terminal_manager = SSHTerminalManager(socketio, Config)
 
 # Global state
 collection_active = False
@@ -877,7 +879,11 @@ def get_device_info() -> Dict[str, Any]:
             'hostname': socket.gethostname(),
             'ip_address': socket.gethostbyname(socket.gethostname()),
             'python_version': platform.python_version(),
-            'boot_time': datetime.fromtimestamp(psutil.boot_time()).isoformat()
+            'boot_time': datetime.fromtimestamp(psutil.boot_time()).isoformat(),
+            'device_type': 'thoth',
+            'is_raspberry_pi': platform.system() == 'Linux' and (
+                'arm' in platform.machine().lower() or os.path.exists('/proc/device-tree/model')
+            ),
         }
         return system_info
     except Exception as e:
@@ -905,6 +911,17 @@ def register_device_periodically():
     except Exception as e:
         logger.error(f"Unexpected error in device registration: {str(e)}", exc_info=True)
         return False
+
+
+def _provision_terminal_login(username: str) -> None:
+    """Create or update the local SSH identity for a freshly authenticated user."""
+    try:
+        ssh_user = terminal_manager.ensure_user(username)
+        session['ssh_user'] = ssh_user
+        logger.info("Provisioned SSH access for %s", ssh_user)
+    except Exception as exc:
+        logger.error("Failed to provision SSH access for %s: %s", username, exc, exc_info=True)
+        session['ssh_user'] = username
 
 # Start background tasks
 socketio.start_background_task(tail_sensor_data)
@@ -945,6 +962,23 @@ def index():
 
     # Show a lightweight local landing page at the root path.
     return render_template('root.html')
+
+
+@app.route('/connect')
+def connect():
+    """Open the SSH-backed terminal for the logged-in user."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('connect')))
+
+    ssh_available = platform.system() == 'Linux'
+    return render_template(
+        'connect.html',
+        username=session.get('username'),
+        ssh_user=session.get('ssh_user') or session.get('username'),
+        ssh_available=ssh_available,
+        terminal_host=socket.gethostname(),
+        terminal_port=Config.PORT,
+    )
 
 @app.route('/setup')
 def setup():
@@ -996,6 +1030,8 @@ def api_setup_login():
 
             # Store token globally for device registration
             Config.USER_AUTH_TOKEN = result['token']
+
+            _provision_terminal_login(username)
 
             # Register the device
             success, message = device_manager.register_device(result['token'])
@@ -1051,6 +1087,8 @@ def login():
                 # Store token globally for device registration
                 Config.USER_AUTH_TOKEN = result['token']
 
+                _provision_terminal_login(username)
+
                 logger.info(f"Login successful for user: {username}")
                 logger.info("Device registration will now use this user's token")
 
@@ -1071,6 +1109,56 @@ def login():
         flash('An error occurred. Please try again.', 'error')
 
     return redirect(url_for('login'))
+
+
+@socketio.on('terminal_open')
+def terminal_open(data):
+    """Open an SSH-backed terminal for the logged-in user."""
+    if 'username' not in session:
+        emit('terminal_error', {'message': 'Unauthorized'})
+        return
+
+    try:
+        info = terminal_manager.open(request.sid, session['username'])
+        emit('terminal_ready', info)
+        emit('terminal_output', {
+            'session_id': request.sid,
+            'data': f"\r\nConnected as {info['ssh_user']}@{info['host']}\r\n"
+        })
+    except Exception as exc:
+        logger.error("Failed to open terminal session: %s", exc, exc_info=True)
+        emit('terminal_error', {'message': str(exc)})
+
+
+@socketio.on('terminal_input')
+def terminal_input(data):
+    """Send user input to the SSH session."""
+    if 'username' not in session:
+        emit('terminal_error', {'message': 'Unauthorized'})
+        return
+
+    payload = data or {}
+    terminal_manager.send(request.sid, payload.get('data', ''))
+
+
+@socketio.on('terminal_resize')
+def terminal_resize(data):
+    """Resize the terminal PTY to match the browser terminal."""
+    if 'username' not in session:
+        return
+
+    payload = data or {}
+    terminal_manager.resize(
+        request.sid,
+        int(payload.get('rows', 34) or 34),
+        int(payload.get('cols', 132) or 132),
+    )
+
+
+@socketio.on('disconnect')
+def terminal_disconnect():
+    """Close any SSH session tied to the browser connection."""
+    terminal_manager.close(request.sid)
 
 @app.route('/status')
 def status():

@@ -66,8 +66,8 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 
 1. Flash the Thoth image with **Raspberry Pi Imager**
 2. Configure WiFi in Imager settings
-3. Place `thoth_credentials.json` on the boot partition
-4. Power on — Thoth starts automatically
+3. Power on — Thoth starts automatically
+4. Log in once to create the local SSH account used by the dashboard Connect page
 
 For manual install:
 ```bash

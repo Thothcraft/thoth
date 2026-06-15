@@ -8,8 +8,10 @@
 
 set -euo pipefail
 
-# Regenerate SSH host keys
+# Regenerate SSH host keys and ensure the SSH daemon is enabled
 sudo dpkg-reconfigure openssh-server 2>/dev/null || true
+sudo systemctl enable ssh
+sudo systemctl start ssh
 
 # Ensure thoth service is enabled and started
 sudo systemctl enable thoth.service

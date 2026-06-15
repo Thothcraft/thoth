@@ -28,3 +28,4 @@ pytorch-tabular
 torch-geometric
 lightgbm
 pyserial
+pexpect

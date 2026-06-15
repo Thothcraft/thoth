@@ -21,6 +21,6 @@ osascript <<'APPLESCRIPT'
 display dialog "Thoth installation completed successfully. Look for the Thoth icon in the macOS menu bar." buttons {"Open Dashboard", "Done"} default button "Open Dashboard" with icon note
 set clicked to button returned of result
 if clicked is "Open Dashboard" then
-  do shell script "open http://localhost:8000"
+  do shell script "open http://localhost:5000"
 end if
 APPLESCRIPT

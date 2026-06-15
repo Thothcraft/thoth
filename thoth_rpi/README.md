@@ -7,7 +7,9 @@ cloud server.
 ## How It Works
 
 **WiFi and account setup are handled entirely by Raspberry Pi Imager** —
-no captive portal, no hotspot, no NoDogSplash.
+no captive portal, no hotspot, no NoDogSplash. After the first login, Thoth
+creates a matching local SSH user so the dashboard Connect button can open a
+real terminal session on the Pi.
 
 ### Burning the Image
 
@@ -18,10 +20,7 @@ no captive portal, no hotspot, no NoDogSplash.
    - **WiFi SSID** and **password**
    - **SSH** enabled
    - **Hostname**, locale, timezone
-5. Place `thoth_credentials.json` on the boot partition:
-   - Download from the **Research Portal** → Devices → Add Device → Download Key
-   - Copy to `/boot/firmware/thoth_credentials.json`
-6. Flash the SD card and insert into the Raspberry Pi
+5. Flash the SD card and insert into the Raspberry Pi
 
 The GitHub release also ships a ready-to-run Raspberry Pi bundle that
 contains `thoth_core/` and `thoth_rpi/` so the minute-capture dashboard and
@@ -29,7 +28,8 @@ collector service are available immediately after install.
 
 ### Credential File Format
 
-`/boot/firmware/thoth_credentials.json`:
+If you want Brain registration on first boot, place
+`/boot/firmware/thoth_credentials.json` on the boot partition:
 
 ```json
 {
@@ -39,7 +39,7 @@ collector service are available immediately after install.
 ```
 
 The `auth_token` is a JWT generated when a user logs into the Research Portal
-and creates a device entry.  The RPi reads this file on first boot,
+and creates a device entry.  If present, the RPi reads this file on first boot,
 authenticates with the Brain server, stores the token locally, and **deletes
 the file** from the boot partition for security.
 
@@ -55,14 +55,17 @@ WiFi connects automatically (Imager config)
 thoth.service starts
     │
     ▼
-app.py reads /boot/firmware/thoth_credentials.json
+app.py optionally reads /boot/firmware/thoth_credentials.json
     │
     ├── Token found → authenticate + delete file
     │
-    └── No file → use previously saved auth
+    └── No file → keep running with the current local session
     │
     ▼
-Flask dashboard available at http://<pi-ip>
+Flask dashboard available at http://thoth.local:5000
+    │
+    ▼
+Login creates local SSH user and enables the dashboard Connect page
 ```
 
 ## Manual Installation

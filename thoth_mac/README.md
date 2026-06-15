@@ -32,7 +32,7 @@ minute folders with download/upload controls.
 
 | Item               | Action                                       |
 |--------------------|----------------------------------------------|
-| Open Dashboard     | Opens `http://localhost:8000` in your browser |
+| Open Dashboard     | Opens `http://localhost:5000` in your browser |
 | Start / Stop Collection | Toggle sensor data collection           |
 | Quit Thoth         | Stop the background server and exit          |
 

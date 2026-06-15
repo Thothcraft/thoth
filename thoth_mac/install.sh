@@ -95,7 +95,7 @@ launchctl load "$PLIST_DST"
 
 echo ""
 echo "✅  Thoth installed!"
-echo "    Dashboard:  http://localhost:8000"
+echo "    Dashboard:  http://localhost:5000"
 echo "    Status bar:  look for 𓁟 in your menu bar"
 echo ""
 echo "To uninstall, run:  ./uninstall.sh"

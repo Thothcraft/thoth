@@ -96,7 +96,7 @@ Write-Host "> Starting Thoth ..."
 Start-Process -FilePath $PythonBin -ArgumentList "`"$AppScript`"" -WindowStyle Hidden
 
 Write-Host "`n  Thoth installed and running!"
-Write-Host "  Dashboard:  http://localhost:8000"
+Write-Host "  Dashboard:  http://localhost:5000"
 Write-Host "  System tray: look for the Thoth icon"
 Write-Host ""
 Write-Host "To uninstall, you can:"

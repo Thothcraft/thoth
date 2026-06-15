@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+
+{% block title %}Connect - {{ super() }}{% endblock %}
+
+{% block extra_head %}
+<style>
+  .terminal-output {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  }
+  .terminal-input {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+  <section class="rounded-2xl bg-slate-950 px-6 py-6 text-white shadow-lg">
+    <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+      <div>
+        <div class="text-xs uppercase tracking-[0.28em] text-slate-400">Connect</div>
+        <h1 class="mt-2 text-3xl font-semibold">SSH terminal</h1>
+        <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-300">
+          The dashboard opens a local SSH session as <span class="rounded bg-white/10 px-1.5 py-0.5 text-slate-100">{{ ssh_user }}</span>.
+          Commands are sent to the Raspberry Pi and output streams back live.
+        </p>
+      </div>
+      <div class="flex flex-wrap gap-3 text-sm">
+        <span class="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-slate-200">
+          <span class="h-2 w-2 rounded-full bg-emerald-400"></span>
+          {{ 'SSH ready' if ssh_available else 'SSH unavailable' }}
+        </span>
+        <span class="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-slate-200">
+          <i class="fas fa-circle-nodes"></i>
+          {{ terminal_host }}:{{ terminal_port }}
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <section class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+    <div class="flex items-center justify-between gap-3 border-b border-slate-200 pb-3">
+      <div>
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">Terminal</div>
+        <div id="terminal-status" class="mt-1 text-sm text-slate-600">Connecting...</div>
+      </div>
+      <div class="flex gap-2">
+        <button id="btn-connect" type="button" class="inline-flex items-center gap-2 rounded-xl bg-slate-950 px-3.5 py-2 text-sm font-medium text-white hover:bg-slate-800">
+          <i class="fas fa-plug"></i>
+          Connect
+        </button>
+        <button id="btn-disconnect" type="button" class="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+          <i class="fas fa-xmark"></i>
+          Disconnect
+        </button>
+      </div>
+    </div>
+
+    <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-950 p-4">
+      <pre id="terminal-output" class="terminal-output min-h-[26rem] overflow-auto text-sm leading-6 text-slate-100"></pre>
+      <div class="mt-4 flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+        <span class="font-mono text-sm text-emerald-300">{{ ssh_user }}@{{ terminal_host }}:~$</span>
+        <input
+          id="terminal-input"
+          class="terminal-input w-full bg-transparent text-sm text-white outline-none placeholder:text-slate-500"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Type a command and press Enter"
+        />
+      </div>
+    </div>
+  </section>
+</div>
+
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+  const output = document.getElementById('terminal-output');
+  const input = document.getElementById('terminal-input');
+  const status = document.getElementById('terminal-status');
+  const connectBtn = document.getElementById('btn-connect');
+  const disconnectBtn = document.getElementById('btn-disconnect');
+  const socket = io({ transports: ['websocket', 'polling'] });
+  const sshAvailable = {{ 'true' if ssh_available else 'false' }};
+  let connected = false;
+  let history = [];
+  let historyIndex = -1;
+
+  function append(text) {
+    output.textContent += text;
+    output.scrollTop = output.scrollHeight;
+  }
+
+  function setStatus(text) {
+    status.textContent = text;
+  }
+
+  function openSession() {
+    if (!sshAvailable) {
+      setStatus('SSH unavailable on this platform');
+      return;
+    }
+    if (!socket.connected) {
+      socket.connect();
+      return;
+    }
+    socket.emit('terminal_open', { rows: 34, cols: 132 });
+  }
+
+  connectBtn.addEventListener('click', openSession);
+  disconnectBtn.addEventListener('click', () => socket.disconnect());
+  if (!sshAvailable) {
+    connectBtn.disabled = true;
+    disconnectBtn.disabled = true;
+    connectBtn.classList.add('opacity-50', 'cursor-not-allowed');
+    disconnectBtn.classList.add('opacity-50', 'cursor-not-allowed');
+    setStatus('SSH unavailable on this platform');
+  }
+
+  socket.on('connect', () => {
+    connected = true;
+    setStatus('Socket connected. Opening SSH session...');
+    append('\r\n');
+    openSession();
+  });
+
+  socket.on('terminal_ready', (payload) => {
+    setStatus(`Connected as ${payload.ssh_user}@${payload.host}`);
+  });
+
+  socket.on('terminal_output', (payload) => {
+    if (payload && payload.data) {
+      append(payload.data);
+    }
+  });
+
+  socket.on('terminal_error', (payload) => {
+    setStatus(payload?.message || 'Terminal error');
+    append(`\r\n[error] ${payload?.message || 'Terminal error'}\r\n`);
+  });
+
+  socket.on('terminal_closed', () => {
+    setStatus('Terminal closed');
+    append('\r\n[session closed]\r\n');
+  });
+
+  socket.on('disconnect', () => {
+    connected = false;
+    setStatus('Socket disconnected');
+  });
+
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      const value = input.value;
+      if (!value.trim()) return;
+      history.push(value);
+      historyIndex = history.length;
+      socket.emit('terminal_input', { data: value + '\n' });
+      input.value = '';
+      event.preventDefault();
+    } else if (event.key === 'ArrowUp') {
+      if (history.length) {
+        historyIndex = Math.max(0, historyIndex - 1);
+        input.value = history[historyIndex] || '';
+        event.preventDefault();
+      }
+    } else if (event.key === 'ArrowDown') {
+      if (history.length) {
+        historyIndex = Math.min(history.length, historyIndex + 1);
+        input.value = history[historyIndex] || '';
+        event.preventDefault();
+      }
+    } else if (event.key === 'c' && (event.ctrlKey || event.metaKey)) {
+      socket.emit('terminal_input', { data: '\u0003' });
+      event.preventDefault();
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    socket.emit('terminal_resize', { rows: 34, cols: 132 });
+  });
+</script>
+{% endblock %}

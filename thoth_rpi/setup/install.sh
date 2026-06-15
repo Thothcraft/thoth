@@ -19,7 +19,7 @@ echo "╚═══════════════════════�
 # --- System dependencies ---
 echo "➤ Installing system dependencies …"
 sudo apt-get update -qq
-sudo apt-get install -y -qq python3-venv python3-pip libopencv-dev ffmpeg sox
+sudo apt-get install -y -qq python3-venv python3-pip libopencv-dev ffmpeg sox openssh-server
 
 # --- Python venv ---
 echo "➤ Creating virtual environment …"
@@ -48,11 +48,13 @@ sudo sed -i "s|__THOTH_ROOT__|$THOTH_ROOT|g" /etc/systemd/system/thoth-collector
 sudo sed -i "s|__CAPTURE_SCRIPT__|/home/pi/Desktop/capture_dreamhat_minute.py|g" /etc/systemd/system/thoth-collector.service
 
 sudo systemctl daemon-reload
+sudo systemctl enable ssh
+sudo systemctl start ssh
 sudo systemctl enable thoth.service
 sudo systemctl start thoth.service
 sudo systemctl enable thoth-collector.service
 sudo systemctl start thoth-collector.service
 
 echo ""
-echo "✅  Thoth installed and running on port 80"
-echo "    Access at: http://$(hostname -I | awk '{print $1}')"
+echo "✅  Thoth installed and running on port 5000"
+echo "    Access at: http://$(hostname -I | awk '{print $1}'):5000"
