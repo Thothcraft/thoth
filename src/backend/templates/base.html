@@ -12,6 +12,25 @@
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
+            color: #e2e8f0;
+            background: linear-gradient(180deg, #020617 0%, #0f172a 42%, #111827 100%);
+        }
+
+        a {
+            color: inherit;
+        }
+
+        input,
+        textarea,
+        select {
+            color: #e2e8f0;
+            background-color: #0f172a;
+        }
+
+        input::placeholder,
+        textarea::placeholder {
+            color: #94a3b8;
+            opacity: 1;
         }
 
         .btn {
@@ -62,42 +81,43 @@
             border-color: #3b82f6;
         }
         .card {
-            background-color: #ffffff;
+            background-color: #0f172a;
+            color: #e2e8f0;
             border-radius: 0.5rem;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            box-shadow: 0 10px 30px -20px rgba(15, 23, 42, 0.6);
             padding: 1.5rem;
             margin-bottom: 1.5rem;
         }
     </style>
     {% block extra_head %}{% endblock %}
 </head>
-<body class="bg-gray-50 min-h-screen">
-    <header class="bg-white shadow">
+<body class="min-h-screen bg-slate-950 text-slate-100">
+    <header class="border-b border-slate-800 bg-slate-950/95 shadow-lg shadow-black/20 backdrop-blur">
         <div class="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8 flex justify-between items-center">
-            <h1 class="text-2xl font-bold text-gray-900">
-                <i class="fas fa-brain mr-2 text-blue-600"></i>
+            <h1 class="text-2xl font-bold text-slate-100">
+                <i class="fas fa-brain mr-2 text-cyan-400"></i>
                 {{ config.get('app_name', 'Thoth Device') }}
-                <span class="text-sm font-normal text-gray-500 ml-2">v{{ config.get('version', '1.0.0') }}</span>
+                <span class="ml-2 text-sm font-normal text-slate-400">v{{ config.get('version', '1.0.0') }}</span>
             </h1>
             {% if session.get('username') %}
             <div class="flex items-center space-x-4">
-                <a href="{{ url_for('captures') }}" class="text-sm text-blue-600 hover:text-blue-800">
+                <a href="{{ url_for('captures') }}" class="text-sm text-slate-300 hover:text-white">
                     <i class="fas fa-folder-open mr-1"></i>
                     Captures
                 </a>
-                <a href="{{ url_for('status') }}" class="text-sm text-blue-600 hover:text-blue-800">
+                <a href="{{ url_for('status') }}" class="text-sm text-slate-300 hover:text-white">
                     <i class="fas fa-tachometer-alt mr-1"></i>
                     Status
                 </a>
-                <a href="{{ url_for('connect') }}" class="text-sm text-blue-600 hover:text-blue-800">
+                <a href="{{ url_for('connect') }}" class="text-sm text-slate-300 hover:text-white">
                     <i class="fas fa-terminal mr-1"></i>
                     Connect
                 </a>
-                <span class="text-sm text-gray-600">
+                <span class="text-sm text-slate-400">
                     <i class="fas fa-user-circle mr-1"></i>
                     {{ session.get('username', 'User') }}
                 </span>
-                <a href="/logout" class="text-sm text-blue-600 hover:text-blue-800">
+                <a href="/logout" class="text-sm text-slate-300 hover:text-white">
                     <i class="fas fa-sign-out-alt mr-1"></i>
                     Logout
                 </a>
@@ -120,8 +140,8 @@
         {% block content %}{% endblock %}
     </main>
 
-    <footer class="bg-white border-t border-gray-200 mt-8">
-        <div class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8 text-center text-sm text-gray-500">
+    <footer class="border-t border-slate-800 bg-slate-950 mt-8">
+        <div class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8 text-center text-sm text-slate-500">
             <p>&copy; {{ now.year }} Thoth Device. All rights reserved.</p>
         </div>
     </footer>
@@ -135,7 +155,7 @@
         function showAlert(message, type = 'success') {
             const alertDiv = document.createElement('div');
             alertDiv.className = `mb-4 p-4 rounded-md ${
-                type === 'error' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
+                type === 'error' ? 'bg-rose-950 text-rose-200 border border-rose-800' : 'bg-emerald-950 text-emerald-200 border border-emerald-800'
             }`;
             alertDiv.textContent = message;
 

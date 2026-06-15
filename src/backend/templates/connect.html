@@ -8,12 +8,18 @@
     white-space: pre-wrap;
     word-break: break-word;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    color: #e2e8f0;
+    background: #020617;
   }
   .terminal-input {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     color: #ffffff;
     caret-color: #ffffff;
     -webkit-text-fill-color: #ffffff;
+    background: transparent;
+    outline: none;
+    box-shadow: none;
+    appearance: none;
   }
 </style>
 {% endblock %}
@@ -43,28 +49,28 @@
     </div>
   </section>
 
-  <section class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-    <div class="flex items-center justify-between gap-3 border-b border-slate-200 pb-3">
+  <section class="rounded-2xl border border-slate-800 bg-slate-900 p-4 text-slate-100 shadow-xl shadow-black/10">
+    <div class="flex items-center justify-between gap-3 border-b border-slate-800 pb-3">
       <div>
-        <div class="text-xs uppercase tracking-[0.18em] text-slate-500">Terminal</div>
-        <div id="terminal-status" class="mt-1 text-sm text-slate-600">Connecting...</div>
+        <div class="text-xs uppercase tracking-[0.18em] text-slate-400">Terminal</div>
+        <div id="terminal-status" class="mt-1 text-sm text-slate-300">Connecting...</div>
       </div>
       <div class="flex gap-2">
-        <button id="btn-connect" type="button" class="inline-flex items-center gap-2 rounded-xl bg-slate-950 px-3.5 py-2 text-sm font-medium text-white hover:bg-slate-800">
+        <button id="btn-connect" type="button" class="inline-flex items-center gap-2 rounded-xl bg-cyan-500 px-3.5 py-2 text-sm font-medium text-slate-950 hover:bg-cyan-400">
           <i class="fas fa-plug"></i>
           Connect
         </button>
-        <button id="btn-disconnect" type="button" class="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+        <button id="btn-disconnect" type="button" class="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3.5 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800">
           <i class="fas fa-xmark"></i>
           Disconnect
         </button>
       </div>
     </div>
 
-    <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-950 p-4">
-      <pre id="terminal-output" class="terminal-output min-h-[26rem] overflow-auto text-sm leading-6 text-slate-100"></pre>
-      <div class="mt-4 flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
-        <span class="font-mono text-sm text-emerald-300">{{ ssh_user }}@{{ terminal_host }}:~$</span>
+    <div class="mt-4 rounded-2xl border border-slate-800 bg-slate-950 p-4">
+      <pre id="terminal-output" class="terminal-output min-h-[26rem] overflow-auto rounded-xl border border-slate-800 bg-slate-950 p-4 text-sm leading-6"></pre>
+      <div class="mt-4 flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-950 px-3 py-2">
+        <span class="font-mono text-sm text-cyan-300">{{ ssh_user }}@{{ terminal_host }}:~$</span>
         <input
           id="terminal-input"
           class="terminal-input w-full bg-transparent text-sm text-white outline-none placeholder:text-slate-500"
@@ -159,6 +165,7 @@
 
   window.addEventListener('load', () => {
     input.focus();
+    input.style.backgroundColor = 'transparent';
   });
 
   input.addEventListener('keydown', (event) => {
