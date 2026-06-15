@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}Login - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="mx-auto max-w-md">
+  <section class="rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-xl shadow-black/10">
+    <div class="mb-6">
+      <div class="text-xs uppercase tracking-[0.28em] text-slate-400">Thoth</div>
+      <h1 class="mt-2 text-3xl font-semibold text-slate-50">Sign in</h1>
+      <p class="mt-2 text-sm leading-6 text-slate-300">Log in to activate device registration and heartbeat.</p>
+    </div>
+
+    <form method="POST" action="{{ url_for('login') }}" class="space-y-4">
+      <input type="hidden" name="next" value="{{ next or '' }}">
+      <div>
+        <label for="username" class="mb-1 block text-sm font-medium text-slate-200">Username</label>
+        <input id="username" name="username" required class="form-input w-full border-slate-700 bg-slate-950 text-slate-100 placeholder:text-slate-500" placeholder="Thothcraft username">
+      </div>
+      <div>
+        <label for="password" class="mb-1 block text-sm font-medium text-slate-200">Password</label>
+        <input id="password" name="password" type="password" required class="form-input w-full border-slate-700 bg-slate-950 text-slate-100 placeholder:text-slate-500" placeholder="Password">
+      </div>
+      <button type="submit" class="btn btn-primary w-full">Sign in</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

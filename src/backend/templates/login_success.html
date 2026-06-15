@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}Login Successful - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="mx-auto max-w-2xl">
+  <section class="rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-xl shadow-black/10">
+    <div class="mb-6">
+      <div class="text-xs uppercase tracking-[0.28em] text-emerald-300">Success</div>
+      <h1 class="mt-2 text-3xl font-semibold text-slate-50">Login complete</h1>
+      <p class="mt-2 text-sm text-slate-300">Logged in as <span class="font-medium text-slate-100">{{ username }}</span>.</p>
+    </div>
+
+    <div class="space-y-4">
+      <div>
+        <div class="mb-2 text-sm font-medium text-slate-200">Access token</div>
+        <pre class="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950 p-4 text-xs text-emerald-200">{{ access_token }}</pre>
+      </div>
+      <div class="flex flex-wrap gap-3">
+        <a href="{{ url_for('status') }}" class="btn btn-primary">Go to dashboard</a>
+        <a href="{{ url_for('captures') }}" class="btn btn-secondary">Open minutes</a>
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}

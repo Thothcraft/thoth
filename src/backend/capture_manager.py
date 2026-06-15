@@ -52,6 +52,7 @@ def _file_map(minute_dir: Path) -> Dict[str, Path]:
     csi_serial = files.get("wifi_csi_serial_all.jsonl")
     result = {
         "manifest": files.get("manifest.json"),
+        "predictions": files.get("predictions.json"),
         "video": files.get("usb_camera.mp4"),
         "video_log": files.get("usb_camera.ffmpeg.log"),
         "radar": None,
@@ -87,11 +88,13 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
         "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
         "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
         "labels": list(manifest.get("labels") or []) if isinstance(manifest, dict) else [],
+        "predictions": bool(files["predictions"] and files["predictions"].exists()),
         "files": {
             "video": bool(files["video"] and files["video"].exists()),
             "radar": bool(files["radar"] and files["radar"].exists()),
             "csi": bool((files["csi_csv"] and files["csi_csv"].exists()) or (files["csi_timestamped"] and files["csi_timestamped"].exists()) or (files["csi_serial"] and files["csi_serial"].exists())),
             "manifest": bool(files["manifest"] and files["manifest"].exists()),
+            "predictions": bool(files["predictions"] and files["predictions"].exists()),
         },
         "sizes": {
             "video": files["video"].stat().st_size if files["video"] and files["video"].exists() else 0,
