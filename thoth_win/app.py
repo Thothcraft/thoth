@@ -25,6 +25,7 @@ from PIL import Image, ImageDraw
 
 from thoth_core.backend.config import Config
 from thoth_core.backend.app import app, socketio, run_server
+import thoth_core.backend.app as core_app
 
 # Register Windows-specific sensors
 from thoth_win.sensors import camera, microphone, imu, csi  # noqa: F401
@@ -63,6 +64,7 @@ def _open_dashboard(icon, item):
 def _toggle_collection(icon, item):
     global _collecting
     _collecting = not _collecting
+    core_app.collection_active = _collecting
     state = "started" if _collecting else "stopped"
     logger.info("Data collection %s", state)
 

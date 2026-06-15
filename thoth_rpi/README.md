@@ -23,6 +23,10 @@ no captive portal, no hotspot, no NoDogSplash.
    - Copy to `/boot/firmware/thoth_credentials.json`
 6. Flash the SD card and insert into the Raspberry Pi
 
+The GitHub release also ships a ready-to-run Raspberry Pi bundle that
+contains `thoth_core/` and `thoth_rpi/` so the minute-capture dashboard and
+collector service are available immediately after install.
+
 ### Credential File Format
 
 `/boot/firmware/thoth_credentials.json`:
@@ -78,4 +82,6 @@ sudo ./setup/install.sh
 
 ## Creating a Custom Image
 
-See `setup/prepare-image.sh` and the comments therein.
+See `setup/prepare-image.sh` and the comments therein. It prepares the Pi
+for cloning into a reusable SD card image after the software stack and
+capture services are installed.

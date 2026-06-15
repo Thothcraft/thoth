@@ -2,8 +2,7 @@
 
 A status-bar application that runs a local Thoth server, exposes built-in
 sensors (camera and microphone) plus external sensor support, and provides
-a browser-based dashboard for data collection, labelling, and viewing
-deployed model predictions.
+the same minute-capture dashboard used by the Raspberry Pi build.
 
 ## Quick Install (DMG + GUI)
 
@@ -26,6 +25,8 @@ This will:
 4. Launch the app immediately
 
 After install, look for **Thoth** in your menu bar and click **Open Dashboard**.
+The dashboard shows continuous capture state, live sensor previews, and
+minute folders with download/upload controls.
 
 ## Menu Bar Options
 
@@ -43,6 +44,9 @@ After install, look for **Thoth** in your menu bar and click **Open Dashboard**.
 | Microphone | ✅ Working    | Built-in mic, requires sox or ffmpeg  |
 | IMU        | ☐ External   | Extend for external USB/BLE hardware |
 | WiFi CSI   | ☐ External   | Detects ESP32 via `/dev/tty.usbserial*` |
+
+The dashboard uses the shared Thoth core, so minute-long capture views and
+saved-minute browsing match the Raspberry Pi experience.
 
 ## Uninstall
 

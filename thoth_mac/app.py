@@ -26,6 +26,7 @@ import rumps
 
 from thoth_core.backend.config import Config
 from thoth_core.backend.app import app, socketio, run_server
+import thoth_core.backend.app as core_app
 
 # Register macOS-specific sensors so they appear in SensorRegistry
 from thoth_mac.sensors import camera, microphone, imu, csi  # noqa: F401
@@ -101,6 +102,7 @@ class ThothStatusBarApp(rumps.App):
 
     def toggle_collection(self, sender):
         self._collecting = not self._collecting
+        core_app.collection_active = self._collecting
         if self._collecting:
             sender.title = "Stop Collection"
             logger.info("Data collection started")

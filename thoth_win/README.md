@@ -2,7 +2,7 @@
 
 A system-tray application that runs a local Thoth server, exposes built-in
 sensors (camera and microphone) plus external sensor support, and provides
-a browser-based dashboard for data collection and model predictions.
+the same minute-capture dashboard used by the Raspberry Pi build.
 
 ## Quick Install
 
@@ -18,6 +18,9 @@ This will:
 2. Install all dependencies (core + Windows)
 3. Register a **Scheduled Task** so Thoth starts on every login
 4. Launch the app immediately
+
+The dashboard shows continuous capture state, live sensor previews, and
+minute folders with download/upload controls.
 
 ## System Tray Menu
 
@@ -35,6 +38,9 @@ This will:
 | Microphone | ✅ Working    | PyAudio                                      |
 | IMU        | ☐ External    | Extend for external USB/BLE hardware       |
 | WiFi CSI   | ☐ External    | Detects ESP32 via COM ports                 |
+
+The dashboard uses the shared Thoth core, so minute-long capture views and
+saved-minute browsing match the Raspberry Pi experience.
 
 ## Uninstall
 
