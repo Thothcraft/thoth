@@ -539,9 +539,13 @@ def _render_video_frame(video_path: Path) -> bytes:
 
 def _csi_plot_payload(path: Path, limit: int = 180) -> Dict[str, Any]:
     points = _parse_csi_average_series(path, limit=limit)
+    frames = _sample_series_frames(points)
     return {
         'points': points,
+        'frames': frames,
         'sample_count': len(points),
+        'frame_count': len(frames),
+        'frame_interval_ms': 120,
         'title': 'Average CSI amplitude',
         'x_label': 'Packet',
         'y_label': 'Average magnitude',
@@ -549,7 +553,46 @@ def _csi_plot_payload(path: Path, limit: int = 180) -> Dict[str, Any]:
     }
 
 
-def _radar_plot_payload(radar_path: Path, plot: str) -> Dict[str, Any]:
+def _sample_series_frames(points: List[float], max_frames: int = 30) -> List[Dict[str, Any]]:
+    if not points:
+        return []
+    if len(points) <= 1:
+        return [{'index': len(points), 'points': points[:]}]
+
+    step = max(1, math.ceil(len(points) / max_frames))
+    frames: List[Dict[str, Any]] = []
+    for end in range(step, len(points) + 1, step):
+        frames.append({'index': end, 'points': points[:end]})
+
+    if frames[-1]['index'] != len(points):
+        frames.append({'index': len(points), 'points': points[:]})
+    return frames
+
+
+def _count_radar_frames(path: Path) -> int:
+    count = 0
+    with open(path, 'rb') as handle:
+        while True:
+            version_bytes = handle.read(4)
+            if not version_bytes or len(version_bytes) < 4:
+                break
+            version = int.from_bytes(version_bytes, byteorder='little', signed=False)
+            if version != 0:
+                break
+            handle.read(4)
+            data_len_bytes = handle.read(4)
+            if len(data_len_bytes) < 4:
+                break
+            data_len = int.from_bytes(data_len_bytes, byteorder='little', signed=False)
+            handle.seek(data_len, os.SEEK_CUR)
+            count += 1
+    return count
+
+
+@lru_cache(maxsize=32)
+def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str, Dict[str, Any]]:
+    del mtime_ns, size
+    radar_path = Path(path_str)
     if np is None or CubeProcessor is None:
         raise RuntimeError('Radar plotting dependencies are unavailable')
 
@@ -557,35 +600,73 @@ def _radar_plot_payload(radar_path: Path, plot: str) -> Dict[str, Any]:
     if not setting:
         raise RuntimeError('Radar settings not found')
 
+    total_frames = _count_radar_frames(radar_path)
+    if total_frames <= 0:
+        raise RuntimeError('No radar frames available')
+
+    mmw_proc = CubeProcessor(setting, num_azimuth_bin=16, num_elevation_bin=16)
+    stride = max(1, math.ceil(total_frames / 18))
+    frames_by_plot: Dict[str, List[Dict[str, Any]]] = {plot: [] for plot in RADAR_PLOTS}
+
+    for index, (seq, raw_data) in enumerate(_iter_radar_frames(radar_path), start=1):
+        mmw_proc.process_raw_data(raw_data)
+        if index % stride != 0 and index != total_frames:
+            continue
+        if mmw_proc.data_cube_fft is None:
+            continue
+
+        for plot in RADAR_PLOTS:
+            axis_names = RADAR_PLOT_AXES[plot]
+            img = mmw_proc.vis_2d(axis_names[0], axis_names[1])
+            img = np.log10(np.maximum(img, 1e-9))
+
+            x_name = axis_names[1].lower()
+            y_name = axis_names[0].lower()
+            x_values = np.asarray(mmw_proc.proc_param.get(f'{x_name}_bin', []), dtype=float).tolist()
+            y_values = np.asarray(mmw_proc.proc_param.get(f'{y_name}_bin', []), dtype=float).tolist()
+            frames_by_plot[plot].append({
+                'seq': seq,
+                'index': index,
+                'x': x_values,
+                'y': y_values,
+                'z': img.tolist(),
+            })
+
+    bundle: Dict[str, Dict[str, Any]] = {}
+    for plot in RADAR_PLOTS:
+        frames = frames_by_plot[plot]
+        if not frames:
+            continue
+        latest = frames[-1]
+        axis_names = RADAR_PLOT_AXES[plot]
+        bundle[plot] = {
+            'plot': plot,
+            'title': f'{axis_names[0]} vs {axis_names[1]}',
+            'x_label': axis_names[1],
+            'y_label': axis_names[0],
+            'x': latest['x'],
+            'y': latest['y'],
+            'z': latest['z'],
+            'frames': frames,
+            'frame_count': total_frames,
+            'sample_count': len(frames),
+            'frame_interval_ms': 120,
+            'updated': datetime.utcnow().isoformat(),
+        }
+    return bundle
+
+
+def _radar_plot_payload(radar_path: Path, plot: str) -> Dict[str, Any]:
     axis_names = RADAR_PLOT_AXES.get(plot)
     if not axis_names:
         raise RuntimeError(f'Unsupported radar plot kind: {plot}')
 
-    mmw_proc = CubeProcessor(setting, num_azimuth_bin=16, num_elevation_bin=16)
-    for _seq, raw_data in _iter_radar_frames(radar_path):
-        mmw_proc.process_raw_data(raw_data)
-
-    if mmw_proc.data_cube_fft is None:
+    stat = radar_path.stat()
+    bundle = _radar_animation_bundle(str(radar_path), stat.st_mtime_ns, stat.st_size)
+    payload = bundle.get(plot)
+    if not payload:
         raise RuntimeError('No radar frames available')
-
-    img = mmw_proc.vis_2d(axis_names[0], axis_names[1])
-    img = np.log10(np.maximum(img, 1e-9))
-
-    x_name = axis_names[1].lower()
-    y_name = axis_names[0].lower()
-    x_values = np.asarray(mmw_proc.proc_param.get(f'{x_name}_bin', []), dtype=float).tolist()
-    y_values = np.asarray(mmw_proc.proc_param.get(f'{y_name}_bin', []), dtype=float).tolist()
-
-    return {
-        'plot': plot,
-        'title': f'{axis_names[0]} vs {axis_names[1]}',
-        'x_label': axis_names[1],
-        'y_label': axis_names[0],
-        'x': x_values,
-        'y': y_values,
-        'z': img.tolist(),
-        'updated': datetime.utcnow().isoformat(),
-    }
+    return payload
 
 
 def _render_live_radar_png(radar_path: Path, plot: str) -> bytes:
@@ -1138,6 +1219,30 @@ def api_capture_detail(minute):
     detail = minute_summary(minute_dir)
     detail['files_on_disk'] = {key: str(path) if path else None for key, path in files.items()}
     return jsonify({'status': 'success', 'capture': detail})
+
+
+@app.route('/api/captures/<minute>/video/frame')
+def api_capture_video_frame(minute):
+    """Render a JPEG preview from a specific minute's video file."""
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('captures')))
+
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        abort(404, description='Minute folder not found')
+
+    files = capture_files(minute_dir)
+    video_path = files.get('video')
+    if not video_path or not video_path.exists():
+        abort(404, description='No video available for this minute')
+
+    try:
+        jpeg_bytes = _render_video_frame(video_path)
+    except Exception as exc:
+        logger.exception(f'Failed to render minute video frame {minute}: {exc}')
+        abort(500, description=str(exc))
+
+    return Response(jpeg_bytes, mimetype='image/jpeg', headers={'Cache-Control': 'no-cache'})
 
 
 @app.route('/api/captures/<minute>/file/<kind>', methods=['GET'])

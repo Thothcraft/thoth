@@ -4,6 +4,7 @@
 
 {% block extra_head %}
 <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="{{ url_for('static', filename='js/capture_playback.js') }}"></script>
 {% endblock %}
 
 {% block content %}
@@ -94,21 +95,6 @@ const radarDataUrls = {{ radar_data_urls|tojson }};
 const videoFrame = document.getElementById('live-video-frame');
 const videoReload = document.getElementById('reload-video');
 
-function plotConfig() {
-  return {responsive: true, displayModeBar: true, displaylogo: false};
-}
-
-function liveLayout(title, xLabel, yLabel) {
-  return {
-    title: {text: title, font: {size: 15}},
-    margin: {l: 54, r: 20, t: 48, b: 48},
-    paper_bgcolor: '#ffffff',
-    plot_bgcolor: '#ffffff',
-    xaxis: {title: {text: xLabel}, gridcolor: '#e2e8f0', zeroline: false},
-    yaxis: {title: {text: yLabel}, gridcolor: '#e2e8f0', zeroline: false},
-  };
-}
-
 async function loadJson(url) {
   const response = await fetch(`${url}?t=${Date.now()}`, {cache: 'no-store'});
   if (!response.ok) {
@@ -120,22 +106,15 @@ async function loadJson(url) {
 async function renderCsi() {
   const host = document.getElementById('live-csi-chart');
   const status = document.getElementById('csi-updated');
-  if (!host) return;
+  if (!host || !window.ThothPlayback) return;
   try {
     const payload = await loadJson(csiDataUrl);
-    const data = payload.data || {};
-    const points = Array.isArray(data.points) ? data.points : [];
-    const x = points.map((_, idx) => idx + 1);
-    await Plotly.react(host, [{
-      x,
-      y: points,
-      mode: 'lines',
-      line: {color: '#2563eb', width: 2.5},
-      hovertemplate: 'Packet %{x}<br>Magnitude %{y:.3f}<extra></extra>',
-    }], {
-      ...liveLayout('Average CSI magnitude', 'Packet', 'Magnitude'),
+    await ThothPlayback.renderAnimatedLine(host, payload, {
+      title: 'Average CSI magnitude',
+      xLabel: 'Packet',
+      yLabel: 'Magnitude',
       uirevision: 'live-csi',
-    }, plotConfig());
+    });
     if (status) status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
   } catch (error) {
     if (status) status.textContent = 'CSI unavailable';
@@ -150,35 +129,18 @@ async function renderRadar() {
     ['live-radar-azimuth-doppler', radarDataUrls[2]],
   ];
   const status = document.getElementById('radar-updated');
+  if (!window.ThothPlayback) return;
   try {
     await Promise.all(plots.map(async ([id, url]) => {
       const host = document.getElementById(id);
       if (!host) return;
       const payload = await loadJson(url);
-      const data = payload.data || {};
-      const x = Array.isArray(data.x) ? data.x : [];
-      const y = Array.isArray(data.y) ? data.y : [];
-      const z = Array.isArray(data.z) ? data.z : [];
-      const title = data.title || 'Radar';
-      const trace = {
-        type: 'heatmap',
-        x,
-        y,
-        z,
-        colorscale: 'Viridis',
-        hoverongaps: false,
-        hovertemplate: `${data.y_label || 'Y'}: %{y}<br>${data.x_label || 'X'}: %{x}<br>Power %{z:.2f}<extra></extra>`,
-        colorbar: {title: 'log power'},
-      };
-      const layout = {
-        title: {text: title, font: {size: 14}},
-        margin: {l: 48, r: 16, t: 44, b: 44},
-        paper_bgcolor: '#ffffff',
-        plot_bgcolor: '#ffffff',
-        xaxis: {title: {text: data.x_label || 'X'}, gridcolor: '#e2e8f0'},
-        yaxis: {title: {text: data.y_label || 'Y'}, gridcolor: '#e2e8f0'},
-      };
-      await Plotly.react(host, [trace], layout, plotConfig());
+      await ThothPlayback.renderAnimatedHeatmap(host, payload, {
+        title: payload?.data?.title || 'Radar',
+        xLabel: payload?.data?.x_label || 'X',
+        yLabel: payload?.data?.y_label || 'Y',
+        uirevision: 'live-radar',
+      });
     }));
     if (status) status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
   } catch (error) {
@@ -204,10 +166,10 @@ if (kind === 'video') {
   setInterval(refreshVideo, 1500);
 } else if (kind === 'csi') {
   renderCsi();
-  setInterval(renderCsi, 1500);
+  setInterval(renderCsi, 5000);
 } else if (kind === 'radar') {
   renderRadar();
-  setInterval(renderRadar, 1500);
+  setInterval(renderRadar, 5000);
 }
 </script>
 {% endblock %}
