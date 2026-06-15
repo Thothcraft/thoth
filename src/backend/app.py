@@ -67,6 +67,7 @@ from backend.capture_manager import (
     capture_files,
     current_minute,
     minute_summary,
+    minute_metrics,
     cleanup_old_minutes,
     zip_minute_folder,
     update_minute_labels,
@@ -425,12 +426,16 @@ def _parse_csi_average_series(path: Path, limit: int = 5000) -> List[float]:
                 series.append(mean)
     else:
         header = _split_csv_line(first)
-        data_index = header.index('data') if 'data' in header else -1
+        data_index = -1
+        for candidate in ('data', 'raw_csi_line'):
+            if candidate in header:
+                data_index = header.index(candidate)
+                break
+        if data_index < 0:
+            data_index = len(header) - 1
         if data_index < 0:
             return []
         for line in lines[1:]:
-            if not line.startswith('CSI_DATA,'):
-                continue
             cells = _split_csv_line(line)
             if len(cells) <= data_index:
                 continue
@@ -1244,6 +1249,7 @@ def capture_detail(minute):
 
     files = capture_files(minute_dir)
     detail = minute_summary(minute_dir)
+    metrics = minute_metrics(minute_dir)
     video_preview = f"/api/captures/{minute}/file/video" if files.get("video") else None
     radar_preview = preview_text(files.get("radar"), 12000)
     csi_preview = preview_text(files.get("csi_timestamped") or files.get("csi_csv"), 12000)
@@ -1255,6 +1261,7 @@ def capture_detail(minute):
         capture=minute_dir,
         minute_info=detail,
         files=files,
+        capture_metrics=metrics,
         video_url=video_preview,
         radar_data_urls=[url_for('api_capture_radar_data', minute=minute_dir.name, plot=plot) for plot in RADAR_PLOTS],
         csi_data_url=url_for('api_capture_csi_data', minute=minute_dir.name),
@@ -1316,7 +1323,9 @@ def api_capture_detail(minute):
 
     files = capture_files(minute_dir)
     detail = minute_summary(minute_dir)
+    metrics = minute_metrics(minute_dir)
     detail['files_on_disk'] = {key: str(path) if path else None for key, path in files.items()}
+    detail['metrics'] = metrics
     return jsonify({'status': 'success', 'capture': detail})
 
 
@@ -1438,7 +1447,9 @@ def api_capture_csi_data(minute):
     if not path or not path.exists():
         abort(404, description='No CSI data available')
 
-    return jsonify({'status': 'success', 'minute': minute, 'data': _csi_plot_payload(path)})
+    data = _csi_plot_payload(path)
+    data['metadata'] = minute_metrics(minute_dir)
+    return jsonify({'status': 'success', 'minute': minute, 'data': data})
 
 
 @app.route('/api/captures/<minute>/radar/plot/<plot>')
@@ -1494,6 +1505,7 @@ def api_capture_radar_data(minute, plot):
         logger.exception(f"Failed to build radar data {plot}: {exc}")
         abort(500, description=str(exc))
 
+    payload['metadata'] = minute_metrics(minute_dir)
     return jsonify({'status': 'success', 'minute': minute, 'data': payload})
 
 
@@ -1576,12 +1588,14 @@ def live_capture_stream(kind):
     has_video = bool(files.get('video') and files['video'].exists()) if minute_dir else False
     has_csi = bool(files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial'))
     has_radar = bool(files.get('radar'))
+    live_metrics = minute_metrics(minute_dir) if minute_dir else None
 
     return render_template(
         'live_stream.html',
         kind=kind,
         active_minute=minute_dir.name if minute_dir else None,
         username=session.get('username'),
+        live_metrics=live_metrics,
         video_url=url_for('api_live_capture_video'),
         video_frame_url=url_for('api_live_capture_video_frame'),
         csi_data_url=url_for('api_live_capture_csi_data'),
@@ -1656,7 +1670,9 @@ def api_live_capture_csi_data():
     if not path or not path.exists():
         abort(404, description='No CSI data available')
 
-    return jsonify({'status': 'success', 'minute': minute_dir.name, 'data': _csi_plot_payload(path)})
+    data = _csi_plot_payload(path)
+    data['metadata'] = minute_metrics(minute_dir)
+    return jsonify({'status': 'success', 'minute': minute_dir.name, 'data': data})
 
 
 @app.route('/api/captures/live/csi/plot')
@@ -1705,6 +1721,7 @@ def api_live_capture_radar_data(plot):
         logger.exception(f"Failed to build live radar data {plot}: {exc}")
         abort(500, description=str(exc))
 
+    payload['metadata'] = minute_metrics(minute_dir)
     return jsonify({'status': 'success', 'minute': minute_dir.name, 'data': payload})
 
 

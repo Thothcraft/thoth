@@ -84,6 +84,42 @@
         </div>
         {% endif %}
     </section>
+
+    {% if live_metrics %}
+    <section class="rounded-2xl border border-slate-800 bg-slate-950 p-5 text-slate-100 shadow-sm">
+        <div class="flex items-center justify-between gap-4">
+            <div>
+                <div class="text-xs uppercase tracking-[0.22em] text-slate-500">Live metrics</div>
+                <h2 class="mt-1 text-xl font-semibold text-white">Current minute summary</h2>
+            </div>
+            <div class="text-xs text-slate-500">Updates with the active minute and reflects the current capture window.</div>
+        </div>
+        <div class="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <div class="rounded-2xl border border-slate-800 bg-white/5 p-4">
+                <div class="text-xs uppercase tracking-wide text-slate-500">Recorded window</div>
+                <div class="mt-2 text-2xl font-semibold text-white">{{ live_metrics.seconds_recorded|round(1) if live_metrics.seconds_recorded else 'N/A' }}s</div>
+            </div>
+            <div class="rounded-2xl border border-slate-800 bg-white/5 p-4">
+                <div class="text-xs uppercase tracking-wide text-slate-500">Video</div>
+                <div class="mt-2 text-lg font-semibold text-white">
+                    {{ live_metrics.video.duration_seconds|round(1) if live_metrics.video.duration_seconds else 'N/A' }}s
+                    {% if live_metrics.video.fps %} · {{ live_metrics.video.fps|round(1) }} fps{% endif %}
+                </div>
+                <div class="mt-1 text-sm text-slate-400">{{ live_metrics.video.data_shape or 'Unknown resolution' }}</div>
+            </div>
+            <div class="rounded-2xl border border-slate-800 bg-white/5 p-4">
+                <div class="text-xs uppercase tracking-wide text-slate-500">CSI</div>
+                <div class="mt-2 text-lg font-semibold text-white">{{ live_metrics.csi.sample_count }} packets</div>
+                <div class="mt-1 text-sm text-slate-400">{{ live_metrics.csi.data_shape or 'Unknown shape' }}</div>
+            </div>
+            <div class="rounded-2xl border border-slate-800 bg-white/5 p-4">
+                <div class="text-xs uppercase tracking-wide text-slate-500">Radar</div>
+                <div class="mt-2 text-lg font-semibold text-white">{{ live_metrics.radar.frame_count }} frames</div>
+                <div class="mt-1 text-sm text-slate-400">{{ live_metrics.radar.data_shape or 'Unknown shape' }}</div>
+            </div>
+        </div>
+    </section>
+    {% endif %}
 </div>
 {% endblock %}
 
