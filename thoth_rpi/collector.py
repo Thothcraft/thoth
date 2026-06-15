@@ -52,7 +52,7 @@ def run_capture(python: str, capture_script: str) -> int:
         capture_script,
         "--start-now",
         "--duration",
-        "58.5",
+        "59.5",
     ]
     for label in labels:
         cmd.extend(["--label", label])

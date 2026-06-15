@@ -69,6 +69,7 @@ from backend.capture_manager import (
     minute_summary,
     cleanup_old_minutes,
     zip_minute_folder,
+    update_minute_labels,
     preview_text,
 )
 
@@ -567,7 +568,7 @@ def _csi_plot_payload(path: Path, limit: int = 5000) -> Dict[str, Any]:
     }
 
 
-def _sample_series_frames(points: List[float], max_frames: int = 60) -> List[Dict[str, Any]]:
+def _sample_series_frames(points: List[float], max_frames: int = 240) -> List[Dict[str, Any]]:
     if not points:
         return []
     if len(points) <= 1:
@@ -619,7 +620,7 @@ def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str
         raise RuntimeError('No radar frames available')
 
     mmw_proc = CubeProcessor(setting, num_azimuth_bin=16, num_elevation_bin=16)
-    max_frames = min(60, total_frames)
+    max_frames = min(120, total_frames)
     sample_indices = {1, total_frames}
     if max_frames > 2:
         for slot in range(1, max_frames - 1):
@@ -1317,6 +1318,29 @@ def api_capture_detail(minute):
     detail = minute_summary(minute_dir)
     detail['files_on_disk'] = {key: str(path) if path else None for key, path in files.items()}
     return jsonify({'status': 'success', 'capture': detail})
+
+
+@app.route('/api/captures/<minute>/labels', methods=['PATCH'])
+def api_capture_labels(minute):
+    """Update labels for a capture minute."""
+    if 'username' not in session:
+        return jsonify({'status': 'error', 'message': 'Authentication required'}), 401
+
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        return jsonify({'status': 'error', 'message': 'Minute folder not found'}), 404
+
+    payload = request.get_json(silent=True) or {}
+    labels = payload.get('labels', [])
+    replace = bool(payload.get('replace', True))
+
+    try:
+        updated = update_minute_labels(minute_dir, labels, replace=replace)
+    except Exception as exc:
+        logger.exception("Failed to update labels for %s: %s", minute, exc)
+        return jsonify({'status': 'error', 'message': 'Failed to update labels'}), 500
+
+    return jsonify({'status': 'success', 'minute': minute, 'labels': updated})
 
 
 @app.route('/api/captures/<minute>/video/frame')

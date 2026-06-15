@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import binascii
 import io
+import json
 import os
 import re
 import shutil
@@ -133,6 +134,46 @@ def preview_text(path: Optional[Path], limit: int = 20000) -> str:
             return handle.read(limit)
     except Exception:
         return ""
+
+
+def _normalize_labels(labels: object) -> List[str]:
+    if isinstance(labels, str):
+        items = labels.split(",")
+    elif isinstance(labels, list):
+        items = labels
+    else:
+        items = []
+
+    cleaned: List[str] = []
+    for item in items:
+        value = str(item or "").strip().replace("\n", " ")
+        value = re.sub(r"\s+", " ", value)
+        if value and value not in cleaned:
+            cleaned.append(value)
+    return cleaned
+
+
+def update_minute_labels(minute_dir: Path, labels: object, replace: bool = True) -> List[str]:
+    manifest_path = minute_dir / "manifest.json"
+    manifest: Dict[str, object] = {}
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+
+    incoming = _normalize_labels(labels)
+    if replace:
+        merged = incoming
+    else:
+        merged = _normalize_labels(manifest.get("labels", []))
+        for label in incoming:
+            if label not in merged:
+                merged.append(label)
+
+    manifest["labels"] = merged
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return merged
 
 
 def read_binary_tail(path: Path, offset: int = 0, limit: int = 8192) -> Tuple[int, str]:

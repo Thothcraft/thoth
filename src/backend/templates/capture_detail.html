@@ -24,6 +24,15 @@
                     {% endfor %}
                 </div>
                 {% endif %}
+                <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <input id="minute-label-input" type="text" placeholder="Comma-separated labels"
+                        class="w-full rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-900 outline-none placeholder:text-slate-400 sm:max-w-xl" />
+                    <button type="button" class="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-3.5 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                        onclick="saveMinuteLabels('{{ minute }}')">
+                        <i class="fas fa-tags"></i>
+                        Save labels
+                    </button>
+                </div>
             </div>
             <div class="flex flex-wrap gap-2">
                 <a href="{{ url_for('download_capture_minute', minute=minute) }}" class="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-3.5 py-2 text-sm font-medium text-white hover:bg-slate-800">
@@ -124,6 +133,27 @@ function showTab(name) {
     if (panel) {
         panel.classList.remove('hidden');
     }
+}
+
+async function saveMinuteLabels(minute) {
+    const input = document.getElementById('minute-label-input');
+    if (!input) return;
+    const labels = input.value
+        .split(',')
+        .map((label) => label.trim().replace(/\s+/g, ' '))
+        .filter(Boolean);
+    if (!labels.length) return;
+    const response = await fetch(`/api/captures/${minute}/labels`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labels, replace: true }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        showAlert(payload.message || 'Failed to save labels', 'error');
+        return;
+    }
+    window.location.reload();
 }
 
 async function uploadMinute(minute) {
