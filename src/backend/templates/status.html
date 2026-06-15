@@ -4,7 +4,6 @@
 
 {% block content %}
 {% set collecting = system_status.collection_active %}
-{% set latest = capture_overview.latest_minute %}
 <div class="space-y-6">
     <section class="rounded-2xl bg-slate-950 px-6 py-6 text-white shadow-lg">
         <div class="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
@@ -21,24 +20,10 @@
                     <span class="h-2 w-2 rounded-full {{ 'bg-emerald-400' if collecting else 'bg-amber-300' }}"></span>
                     {{ 'Collecting data' if collecting else 'Idle' }}
                 </span>
-                <a href="{{ url_for('connect') }}" class="inline-flex items-center gap-2 rounded-xl border border-white/15 px-4 py-2 text-sm font-medium text-white hover:bg-white/5">
-                    <i class="fas fa-terminal"></i>
-                    Connect
-                </a>
                 <a href="{{ url_for('captures') }}" class="inline-flex items-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-medium text-slate-950 hover:bg-slate-100">
                     <i class="fas fa-folder-open"></i>
-                    Browse minutes
+                    Open minutes
                 </a>
-                {% if latest %}
-                <a href="{{ url_for('capture_detail', minute=latest.minute) }}" class="inline-flex items-center gap-2 rounded-xl border border-white/15 px-4 py-2 text-sm font-medium text-white hover:bg-white/5">
-                    <i class="fas fa-eye"></i>
-                    Latest minute
-                </a>
-                <a href="{{ url_for('download_capture_minute', minute=latest.minute) }}" class="inline-flex items-center gap-2 rounded-xl border border-white/15 px-4 py-2 text-sm font-medium text-white hover:bg-white/5">
-                    <i class="fas fa-download"></i>
-                    Download latest
-                </a>
-                {% endif %}
             </div>
         </div>
 
@@ -60,33 +45,6 @@
                 <div class="mt-2 break-all text-sm text-slate-200">{{ capture_overview.capture_dir }}</div>
             </div>
         </div>
-
-        {% if latest %}
-        <div class="mt-4 rounded-xl border border-white/10 bg-white/5 p-4">
-            <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-                <div class="min-w-0 flex-1">
-                    <div class="text-xs uppercase tracking-wide text-slate-400">Labels</div>
-                    <div class="mt-1 text-sm text-slate-300">Apply labels to the latest minute folder.</div>
-                    {% if latest.labels %}
-                    <div class="mt-3 flex flex-wrap gap-2">
-                        {% for label in latest.labels %}
-                        <span class="rounded-full bg-white/10 px-2.5 py-1 text-xs font-medium text-slate-100">{{ label }}</span>
-                        {% endfor %}
-                    </div>
-                    {% endif %}
-                    <input id="dashboard-label-input" type="text" placeholder="Comma-separated labels"
-                        class="mt-3 w-full rounded-xl border border-white/10 bg-slate-900 px-4 py-3 text-sm text-white outline-none placeholder:text-slate-500" />
-                </div>
-                <div class="flex flex-wrap gap-2">
-                    <button type="button" onclick="applyDashboardLabels('{{ latest.minute }}')"
-                        class="inline-flex items-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-medium text-slate-950 hover:bg-slate-100">
-                        <i class="fas fa-tags"></i>
-                        Save labels
-                    </button>
-                </div>
-            </div>
-        </div>
-        {% endif %}
     </section>
 
     <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -105,16 +63,6 @@
             <div class="mt-4 space-y-2 text-sm text-slate-300">
                 <div><span class="text-slate-400">Source:</span> {{ sensor.source }}</div>
                 <div><span class="text-slate-400">Data:</span> {{ sensor.files }}</div>
-            </div>
-            <div class="mt-4">
-                {% if sensor.stream and sensor.online %}
-                <a href="{{ sensor.stream }}" target="_blank" class="inline-flex items-center gap-2 text-sm font-medium text-cyan-300 hover:text-cyan-200">
-                    Open live view
-                    <i class="fas fa-arrow-right text-xs"></i>
-                </a>
-                {% else %}
-                <span class="text-sm text-slate-500">No live stream</span>
-                {% endif %}
             </div>
         </article>
         {% endfor %}
@@ -135,25 +83,25 @@
                 <a href="{{ url_for('capture_detail', minute=minute.minute) }}" class="rounded-2xl border border-slate-800 bg-slate-950/80 p-4 transition hover:border-slate-700 hover:bg-slate-900">
                     <div class="flex items-start justify-between gap-3">
                         <div>
-                            <div class="text-xs uppercase tracking-[0.18em] text-slate-400">Minute folder</div>
-                            <div class="mt-1 font-mono text-lg font-semibold text-slate-50">{{ minute.minute }}</div>
-                        </div>
-                        <span class="rounded-full px-2.5 py-1 text-xs font-medium {{ 'bg-emerald-500/15 text-emerald-200' if minute.files.video and minute.files.radar and minute.files.csi else 'bg-amber-500/15 text-amber-200' }}">
-                            {{ 'Ready' if minute.files.video and minute.files.radar and minute.files.csi else 'Collecting' }}
-                        </span>
-                    </div>
-                    <div class="mt-4 flex flex-wrap gap-2 text-xs">
-                        <span class="rounded-full bg-slate-800 px-2.5 py-1 text-slate-300">Video {{ 'on' if minute.files.video else 'off' }}</span>
-                        <span class="rounded-full bg-slate-800 px-2.5 py-1 text-slate-300">Radar {{ 'on' if minute.files.radar else 'off' }}</span>
-                        <span class="rounded-full bg-slate-800 px-2.5 py-1 text-slate-300">CSI {{ 'on' if minute.files.csi else 'off' }}</span>
-                    </div>
-                    {% if minute.labels %}
-                    <div class="mt-3 flex flex-wrap gap-2">
-                        {% for label in minute.labels %}
-                        <span class="rounded-full bg-cyan-500/10 px-2.5 py-1 text-xs font-medium text-cyan-200">{{ label }}</span>
-                        {% endfor %}
-                    </div>
-                    {% endif %}
+                    <div class="text-xs uppercase tracking-[0.18em] text-slate-400">Minute folder</div>
+                    <div class="mt-1 font-mono text-lg font-semibold text-slate-50">{{ minute.minute }}</div>
+                </div>
+                <span class="rounded-full px-2.5 py-1 text-xs font-medium {{ 'bg-emerald-500/15 text-emerald-200' if minute.files.video and minute.files.radar and minute.files.csi else 'bg-amber-500/15 text-amber-200' }}">
+                    {{ 'Ready' if minute.files.video and minute.files.radar and minute.files.csi else 'Collecting' }}
+                </span>
+            </div>
+            <div class="mt-4 flex flex-wrap gap-2 text-xs">
+                <span class="rounded-full bg-slate-800 px-2.5 py-1 text-slate-300">Video {{ 'on' if minute.files.video else 'off' }}</span>
+                <span class="rounded-full bg-slate-800 px-2.5 py-1 text-slate-300">Radar {{ 'on' if minute.files.radar else 'off' }}</span>
+                <span class="rounded-full bg-slate-800 px-2.5 py-1 text-slate-300">CSI {{ 'on' if minute.files.csi else 'off' }}</span>
+            </div>
+            {% if minute.labels %}
+            <div class="mt-3 flex flex-wrap gap-2">
+                {% for label in minute.labels %}
+                <span class="rounded-full bg-cyan-500/10 px-2.5 py-1 text-xs font-medium text-cyan-200">{{ label }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
                     <div class="mt-4 text-xs text-slate-500">
                         Updated {{ minute.modified }}
                     </div>
@@ -206,30 +154,4 @@
         </aside>
     </section>
 </div>
-<script>
-function parseDashboardLabels() {
-    const input = document.getElementById('dashboard-label-input');
-    if (!input) return [];
-    return input.value
-        .split(',')
-        .map((label) => label.trim().replace(/\s+/g, ' '))
-        .filter(Boolean);
-}
-
-async function applyDashboardLabels(minute) {
-    const labels = parseDashboardLabels();
-    if (!labels.length || !minute) return;
-    const response = await fetch(`/api/captures/${minute}/labels`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ labels, replace: true }),
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-        showAlert(payload.message || 'Failed to save labels', 'error');
-        return;
-    }
-    window.location.reload();
-}
-</script>
 {% endblock %}

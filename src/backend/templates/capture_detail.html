@@ -43,20 +43,6 @@
                     <i class="fas fa-cloud-upload-alt"></i>
                     Upload to Cloud
                 </button>
-                {% if minute == active_minute %}
-                <a href="/captures/live/video" target="_blank" class="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
-                    <i class="fas fa-video"></i>
-                    Live Video
-                </a>
-                <a href="/captures/live/csi" target="_blank" class="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
-                    <i class="fas fa-wifi"></i>
-                    Live CSI
-                </a>
-                <a href="/captures/live/radar" target="_blank" class="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
-                    <i class="fas fa-wave-square"></i>
-                    Live Radar
-                </a>
-                {% endif %}
             </div>
         </div>
     </section>
@@ -220,10 +206,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   initTabs();
   await renderCsi();
   await renderRadar();
-  if (activeMinute) {
-    setInterval(renderCsi, 5000);
-    setInterval(renderRadar, 5000);
-  }
 });
 </script>
 {% endblock %}
