@@ -141,8 +141,11 @@ jobs:
           sudo apt-get install -y \
             coreutils quilt parted qemu-user-binfmt debootstrap zerofree zip \
             dosfstools e2fsprogs libarchive-tools libcap2-bin grep rsync xz-utils \
-            file git curl bc gpg pigz xxd arch-test bmap-tools kmod
+            file git curl bc gpg pigz xxd arch-test bmap-tools kmod \
+            binfmt-support qemu-user-static
           sudo modprobe binfmt_misc || true
+          sudo update-binfmts --enable qemu-aarch64 || true
+          arch-test arm64
 
       - name: Fetch pi-gen
         run: |
@@ -179,6 +182,7 @@ jobs:
         run: |
           sudo ./build.sh || {
             sudo tail -n 400 /tmp/pi-gen/work/Thoth-RPi/build.log || true
+            sudo tail -n 400 /tmp/pi-gen/work/Thoth-RPi/stage0/debootstrap.log || true
             exit 1
           }
 
