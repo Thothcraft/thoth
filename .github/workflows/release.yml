@@ -139,7 +139,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            coreutils quilt parted qemu-user-binfmt debootstrap zerofree zip \
+            coreutils quilt parted debootstrap zerofree zip \
             dosfstools e2fsprogs libarchive-tools libcap2-bin grep rsync xz-utils \
             file git curl bc gpg pigz xxd arch-test bmap-tools kmod \
             binfmt-support qemu-user-static
