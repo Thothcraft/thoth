@@ -142,9 +142,8 @@ jobs:
             coreutils quilt parted debootstrap zerofree zip \
             dosfstools e2fsprogs libarchive-tools libcap2-bin grep rsync xz-utils \
             file git curl bc gpg pigz xxd arch-test bmap-tools kmod \
-            binfmt-support qemu-user-binfmt qemu-user-static
+            binfmt-support qemu-user-binfmt
           sudo modprobe binfmt_misc || true
-          sudo ln -sf /usr/bin/qemu-aarch64-static /usr/local/bin/qemu-aarch64
           sudo update-binfmts --enable qemu-aarch64 || true
           arch-test arm64
 
