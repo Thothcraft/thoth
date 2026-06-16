@@ -5,8 +5,6 @@ libopencv-dev
 network-manager
 openssh-server
 python3-pip
-python3-picamera2
-python3-rpi.gpio
 python3-venv
 rsync
 sox

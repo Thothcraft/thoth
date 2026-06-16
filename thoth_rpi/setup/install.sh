@@ -44,9 +44,12 @@ sudo apt-get install -y -qq \
     sox \
     openssh-server \
     network-manager \
-    avahi-daemon \
-    python3-picamera2 \
-    python3-rpi.gpio
+    avahi-daemon
+
+# Hardware-specific packages vary across Raspberry Pi OS releases. Install
+# them when available, but do not fail the whole image if one package moved.
+sudo apt-get install -y -qq python3-picamera2 || true
+sudo apt-get install -y -qq python3-rpi.gpio || true
 
 # --- Python venv ---
 echo "➤ Creating virtual environment …"

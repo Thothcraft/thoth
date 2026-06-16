@@ -144,7 +144,7 @@ jobs:
             file git curl bc gpg pigz xxd arch-test bmap-tools kmod \
             binfmt-support qemu-user-static
           sudo modprobe binfmt_misc || true
-          sudo ln -sf /usr/bin/qemu-arm-static /usr/local/bin/qemu-arm
+          sudo ln -sf /usr/bin/qemu-aarch64-static /usr/local/bin/qemu-aarch64
           sudo update-binfmts --enable qemu-aarch64 || true
           arch-test arm64
 
