@@ -15,7 +15,7 @@ class Config:
     
     # Application info
     APP_NAME = 'Thoth Device'
-    VERSION = '1.3.6'
+    VERSION = '1.3.7'
     
     # Flask configuration
     SECRET_KEY = os.getenv('FLASK_SECRET_KEY', 'thoth-dev-secret-key')
