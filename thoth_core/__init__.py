@@ -5,4 +5,4 @@ client, and base sensor abstractions shared across all Thoth platform variants
 (macOS, Windows, Raspberry Pi).
 """
 
-__version__ = "1.3.10"
+__version__ = "1.3.11"

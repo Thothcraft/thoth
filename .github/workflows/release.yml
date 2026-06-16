@@ -130,7 +130,7 @@ jobs:
 
   # ── Burnable Raspberry Pi image ─────────────────────────────────────────
   build-rpi-image:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
@@ -141,10 +141,8 @@ jobs:
           sudo apt-get install -y \
             coreutils quilt parted debootstrap zerofree zip \
             dosfstools e2fsprogs libarchive-tools libcap2-bin grep rsync xz-utils \
-            file git curl bc gpg pigz xxd arch-test bmap-tools kmod \
-            binfmt-support qemu-user-binfmt
+            file git curl bc gpg pigz xxd arch-test bmap-tools kmod
           sudo modprobe binfmt_misc || true
-          sudo update-binfmts --enable qemu-aarch64 || true
           arch-test arm64
 
       - name: Fetch pi-gen
@@ -170,7 +168,7 @@ jobs:
           ENABLE_SSH=1
           PASSWORDLESS_SUDO=1
           WPA_COUNTRY='US'
-          USE_QEMU=1
+          USE_QEMU=0
           DEPLOY_COMPRESSION='gz'
           COMPRESSION_LEVEL=6
           STAGE_LIST='stage0 stage1 stage2 stage-thoth'
