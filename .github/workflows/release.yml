@@ -141,7 +141,7 @@ jobs:
           sudo apt-get install -y \
             coreutils quilt parted debootstrap zerofree zip \
             dosfstools e2fsprogs libarchive-tools libcap2-bin grep rsync xz-utils \
-            file git curl bc gpg pigz xxd arch-test bmap-tools kmod
+            file git curl bc gpg pigz xxd arch-test bmap-tools kmod qemu-user-binfmt
           sudo modprobe binfmt_misc || true
           arch-test arm64
 
