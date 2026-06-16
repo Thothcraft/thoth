@@ -124,9 +124,78 @@ jobs:
           name: rpi-release
           path: Thoth-RPi.tar.gz
 
+  # ── Burnable Raspberry Pi image ─────────────────────────────────────────
+  build-rpi-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pi-gen dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            coreutils quilt parted qemu-user-binfmt debootstrap zerofree zip \
+            dosfstools e2fsprogs libarchive-tools libcap2-bin grep rsync xz-utils \
+            file git curl bc gpg pigz xxd arch-test bmap-tools kmod
+          sudo modprobe binfmt_misc || true
+
+      - name: Fetch pi-gen
+        run: |
+          git clone --depth 1 --branch arm64 https://github.com/RPi-Distro/pi-gen.git /tmp/pi-gen
+
+      - name: Add Thoth image stage
+        run: |
+          rsync -a thoth_rpi/pi-gen/stage-thoth/ /tmp/pi-gen/stage-thoth/
+          chmod +x /tmp/pi-gen/stage-thoth/00-install/00-run.sh
+          chmod +x /tmp/pi-gen/stage-thoth/00-install/01-run-chroot.sh
+
+      - name: Configure pi-gen
+        run: |
+          cat > /tmp/pi-gen/config << EOF
+          IMG_NAME='Thoth-RPi'
+          PI_GEN_RELEASE='Thoth'
+          RELEASE='trixie'
+          TARGET_HOSTNAME='thoth'
+          FIRST_USER_NAME='pi'
+          FIRST_USER_PASS='thoth'
+          DISABLE_FIRST_BOOT_USER_RENAME=1
+          ENABLE_SSH=1
+          PASSWORDLESS_SUDO=1
+          WPA_COUNTRY='US'
+          DEPLOY_COMPRESSION='gz'
+          COMPRESSION_LEVEL=6
+          STAGE_LIST='stage0 stage1 stage2 stage-thoth'
+          REPO_DIR='${{ github.workspace }}'
+          EOF
+
+      - name: Build Thoth Raspberry Pi image
+        working-directory: /tmp/pi-gen
+        run: sudo ./build.sh
+
+      - name: Collect image artifact
+        run: |
+          find /tmp/pi-gen/deploy -maxdepth 1 -type f -print
+          image="$(find /tmp/pi-gen/deploy -maxdepth 1 -type f -name '*Thoth-RPi*.img.gz' | head -n 1)"
+          if [ -z "$image" ]; then
+            echo "No Thoth-RPi .img.gz produced"
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME}"
+          cp "$image" Thoth-RPi.img.gz
+          cp "$image" "Thoth-RPi-${version}.img.gz"
+
+      - name: Upload RPi image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpi-image-release
+          path: |
+            Thoth-RPi.img.gz
+            Thoth-RPi-*.img.gz
+
   # ── Create GitHub Release ──────────────────────────────────────────────
   release:
-    needs: [build-mac-zip, build-win, build-rpi]
+    needs: [build-mac-zip, build-win, build-rpi, build-rpi-image]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -147,6 +216,8 @@ jobs:
             release-assets/macos-zip-release/Thoth-macOS.zip
             release-assets/windows-release/Thoth-Windows.zip
             release-assets/rpi-release/Thoth-RPi.tar.gz
+            release-assets/rpi-image-release/Thoth-RPi.img.gz
+            release-assets/rpi-image-release/Thoth-RPi-*.img.gz
           body: |
             ## Thoth ${{ github.ref_name }}
 
@@ -156,7 +227,8 @@ jobs:
             |----------|------|---------|
             | **macOS** | `Thoth-macOS.zip` | Extract → `cd thoth_mac && ./install.sh` |
             | **Windows** | `Thoth-Windows.zip` | Extract → `cd thoth_win && powershell -ExecutionPolicy Bypass -File install.ps1` |
-            | **Raspberry Pi** | `Thoth-RPi.tar.gz` | Extract → `sudo ./thoth_rpi/setup/install.sh` |
+            | **Raspberry Pi image** | `Thoth-RPi-${{ github.ref_name }}.img.gz` / `Thoth-RPi.img.gz` | Burn with Raspberry Pi Imager. Set username `pi`, hostname `thoth`, WiFi, and SSH in advanced settings. |
+            | **Raspberry Pi bundle** | `Thoth-RPi.tar.gz` | Extract → `sudo ./thoth_rpi/setup/install.sh` |
 
             ### What's New
             See commit history for details.

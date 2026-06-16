@@ -1,3 +1,15 @@
-# RPi-specific dependencies (on top of thoth_core/requirements.txt)
-picamera2
-RPi.GPIO
+# RPi runtime dependencies for the headless dashboard and collector.
+flask
+flask-socketio
+flask-cors
+requests
+python-dotenv
+eventlet
+netifaces
+APScheduler
+psutil
+PyJWT>=2.8.0
+numpy
+matplotlib
+pyserial
+pexpect

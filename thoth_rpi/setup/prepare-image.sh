@@ -26,7 +26,9 @@ echo "║   Thoth RPi — Image Preparation          ║"
 echo "╚══════════════════════════════════════════╝"
 
 # --- 1. Install Thoth ---
-"$SCRIPT_DIR/install.sh"
+if [ "${THOTH_SKIP_INSTALL:-0}" != "1" ]; then
+    "$SCRIPT_DIR/install.sh"
+fi
 
 # --- 2. Create example credentials file (user replaces at burn time) ---
 echo "➤ Creating example credentials template …"
@@ -43,6 +45,28 @@ echo "➤ Cleaning up for imaging …"
 sudo rm -rf "$THOTH_ROOT/logs/"*
 # Remove local auth (user will provide via credentials file)
 rm -rf "$THOTH_ROOT/data/config/auth.json"
+# Make the cloned image run first-boot provisioning on the user's Pi.
+sudo rm -f /etc/thoth-first-boot-done
+sudo systemctl enable thoth-firstboot.service
+# Ensure Raspberry Pi Imager's WiFi customization can be applied on first boot.
+sudo systemctl unmask NetworkManager 2>/dev/null || true
+sudo systemctl enable NetworkManager
+if [ -d /run/systemd/system ]; then
+    sudo systemctl disable --now nodogsplash 2>/dev/null || true
+    sudo systemctl disable --now thoth-hotspot 2>/dev/null || true
+    sudo systemctl disable --now hostapd 2>/dev/null || true
+    sudo systemctl disable --now dnsmasq 2>/dev/null || true
+else
+    sudo systemctl disable nodogsplash 2>/dev/null || true
+    sudo systemctl disable thoth-hotspot 2>/dev/null || true
+    sudo systemctl disable hostapd 2>/dev/null || true
+    sudo systemctl disable dnsmasq 2>/dev/null || true
+fi
+sudo systemctl mask nodogsplash 2>/dev/null || true
+sudo systemctl mask thoth-hotspot 2>/dev/null || true
+sudo systemctl mask hostapd 2>/dev/null || true
+sudo systemctl mask dnsmasq 2>/dev/null || true
+sudo rm -f /etc/NetworkManager/system-connections/* 2>/dev/null || true
 # Clear bash history
 cat /dev/null > ~/.bash_history
 # Remove SSH keys (regenerated on first boot)

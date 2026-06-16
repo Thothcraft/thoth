@@ -19,7 +19,9 @@ real terminal session on the Pi.
 4. Click the **gear icon** (⚙️) and configure:
    - **WiFi SSID** and **password**
    - **SSH** enabled
-   - **Hostname**, locale, timezone
+   - **Hostname**: `thoth`
+   - **Username**: `pi`
+   - Locale and timezone
 5. Flash the SD card and insert into the Raspberry Pi
 
 The GitHub release also ships a ready-to-run Raspberry Pi bundle that
@@ -67,6 +69,11 @@ Flask dashboard available at http://thoth.local:5000
     ▼
 Login creates local SSH user and enables the dashboard Connect page
 ```
+
+If mDNS is blocked by your laptop or router, open `http://<pi-ip>:5000`
+instead. The first boot script enables NetworkManager and Avahi and disables
+the old `hostapd`/`dnsmasq` hotspot path so the Imager WiFi settings control
+the LAN connection.
 
 ## Manual Installation
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=Thoth first boot network and service setup
+After=multi-user.target
+Before=thoth.service thoth-collector.service
+Wants=NetworkManager.service avahi-daemon.service
+ConditionPathExists=!/etc/thoth-first-boot-done
+
+[Service]
+Type=oneshot
+ExecStart=__FIRST_BOOT__
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

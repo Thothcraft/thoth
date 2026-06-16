@@ -25,7 +25,7 @@ sys.path.insert(0, THOTH_ROOT)
 os.environ["THOTH_ROOT"] = THOTH_ROOT
 
 from thoth_core.backend.config import Config
-from thoth_core.backend.app import run_server
+from thoth_core.backend.app import socketio, app
 from thoth_core.backend.auth_manager import AuthManager
 
 # Register RPi-specific sensors
@@ -98,7 +98,14 @@ def load_imager_credentials():
 def main():
     load_imager_credentials()
     logger.info("Starting Thoth RPi server on port %s", Config.PORT)
-    run_server(host="0.0.0.0", port=Config.PORT, debug=False)
+    socketio.run(
+        app,
+        host="0.0.0.0",
+        port=Config.PORT,
+        debug=False,
+        use_reloader=False,
+        allow_unsafe_werkzeug=True,
+    )
 
 
 if __name__ == "__main__":

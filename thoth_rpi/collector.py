@@ -17,7 +17,7 @@ DESKTOP = Path("/home/pi/Desktop")
 DEFAULT_CAPTURE_SCRIPT = Path(os.environ.get("THOTH_CAPTURE_SCRIPT", str(DESKTOP / "capture_dreamhat_minute.py")))
 DEFAULT_PYTHON = os.environ.get("THOTH_CAPTURE_PYTHON", sys.executable)
 
-sys.path.insert(0, str(THOTH_ROOT / "src"))
+sys.path.insert(0, str(THOTH_ROOT / "thoth_core"))
 
 from backend.capture_manager import cleanup_old_minutes  # noqa: E402
 

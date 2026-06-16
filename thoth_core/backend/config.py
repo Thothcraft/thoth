@@ -15,7 +15,7 @@ class Config:
     
     # Application info
     APP_NAME = 'Thoth Device'
-    VERSION = '1.3.2'
+    VERSION = '1.3.3'
     
     # Flask configuration
     SECRET_KEY = os.getenv('FLASK_SECRET_KEY', 'thoth-dev-secret-key')
@@ -38,6 +38,7 @@ class Config:
     # Data collection
     COLLECTION_RATE = float(os.getenv('COLLECTION_RATE', 1.0))  # Hz
     DATA_RETENTION_DAYS = int(os.getenv('DATA_RETENTION_DAYS', 30))
+    CAPTURE_KEEP_MINUTES = int(os.getenv('CAPTURE_KEEP_MINUTES', 100))
     
     # File paths — set dynamically by each platform's entry point
     BASE_DIR = os.environ.get("THOTH_ROOT", str(Path(__file__).parent.parent.parent))
