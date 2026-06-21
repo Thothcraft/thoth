@@ -152,6 +152,21 @@ jobs:
       - name: Add Thoth image stage
         run: |
           rsync -a thoth_rpi/pi-gen/stage-thoth/ /tmp/pi-gen/stage-thoth/
+          mkdir -p /tmp/pi-gen/stage-thoth/files/thoth
+          rsync -a --delete \
+            --exclude='.git' \
+            --exclude='.venv' \
+            --exclude='venv' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='data/*' \
+            --exclude='logs/*' \
+            --exclude='proc' \
+            --exclude='sys' \
+            --exclude='dev' \
+            --exclude='run' \
+            --exclude='tmp' \
+            ./ /tmp/pi-gen/stage-thoth/files/thoth/
           chmod +x /tmp/pi-gen/stage-thoth/prerun.sh
           chmod +x /tmp/pi-gen/stage-thoth/00-install/00-run.sh
           chmod +x /tmp/pi-gen/stage-thoth/00-install/01-run-chroot.sh
@@ -173,7 +188,6 @@ jobs:
           DEPLOY_COMPRESSION='gz'
           COMPRESSION_LEVEL=6
           STAGE_LIST='stage0 stage1 stage2 stage-thoth'
-          REPO_DIR='${{ github.workspace }}'
           EOF
 
       - name: Build Thoth Raspberry Pi image

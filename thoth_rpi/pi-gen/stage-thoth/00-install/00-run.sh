@@ -2,11 +2,7 @@
 
 install -d "${ROOTFS_DIR}/home/pi/Desktop/thoth"
 rsync -a --delete \
-    --exclude='.git' \
-    --exclude='.venv' \
-    --exclude='logs/*' \
-    --exclude='data/*' \
-    "${REPO_DIR}/" \
+    "${STAGE_DIR}/files/thoth/" \
     "${ROOTFS_DIR}/home/pi/Desktop/thoth/"
 
 on_chroot << 'EOF'
