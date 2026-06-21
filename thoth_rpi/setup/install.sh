@@ -75,7 +75,7 @@ sudo sed -i "s|__PYTHON__|$VENV_DIR/bin/python|g" /etc/systemd/system/thoth-coll
 sudo sed -i "s|__COLLECTOR__|$RPI_DIR/collector.py|g" /etc/systemd/system/thoth-collector.service
 sudo sed -i "s|__WORKDIR__|$RPI_DIR|g" /etc/systemd/system/thoth-collector.service
 sudo sed -i "s|__THOTH_ROOT__|$THOTH_ROOT|g" /etc/systemd/system/thoth-collector.service
-sudo sed -i "s|__CAPTURE_SCRIPT__|/home/pi/Desktop/capture_dreamhat_minute.py|g" /etc/systemd/system/thoth-collector.service
+sudo sed -i "s|__CAPTURE_SCRIPT__|$THOTH_ROOT/capture_dreamhat_minute.py|g" /etc/systemd/system/thoth-collector.service
 
 sudo sed -i "s|__FIRST_BOOT__|$SCRIPT_DIR/first-boot.sh|g" /etc/systemd/system/thoth-firstboot.service
 

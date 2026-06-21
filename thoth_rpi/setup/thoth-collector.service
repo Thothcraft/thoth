@@ -1,7 +1,7 @@
 [Unit]
 Description=Thoth Continuous Minute Collector
-After=network-online.target
-Wants=network-online.target
+After=thoth.service NetworkManager-wait-online.service network-online.target
+Wants=NetworkManager-wait-online.service network-online.target
 
 [Service]
 Type=simple

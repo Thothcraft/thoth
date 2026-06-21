@@ -24,9 +24,9 @@ real terminal session on the Pi.
    - Locale and timezone
 5. Flash the SD card and insert into the Raspberry Pi
 
-The GitHub release also ships a ready-to-run Raspberry Pi bundle that
-contains `thoth_core/` and `thoth_rpi/` so the minute-capture dashboard and
-collector service are available immediately after install.
+The GitHub release image includes the full `thoth` folder at
+`/home/pi/Desktop/thoth`. The dashboard and continuous minute collector use
+that folder directly after first boot.
 
 ### Credential File Format
 
@@ -79,7 +79,9 @@ the LAN connection.
 
 ```bash
 git clone https://github.com/Thothcraft/thoth.git
-cd thoth/thoth_rpi
+mkdir -p ~/Desktop
+mv thoth ~/Desktop/thoth
+cd ~/Desktop/thoth/thoth_rpi
 sudo ./setup/install.sh
 ```
 

@@ -52,7 +52,7 @@ class Config:
     # File paths
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     DATA_DIR = os.path.join(BASE_DIR, 'data')
-    CAPTURE_DATA_DIR = os.getenv('CAPTURE_DATA_DIR', '/home/pi/Desktop/data')
+    CAPTURE_DATA_DIR = os.getenv('CAPTURE_DATA_DIR', os.path.join(BASE_DIR, 'data'))
     CAPTURE_KEEP_MINUTES = int(os.getenv('CAPTURE_KEEP_MINUTES', 100))
     CAPTURE_CAMERA_DEVICE = os.getenv('CAPTURE_CAMERA_DEVICE', '/dev/video0')
     CAPTURE_CAMERA_WIDTH = int(os.getenv('CAPTURE_CAMERA_WIDTH', 640))

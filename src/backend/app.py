@@ -20,7 +20,10 @@ import uuid
 import socket
 import psutil
 import platform
-import netifaces
+try:
+    import netifaces
+except Exception:  # pragma: no cover - optional on minimal installs
+    netifaces = None
 import requests
 import tempfile
 from datetime import datetime, timedelta
@@ -45,22 +48,12 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # Add src directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Try to import Sense HAT; do not substitute mock sensor data.
-try:
-    from sense_hat import SenseHat
-    sense = SenseHat()
-    SENSE_HAT_AVAILABLE = True
-    print("Using real Sense HAT")
-except (ImportError, OSError):
-    print("Sense HAT not found")
-    sense = None
-    SENSE_HAT_AVAILABLE = False
-
 from backend.config import Config, BUTTON_ACTIONS, SENSOR_CONFIG
 from backend.models import SensorReading, SystemStatus, ButtonConfig, UploadResult
 from backend.device_manager import DeviceManager
 from backend.auth_manager import AuthManager
 from backend.terminal_manager import SSHTerminalManager
+from backend.sensor_detection import detect_sensor_inventory
 from backend.capture_manager import (
     list_minutes,
     get_minute,
@@ -155,6 +148,7 @@ terminal_manager = SSHTerminalManager(socketio, Config)
 
 # Global state
 collection_active = False
+collection_process: Optional[subprocess.Popen] = None
 wifi_manager = None
 
 # Mock user for local authentication (in production, use a proper user database)
@@ -242,69 +236,6 @@ def get_system_uptime() -> str:
                 return str(timedelta(seconds=uptime_seconds)).split('.')[0]
     except Exception:
         return "unknown"
-
-
-def detect_sensor_inventory() -> List[Dict[str, Any]]:
-    """Detect available sensors and recording sources."""
-    minutes = list_minutes()
-    latest = minutes[0] if minutes else None
-    current_dir = current_minute()
-    current_files = capture_files(current_dir) if current_dir else {}
-
-    def _has_serial_device() -> bool:
-        candidates = []
-        for pattern in ("/dev/ttyACM", "/dev/ttyUSB"):
-            for idx in range(10):
-                path = f"{pattern}{idx}"
-                if os.path.exists(path):
-                    candidates.append(path)
-        serial_dir = Path("/dev/serial/by-id")
-        if serial_dir.exists():
-            for item in serial_dir.iterdir():
-                candidates.append(str(item))
-        return bool(candidates)
-
-    return [
-        {
-            "name": "DreamHat Radar",
-            "key": "dreamhat_radar",
-            "online": bool(current_files.get("radar") and current_files["radar"].exists()) or subprocess.run(
-                ["systemctl", "is-active", "thoth-collector"],
-                capture_output=True,
-                text=True,
-            ).stdout.strip() == "active",
-            "source": "BGT60TR13C",
-            "stream": "/captures/live/radar",
-            "files": "radar binary",
-        },
-        {
-            "name": "USB Camera",
-            "key": "usb_camera",
-            "online": os.path.exists(Config.CAPTURE_CAMERA_DEVICE),
-            "source": Config.CAPTURE_CAMERA_DEVICE,
-            "stream": "/captures/live/video",
-            "files": "mp4 video",
-        },
-        {
-            "name": "ESP32 CSI",
-            "key": "esp32_csi",
-            "online": _has_serial_device() or bool(
-                current_files.get("csi_timestamped")
-                and current_files["csi_timestamped"].exists()
-            ),
-            "source": "USB serial",
-            "stream": "/captures/live/csi",
-            "files": "csv/jsonl",
-        },
-        {
-            "name": "Sense HAT",
-            "key": "sense_hat",
-            "online": SENSE_HAT_AVAILABLE,
-            "source": "GPIO / I2C",
-            "stream": None,
-            "files": "imu json",
-        },
-    ]
 
 
 @lru_cache(maxsize=1)
@@ -739,10 +670,6 @@ def get_capture_overview() -> Dict[str, Any]:
         "latest_minute": latest,
     }
 
-# Global state
-collection_active = False
-wifi_manager = None
-
 def get_system_status(update_remote: bool = True) -> SystemStatus:
     """Get current system status and optionally update the Brain server.
 
@@ -758,16 +685,21 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
         wifi_state = get_active_wifi_state()
         wifi_connected = bool(wifi_state.get('connected'))
 
-        # Check collection status on Linux.
-        collection_status = False
+        # Check collection status.
+        collection_status = collection_active
+        global collection_process
+        if collection_process is not None and collection_process.poll() is not None:
+            collection_process = None
+            collection_status = False
         if not is_windows:
             try:
-                collection_status = subprocess.run(
+                service_collection_status = subprocess.run(
                     ["systemctl", "is-active", "thoth-collector"],
                     capture_output=True, text=True
                 ).stdout.strip() == "active"
+                collection_status = collection_status or service_collection_status
             except Exception:
-                collection_status = False
+                pass
 
         # Get battery level.
         battery_level = None
@@ -883,12 +815,13 @@ def get_device_info() -> Dict[str, Any]:
     try:
         # Get network interfaces and MAC addresses
         interfaces = {}
-        for iface in netifaces.interfaces():
-            addrs = netifaces.ifaddresses(iface)
-            if netifaces.AF_LINK in addrs and addrs[netifaces.AF_LINK]:
-                mac = addrs[netifaces.AF_LINK][0].get('addr')
-                if mac and mac != '00:00:00:00:00:00':
-                    interfaces[iface] = mac
+        if netifaces is not None:
+            for iface in netifaces.interfaces():
+                addrs = netifaces.ifaddresses(iface)
+                if netifaces.AF_LINK in addrs and addrs[netifaces.AF_LINK]:
+                    mac = addrs[netifaces.AF_LINK][0].get('addr')
+                    if mac and mac != '00:00:00:00:00:00':
+                        interfaces[iface] = mac
 
         # Get system information
         system_info = {
@@ -1877,13 +1810,65 @@ def collection_action(action):
     if 'username' not in session:
         return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
 
-    global collection_active
+    global collection_active, collection_process
 
     if action == 'start':
+        if collection_process is not None and collection_process.poll() is None:
+            return jsonify({'status': 'error', 'message': 'Collection already running'}), 409
+
+        payload = request.get_json(silent=True) or {}
+        sensors = payload.get('sensors') or {}
+        label = str(payload.get('label') or '').strip()
+        try:
+            duration = float(payload.get('duration') or 59.5)
+        except Exception:
+            duration = 59.5
+
+        command = [
+            str(THOTH_ROOT / 'capture_dreamhat_minute.sh'),
+            '--start-now',
+            '--duration',
+            f'{duration:.3f}',
+        ]
+        if label:
+            command.extend(['--label', label])
+
+        sensor_flags = {
+            'usb_camera': '--no-camera',
+            'dreamhat_radar': '--no-radar',
+            'esp32_csi': '--no-csi',
+            'sense_hat': '--no-sensehat',
+        }
+        for key, flag in sensor_flags.items():
+            if sensors.get(key) is False:
+                command.append(flag)
+
+        try:
+            collection_process = subprocess.Popen(
+                command,
+                cwd=str(THOTH_ROOT),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            logger.exception('Failed to start minute collection: %s', exc)
+            return jsonify({'status': 'error', 'message': 'Failed to start collection'}), 500
+
         collection_active = True
-        logger.info('Data collection started')
-        return jsonify({'status': 'success', 'message': 'Collection started'})
+        logger.info('Data collection started: %s', ' '.join(command))
+        return jsonify({'status': 'success', 'message': 'Collection started', 'pid': collection_process.pid})
     elif action == 'stop':
+        if collection_process is not None and collection_process.poll() is None:
+            try:
+                collection_process.terminate()
+                collection_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                collection_process.kill()
+                collection_process.wait(timeout=5)
+            except Exception as exc:
+                logger.warning('Failed to stop collection process cleanly: %s', exc)
+        collection_process = None
         collection_active = False
         logger.info('Data collection stopped')
         return jsonify({'status': 'success', 'message': 'Collection stopped'})

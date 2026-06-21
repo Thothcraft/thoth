@@ -22,11 +22,13 @@ import logging
 # ---------------------------------------------------------------------------
 THOTH_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, THOTH_ROOT)
+sys.path.insert(0, os.path.join(THOTH_ROOT, "src"))
 os.environ["THOTH_ROOT"] = THOTH_ROOT
+os.environ.setdefault("FLASK_PORT", "5000")
 
-from thoth_core.backend.config import Config
-from thoth_core.backend.app import socketio, app
-from thoth_core.backend.auth_manager import AuthManager
+from backend.config import Config
+from backend.app import socketio, app
+from backend.auth_manager import AuthManager
 
 # Register RPi-specific sensors
 from thoth_rpi.sensors import camera, csi  # noqa: F401

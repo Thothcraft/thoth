@@ -51,6 +51,7 @@ sudo systemctl enable thoth-firstboot.service
 # Ensure Raspberry Pi Imager's WiFi customization can be applied on first boot.
 sudo systemctl unmask NetworkManager 2>/dev/null || true
 sudo systemctl enable NetworkManager
+sudo systemctl enable NetworkManager-wait-online.service 2>/dev/null || true
 if [ -d /run/systemd/system ]; then
     sudo systemctl disable --now nodogsplash 2>/dev/null || true
     sudo systemctl disable --now thoth-hotspot 2>/dev/null || true

@@ -43,7 +43,7 @@ class Config:
     # File paths — set dynamically by each platform's entry point
     BASE_DIR = os.environ.get("THOTH_ROOT", str(Path(__file__).parent.parent.parent))
     DATA_DIR = os.path.join(BASE_DIR, 'data')
-    CAPTURE_DATA_DIR = os.getenv('CAPTURE_DATA_DIR', '/home/pi/Desktop/data')
+    CAPTURE_DATA_DIR = os.getenv('CAPTURE_DATA_DIR', os.path.join(BASE_DIR, 'data'))
     LOGS_DIR = os.path.join(BASE_DIR, 'logs')
     CONFIG_DIR = os.path.join(DATA_DIR, 'config')
     SENSOR_DATA_FILE = os.path.join(DATA_DIR, 'sensor_data.json')

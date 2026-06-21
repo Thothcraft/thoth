@@ -8,7 +8,7 @@
         <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
                 <h2 class="text-2xl font-semibold text-gray-900">Minute Captures</h2>
-                <p class="text-sm text-gray-600 mt-1">Only timestamp folders from <code>{{ config.get('CAPTURE_DATA_DIR', '~/Desktop/data') }}</code> are shown.</p>
+                <p class="text-sm text-gray-600 mt-1">Timestamp folders from <code>{{ config.get('CAPTURE_DATA_DIR', '~/Desktop/thoth/data') }}</code> are shown, including labeled subfolders.</p>
             </div>
             <div class="flex flex-wrap gap-3">
                 <a href="/captures/live/video" target="_blank" class="btn btn-primary">

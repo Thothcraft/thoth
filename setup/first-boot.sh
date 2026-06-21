@@ -7,7 +7,7 @@
 
 set +e
 
-THOTH_DIR="/home/pi/thoth"
+THOTH_DIR="/home/pi/Desktop/thoth"
 FIRST_BOOT_FLAG="/etc/thoth-first-boot-done"
 LOG_FILE="/var/log/thoth-first-boot.log"
 
@@ -33,12 +33,18 @@ else
 fi
 
 log "Removing legacy hotspot and captive portal state..."
+sudo systemctl unmask NetworkManager 2>/dev/null || true
+sudo systemctl enable NetworkManager 2>/dev/null || true
+sudo systemctl enable NetworkManager-wait-online.service 2>/dev/null || true
+sudo systemctl restart NetworkManager 2>/dev/null || true
 sudo systemctl disable --now nodogsplash 2>/dev/null || true
 sudo systemctl disable --now thoth-hotspot 2>/dev/null || true
 sudo systemctl disable --now hostapd 2>/dev/null || true
 sudo systemctl disable --now dnsmasq 2>/dev/null || true
 sudo systemctl mask hostapd 2>/dev/null || true
 sudo systemctl mask dnsmasq 2>/dev/null || true
+sudo systemctl enable avahi-daemon 2>/dev/null || true
+sudo systemctl restart avahi-daemon 2>/dev/null || true
 rm -f /etc/systemd/system/hostapd.service 2>/dev/null || true
 rm -f /etc/systemd/system/dnsmasq.service 2>/dev/null || true
 rm -f /etc/nodogsplash/nodogsplash.conf 2>/dev/null || true

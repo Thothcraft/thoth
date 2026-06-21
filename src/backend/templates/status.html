@@ -11,7 +11,7 @@
                 <div class="text-xs uppercase tracking-[0.28em] text-slate-400">Thoth device</div>
                 <h1 class="mt-2 text-3xl font-semibold">Continuous synchronized capture</h1>
                 <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-300">
-                    Minute folders from <code class="rounded bg-white/10 px-1.5 py-0.5 text-slate-100">/home/pi/Desktop/data</code> are collected automatically on boot.
+                    Minute folders from <code class="rounded bg-white/10 px-1.5 py-0.5 text-slate-100">{{ capture_overview.capture_dir }}</code> are collected automatically on boot.
                     Radar, camera, CSI, and Sense HAT stay visible as online or offline sources.
                 </p>
             </div>
@@ -66,6 +66,29 @@
             </div>
         </article>
         {% endfor %}
+    </section>
+
+    <section class="rounded-2xl border border-slate-800 bg-slate-900 p-5 text-slate-100 shadow-xl shadow-black/10">
+        <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+                <div class="text-xs uppercase tracking-[0.18em] text-slate-400">Collection</div>
+                <h2 class="mt-1 text-2xl font-semibold text-slate-50">One-minute capture</h2>
+            </div>
+            <div class="flex flex-wrap gap-2">
+                <input id="capture-label" type="text" placeholder="Optional label" class="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500">
+                <button id="start-capture" class="rounded-lg bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-300">Start</button>
+                <button id="stop-capture" class="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-100 hover:bg-slate-800">Stop</button>
+            </div>
+        </div>
+        <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {% for sensor in sensors %}
+            <label class="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-3 text-sm">
+                <span>{{ sensor.name }}</span>
+                <input type="checkbox" class="sensor-toggle h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" data-sensor="{{ sensor.key }}" {% if sensor.online %}checked{% endif %}>
+            </label>
+            {% endfor %}
+        </div>
+        <div id="capture-action-status" class="mt-3 text-sm text-slate-400"></div>
     </section>
 
     <section class="grid gap-6 xl:grid-cols-[1.6fr_1fr]">
@@ -166,4 +189,32 @@
         </aside>
     </section>
 </div>
+<script>
+const statusTarget = document.getElementById('capture-action-status');
+
+function selectedSensors() {
+  const sensors = {};
+  document.querySelectorAll('.sensor-toggle').forEach((input) => {
+    sensors[input.dataset.sensor] = input.checked;
+  });
+  return sensors;
+}
+
+async function postCollection(action) {
+  const payload = action === 'start'
+    ? { label: document.getElementById('capture-label').value, sensors: selectedSensors() }
+    : {};
+  statusTarget.textContent = action === 'start' ? 'Starting capture...' : 'Stopping capture...';
+  const response = await fetch(`/api/collection/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json().catch(() => ({}));
+  statusTarget.textContent = result.message || (response.ok ? 'Done' : 'Request failed');
+}
+
+document.getElementById('start-capture')?.addEventListener('click', () => postCollection('start'));
+document.getElementById('stop-capture')?.addEventListener('click', () => postCollection('stop'));
+</script>
 {% endblock %}

@@ -31,6 +31,7 @@ sudo systemctl unmask NetworkManager 2>/dev/null || true
 sudo systemctl enable NetworkManager
 sudo systemctl enable NetworkManager-wait-online.service 2>/dev/null || true
 sudo systemctl restart NetworkManager || sudo systemctl start NetworkManager
+sudo systemctl restart NetworkManager-wait-online.service 2>/dev/null || true
 
 # thoth.local is provided by Avahi/mDNS.
 sudo hostnamectl set-hostname "$HOSTNAME" || true

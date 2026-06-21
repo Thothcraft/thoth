@@ -29,6 +29,22 @@ def _capture_root() -> Path:
     return root
 
 
+def _label_for_minute_dir(minute_dir: Path) -> Optional[str]:
+    root = _capture_root()
+    try:
+        rel = minute_dir.relative_to(root)
+    except ValueError:
+        return None
+    return rel.parts[0] if len(rel.parts) == 2 else None
+
+
+def _relative_capture_path(minute_dir: Path) -> str:
+    try:
+        return str(minute_dir.relative_to(_capture_root()))
+    except ValueError:
+        return minute_dir.name
+
+
 def _parse_minute(name: str) -> Optional[datetime]:
     try:
         return datetime.strptime(name, TIMESTAMP_FMT)
@@ -321,6 +337,10 @@ def is_minute_folder(path: Path) -> bool:
 def list_minute_folders() -> List[Path]:
     root = _capture_root()
     folders = [item for item in root.iterdir() if is_minute_folder(item)]
+    for label_dir in root.iterdir():
+        if not label_dir.is_dir() or is_minute_folder(label_dir):
+            continue
+        folders.extend(item for item in label_dir.iterdir() if is_minute_folder(item))
     folders.sort(key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
     return folders
 
@@ -335,6 +355,7 @@ def _file_map(minute_dir: Path) -> Dict[str, Path]:
         "predictions": files.get("predictions.json"),
         "video": files.get("usb_camera.mp4"),
         "video_log": files.get("usb_camera.ffmpeg.log"),
+        "sense_hat": files.get("sense_hat.jsonl"),
         "radar": None,
         "csi_csv": csi_csv,
         "csi_timestamped": csi_timestamped,
@@ -354,21 +375,27 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
     stat = minute_dir.stat()
     manifest = _load_manifest(minute_dir)
     seconds_recorded = _manifest_seconds(manifest)
+    folder_label = _label_for_minute_dir(minute_dir)
+    manifest_labels = list(manifest.get("labels") or []) if isinstance(manifest, dict) else []
+    labels = manifest_labels or ([folder_label] if folder_label else [])
 
     return {
         "minute": minute_dir.name,
         "path": str(minute_dir),
+        "relative_path": _relative_capture_path(minute_dir),
+        "label": folder_label,
         "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
         "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
         "capture_started": manifest.get("capture_started") if isinstance(manifest, dict) else None,
         "capture_finished": manifest.get("capture_finished") if isinstance(manifest, dict) else None,
         "seconds_recorded": seconds_recorded,
-        "labels": list(manifest.get("labels") or []) if isinstance(manifest, dict) else [],
+        "labels": labels,
         "predictions": bool(files["predictions"] and files["predictions"].exists()),
         "files": {
             "video": bool(files["video"] and files["video"].exists()),
             "radar": bool(files["radar"] and files["radar"].exists()),
             "csi": bool((files["csi_csv"] and files["csi_csv"].exists()) or (files["csi_timestamped"] and files["csi_timestamped"].exists()) or (files["csi_serial"] and files["csi_serial"].exists())),
+            "sense_hat": bool(files["sense_hat"] and files["sense_hat"].exists()),
             "manifest": bool(files["manifest"] and files["manifest"].exists()),
             "predictions": bool(files["predictions"] and files["predictions"].exists()),
         },
@@ -378,6 +405,7 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
             "csi_csv": files["csi_csv"].stat().st_size if files["csi_csv"] and files["csi_csv"].exists() else 0,
             "csi_timestamped": files["csi_timestamped"].stat().st_size if files["csi_timestamped"] and files["csi_timestamped"].exists() else 0,
             "csi_serial": files["csi_serial"].stat().st_size if files["csi_serial"] and files["csi_serial"].exists() else 0,
+            "sense_hat": files["sense_hat"].stat().st_size if files["sense_hat"] and files["sense_hat"].exists() else 0,
         },
         "manifest": manifest,
         "predictions": files["predictions"].exists() if files["predictions"] else False,
@@ -457,11 +485,22 @@ def list_minutes() -> List[Dict[str, object]]:
 
 
 def get_minute(minute: str) -> Optional[Path]:
+    if "/" in minute:
+        candidate = (_capture_root() / minute).resolve()
+        try:
+            candidate.relative_to(_capture_root().resolve())
+        except ValueError:
+            return None
+        return candidate if is_minute_folder(candidate) else None
+
     if not MINUTE_DIR_RE.match(minute) or _parse_minute(minute) is None:
         return None
     minute_dir = _capture_root() / minute
     if minute_dir.exists() and minute_dir.is_dir():
         return minute_dir
+    matches = [path for path in list_minute_folders() if path.name == minute]
+    if matches:
+        return matches[0]
     return None
 
 
@@ -494,7 +533,7 @@ def _normalize_labels(labels: object) -> List[str]:
 
     cleaned: List[str] = []
     for item in items:
-        value = str(item or "").strip().replace("\n", " ")
+        value = str(item or "").strip().replace("\n", " ").replace("/", "_").replace("\\", "_")
         value = re.sub(r"\s+", " ", value)
         if value and value not in cleaned:
             cleaned.append(value)
@@ -520,6 +559,23 @@ def update_minute_labels(minute_dir: Path, labels: object, replace: bool = True)
                 merged.append(label)
 
     manifest["labels"] = merged
+    target_dir = minute_dir
+    root = _capture_root()
+    if replace:
+        if merged:
+            target_dir = root / merged[0] / minute_dir.name
+        else:
+            target_dir = root / minute_dir.name
+        if target_dir != minute_dir:
+            target_dir.parent.mkdir(parents=True, exist_ok=True)
+            if target_dir.exists():
+                raise FileExistsError(f"Target capture folder already exists: {target_dir}")
+            shutil.move(str(minute_dir), str(target_dir))
+            minute_dir = target_dir
+            manifest_path = minute_dir / "manifest.json"
+
+    manifest["primary_label"] = merged[0] if merged else None
+    manifest["relative_path"] = _relative_capture_path(minute_dir)
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return merged
 

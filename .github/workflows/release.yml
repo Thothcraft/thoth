@@ -233,7 +233,7 @@ jobs:
 
             | Platform | File | Install |
             |----------|------|---------|
-            | **Raspberry Pi image** | `Thoth-RPi-${{ github.ref_name }}.img.gz` / `Thoth-RPi.img.gz` | Burn with Raspberry Pi Imager. Set username `pi`, hostname `thoth`, WiFi, and SSH in advanced settings. |
+            | **Raspberry Pi image** | `Thoth-RPi-${{ github.ref_name }}.img.gz` / `Thoth-RPi.img.gz` | Burn with Raspberry Pi Imager. Set username `pi`, hostname `thoth`, WiFi, and SSH in advanced settings. The image installs Thoth at `/home/pi/Desktop/thoth` and starts the web app at `http://thoth.local:5000`. |
 
             ### What's New
             See commit history for details.

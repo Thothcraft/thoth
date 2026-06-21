@@ -20,7 +20,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .capture_manager import list_minutes, list_minute_folders, capture_files
+from .capture_manager import list_minutes, list_minute_folders, capture_files, minute_summary
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -660,10 +660,11 @@ class DeviceManager:
             # Get list of minute folders and their files
             local_files = []
             for minute_dir in list_minute_folders():
+                summary = minute_summary(minute_dir)
                 files = capture_files(minute_dir)
                 for name, file_path in files.items():
                     if file_path and file_path.exists():
-                        local_files.append((minute_dir.name, file_path))
+                        local_files.append((minute_dir.name, file_path, summary))
 
             if not local_files:
                 logger.info("No data files to sync")
@@ -687,8 +688,10 @@ class DeviceManager:
                 logger.warning(f"Could not fetch cloud files: {e}")
 
             # Upload files not already on cloud
-            for minute_name, file_path in local_files:
-                filename = f"{minute_name}_{file_path.name}"
+            for minute_name, file_path, summary in local_files:
+                relative_path = str(summary.get("relative_path") or minute_name)
+                filename_prefix = relative_path.replace("/", "_")
+                filename = f"{filename_prefix}_{file_path.name}"
                 if filename in cloud_files:
                     skipped += 1
                     continue
@@ -710,7 +713,10 @@ class DeviceManager:
                             "source": "thoth_device",
                             "device_id": self.device_id,
                             "original_size": file_size,
-                            "minute": minute_name
+                            "minute": minute_name,
+                            "relative_path": relative_path,
+                            "label": summary.get("label"),
+                            "labels": summary.get("labels", []),
                         }
                     }
 

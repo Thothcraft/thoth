@@ -11,7 +11,7 @@ Build a custom Pi image that:
 3. Starts `thoth-web` and `thoth-collector` automatically.
 4. Serves the UI at `http://thoth.local:5000`.
 5. Detects supported sensors and starts collecting immediately.
-6. Keeps the newest 100 minute folders in `/home/pi/Desktop/data`.
+6. Keeps the newest 100 minute folders in `/home/pi/Desktop/thoth/data`.
 
 ## What Is Removed
 
