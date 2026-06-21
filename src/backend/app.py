@@ -929,13 +929,8 @@ if not auth_manager.is_authenticated():
 # Routes
 @app.route('/')
 def index():
-    """Serve the appropriate page based on authentication and registration status."""
-    # If already authenticated, go to status
-    if 'username' in session:
-        return redirect(url_for('status'))
-
-    # Show a lightweight local landing page at the root path.
-    return render_template('root.html')
+    """Show the local device dashboard."""
+    return redirect(url_for('status'))
 
 
 @app.route('/connect')
@@ -1114,10 +1109,6 @@ def terminal_disconnect():
 @app.route('/status')
 def status():
     """Display the device status page."""
-    # Check if user is logged in
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('status')))
-
     try:
         # Get system status
         system_status = get_system_status()
@@ -1140,6 +1131,7 @@ def status():
         wifi_state = get_active_wifi_state()
         capture_overview = get_capture_overview()
         sensors = detect_sensor_inventory()
+        recent_minutes = list_minutes()[:6]
 
         return render_template('status.html',
                             system_status=system_status,
@@ -1149,6 +1141,7 @@ def status():
                             wifi_state=wifi_state,
                             username=session.get('username'),
                             capture_overview=capture_overview,
+                            recent_minutes=recent_minutes,
                             sensors=sensors,
                             device_settings=device_manager.get_device_settings())
 
@@ -1248,9 +1241,6 @@ def api_decline_model_deployment(deployment_id: str):
 @app.route('/captures')
 def captures():
     """Show the minute capture browser."""
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('captures')))
-
     minutes = list_minutes()
     active = current_minute()
     return render_template(
@@ -1264,9 +1254,6 @@ def captures():
 @app.route('/captures/<minute>')
 def capture_detail(minute):
     """Show a single minute capture."""
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('capture_detail', minute=minute)))
-
     minute_dir = get_minute(minute)
     if not minute_dir:
         abort(404, description='Minute folder not found')
@@ -1300,9 +1287,6 @@ def capture_detail(minute):
 @app.route('/captures/<minute>/download')
 def download_capture_minute(minute):
     """Download all files for a minute as a zip archive."""
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('captures')))
-
     minute_dir = get_minute(minute)
     if not minute_dir:
         abort(404, description='Minute folder not found')
@@ -1379,9 +1363,6 @@ def api_capture_labels(minute):
 @app.route('/api/captures/<minute>/video/frame')
 def api_capture_video_frame(minute):
     """Render a JPEG preview from a specific minute's video file."""
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('captures')))
-
     minute_dir = get_minute(minute)
     if not minute_dir:
         abort(404, description='Minute folder not found')
@@ -1459,9 +1440,6 @@ def api_capture_csi_plot(minute):
 @app.route('/api/captures/<minute>/csi/data')
 def api_capture_csi_data(minute):
     """Return interactive CSI data for a saved minute."""
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('captures')))
-
     minute_dir = get_minute(minute)
     if not minute_dir:
         abort(404, description='Minute folder not found')
@@ -1507,9 +1485,6 @@ def api_capture_radar_plot(minute, plot):
 @app.route('/api/captures/<minute>/radar/data/<plot>')
 def api_capture_radar_data(minute, plot):
     """Return interactive radar data for a saved minute."""
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('captures')))
-
     minute_dir = get_minute(minute)
     if not minute_dir:
         abort(404, description='Minute folder not found')
@@ -1601,9 +1576,6 @@ def upload_capture_minute(minute):
 @app.route('/captures/live/<kind>')
 def live_capture_stream(kind):
     """Render the live sensor view for the selected modality."""
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('captures')))
-
     kind = kind.lower()
     if kind not in {'video', 'csi', 'radar'}:
         abort(404, description=f'Unsupported live stream kind: {kind}')
@@ -1633,9 +1605,6 @@ def live_capture_stream(kind):
 @app.route('/api/captures/live/video')
 def api_live_capture_video():
     """Serve the current minute video file."""
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('captures')))
-
     minute_dir, files = _best_live_minute_for_kind('video')
     video_path = files.get('video') if files else None
     if not minute_dir or not video_path or not video_path.exists():
@@ -1647,9 +1616,6 @@ def api_live_capture_video():
 @app.route('/api/captures/live/video/frame')
 def api_live_capture_video_frame():
     """Render a live JPEG preview from the current or latest video minute."""
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('captures')))
-
     minute_dir, files = _best_live_minute_for_kind('video')
     video_path = files.get('video') if files else None
     if not minute_dir or not video_path or not video_path.exists():
@@ -1667,25 +1633,18 @@ def api_live_capture_video_frame():
 @app.route('/api/captures/live/csi')
 def api_live_capture_csi():
     """Redirect to the live CSI plot view."""
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('captures')))
     return redirect(url_for('live_capture_stream', kind='csi'))
 
 
 @app.route('/api/captures/live/radar')
 def api_live_capture_radar():
     """Redirect to the live radar plot view."""
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('captures')))
     return redirect(url_for('live_capture_stream', kind='radar'))
 
 
 @app.route('/api/captures/live/csi/data')
 def api_live_capture_csi_data():
     """Return interactive live CSI data."""
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('captures')))
-
     minute_dir, files = _best_live_minute_for_kind('csi')
     if not minute_dir:
         abort(404, description='No live capture minute available')
@@ -1705,9 +1664,6 @@ def api_live_capture_csi_plot():
     if request.method == 'HEAD':
         return Response(status=200)
 
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('captures')))
-
     minute_dir, files = _best_live_minute_for_kind('csi')
     if not minute_dir:
         abort(404, description='No live capture minute available')
@@ -1724,9 +1680,6 @@ def api_live_capture_csi_plot():
 @app.route('/api/captures/live/radar/data/<plot>')
 def api_live_capture_radar_data(plot):
     """Return interactive live radar data."""
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('captures')))
-
     plot = plot.lower()
     if plot not in RADAR_PLOTS:
         abort(404, description=f'Unsupported radar plot kind: {plot}')
@@ -1754,9 +1707,6 @@ def api_live_capture_plot(plot):
     """Render the current minute radar plot as PNG."""
     if request.method == 'HEAD':
         return Response(status=200)
-
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('captures')))
 
     plot = plot.lower()
     if plot not in RADAR_PLOTS:
@@ -1807,9 +1757,6 @@ def wifi_config():
 @app.route('/api/collection/<action>', methods=['POST'])
 def collection_action(action):
     """Start or stop data collection."""
-    if 'username' not in session:
-        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
-
     global collection_active, collection_process
 
     if action == 'start':

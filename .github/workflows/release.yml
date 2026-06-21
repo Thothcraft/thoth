@@ -152,6 +152,7 @@ jobs:
       - name: Add Thoth image stage
         run: |
           rsync -a thoth_rpi/pi-gen/stage-thoth/ /tmp/pi-gen/stage-thoth/
+          chmod +x /tmp/pi-gen/stage-thoth/prerun.sh
           chmod +x /tmp/pi-gen/stage-thoth/00-install/00-run.sh
           chmod +x /tmp/pi-gen/stage-thoth/00-install/01-run-chroot.sh
 
