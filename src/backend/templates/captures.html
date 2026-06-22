@@ -37,11 +37,11 @@
 
             <div class="mt-5 grid gap-3 sm:grid-cols-2">
                 {% for sensor in sensors %}
-                {% set enabled = capture_settings.sensors.get(sensor.key, True) %}
+                {% set enabled = sensor.enabled if sensor.enabled is not none else capture_settings.sensors.get(sensor.key, True) %}
                 <label class="flex min-h-14 items-center justify-between gap-3 border border-gray-300 bg-gray-50 px-3 py-2 text-sm">
                     <span>
                         <span class="block font-semibold text-gray-950">{{ sensor.name }}</span>
-                        <span class="text-xs {{ 'text-green-700' if sensor.online else 'text-gray-600' }}">{{ 'Detected' if sensor.online else 'Not detected' }}</span>
+                        <span class="text-xs {{ 'text-green-700' if sensor.online else 'text-gray-600' }}">{{ 'Connected' if sensor.online else 'Not detected' }}</span>
                     </span>
                     <input type="checkbox" class="ongoing-sensor h-5 w-5" data-sensor="{{ sensor.key }}" {% if enabled %}checked{% endif %}>
                 </label>

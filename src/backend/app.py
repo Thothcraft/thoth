@@ -1246,6 +1246,9 @@ def captures():
     system_status = get_system_status(update_remote=False)
     sensors = detect_sensor_inventory()
     capture_settings = device_manager.load_capture_settings()
+    enabled_map = (capture_settings or {}).get("sensors", {})
+    for sensor in sensors:
+        sensor["enabled"] = bool(enabled_map.get(sensor.get("key"), True))
     return render_template(
         'captures.html',
         minutes=minutes,
