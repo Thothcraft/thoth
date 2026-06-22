@@ -186,6 +186,22 @@ class DeviceManager:
 
     def _build_hardware_info(self) -> Dict[str, Any]:
         import platform
+        sensors: List[Dict[str, Any]] = []
+        try:
+            from .sensor_detection import detect_sensor_inventory
+
+            for sensor in detect_sensor_inventory():
+                key = str(sensor.get('key') or sensor.get('sensor_type') or '')
+                if not key:
+                    continue
+                sensors.append({
+                    **sensor,
+                    'sensor_type': key,
+                    'available': bool(sensor.get('available', sensor.get('online', False))),
+                })
+        except Exception as exc:
+            logger.error(f"Error detecting sensor inventory: {exc}")
+
         hardware_info = {
             'local_ip': self._get_local_ip(),
             'hostname': platform.node(),
@@ -200,6 +216,8 @@ class DeviceManager:
             'deployment_requests_allowed': bool(self.device_settings.get('deployment_requests_allowed', True)),
             'cloud_sync_allowed': bool(self.device_settings.get('cloud_sync_allowed', True)),
             'capture_settings': self.load_capture_settings(),
+            'sensors': sensors,
+            'available_sensors': sensors,
         }
         try:
             if os.path.exists('/proc/device-tree/model'):
