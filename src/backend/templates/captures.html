@@ -10,6 +10,13 @@
                 <h2 class="text-2xl font-semibold text-gray-900">Minute Captures</h2>
                 <p class="text-sm text-gray-600 mt-1">Timestamp folders from <code>{{ config.get('CAPTURE_DATA_DIR', '~/Desktop/thoth/data') }}</code> are shown, including labeled subfolders.</p>
             </div>
+            <div class="flex flex-wrap items-center gap-3">
+                <div class="rounded-lg border border-gray-300 bg-gray-50 px-4 py-2">
+                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">Saved minutes</div>
+                    <div id="capture-count" class="text-2xl font-semibold text-gray-950">{{ minutes|length }}</div>
+                </div>
+                <button id="refresh-captures" class="border border-gray-400 px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50">Refresh list</button>
+            </div>
         </div>
     </div>
 
@@ -126,9 +133,9 @@
                         <th class="py-3 pr-4"></th>
                     </tr>
                 </thead>
-                <tbody class="divide-y divide-gray-100">
+                <tbody id="captures-table-body" class="divide-y divide-gray-100">
                     {% for minute in minutes %}
-                    <tr class="{% if minute.minute == active_minute %}bg-blue-50{% endif %}">
+                    <tr data-minute="{{ minute.minute }}" class="{% if minute.minute == active_minute %}bg-blue-50{% endif %}">
                         <td class="py-3 pr-4 font-mono text-sm text-gray-900">{{ minute.minute }}</td>
                         <td class="py-3 pr-4 text-sm text-gray-700">
                             {% if minute.labels %}
@@ -156,10 +163,21 @@
                             </span>
                         </td>
                         <td class="py-3 pr-4 text-sm text-gray-600">{{ minute.modified }}</td>
-                        <td class="py-3 pr-4 text-right">
-                            <a href="{{ url_for('capture_detail', minute=minute.minute) }}" class="text-blue-600 hover:text-blue-800 text-sm font-medium">
-                                Open
-                            </a>
+                        <td class="py-3 pr-4">
+                            <div class="flex flex-wrap justify-end gap-2">
+                                <a href="{{ url_for('capture_detail', minute=minute.minute) }}" class="inline-flex items-center gap-1 border border-gray-300 px-2.5 py-1.5 text-xs font-semibold text-gray-800 hover:bg-gray-50">
+                                    <i class="fas fa-folder-open"></i> Open
+                                </a>
+                                <a href="{{ url_for('download_capture_minute', minute=minute.minute) }}" class="inline-flex items-center gap-1 border border-gray-300 px-2.5 py-1.5 text-xs font-semibold text-gray-800 hover:bg-gray-50">
+                                    <i class="fas fa-download"></i> ZIP
+                                </a>
+                                <button type="button" class="capture-upload inline-flex items-center gap-1 border border-blue-300 px-2.5 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50" data-minute="{{ minute.minute }}">
+                                    <i class="fas fa-cloud-upload-alt"></i> Upload
+                                </button>
+                                <button type="button" class="capture-delete inline-flex items-center gap-1 border border-red-300 px-2.5 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50" data-minute="{{ minute.minute }}">
+                                    <i class="fas fa-trash"></i> Delete
+                                </button>
+                            </div>
                         </td>
                     </tr>
                     {% endfor %}
@@ -176,6 +194,10 @@
 
 <script>
 const settingsStatus = document.getElementById('settings-status');
+const capturesBody = document.getElementById('captures-table-body');
+const captureCount = document.getElementById('capture-count');
+let activeMinute = {{ active_minute|tojson }};
+let capturesBusy = false;
 
 function selectedOngoingSensors() {
   const sensors = {};
@@ -208,6 +230,83 @@ function fmtRate(value, suffix) {
   return Number.isFinite(Number(value)) && Number(value) > 0 ? `${Number(value).toFixed(1)} ${suffix}` : '--';
 }
 
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[char]));
+}
+
+function fmtTime(value) {
+  if (!value) return '--';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function statusCell(enabled) {
+  return `
+    <span class="inline-flex items-center text-sm ${enabled ? 'text-green-700' : 'text-gray-400'}">
+      <span class="h-2 w-2 rounded-full mr-2 ${enabled ? 'bg-green-500' : 'bg-gray-300'}"></span>
+      ${enabled ? 'Yes' : 'No'}
+    </span>
+  `;
+}
+
+function renderCaptureRow(minute) {
+  const name = escapeHtml(minute.minute);
+  const labels = Array.isArray(minute.labels) && minute.labels.length
+    ? minute.labels.map(escapeHtml).join(', ')
+    : '<span class="text-gray-400">Unlabeled</span>';
+  const urls = minute.urls || {};
+  const openUrl = urls.open || `/captures/${encodeURIComponent(minute.minute)}`;
+  const downloadUrl = urls.download || `/captures/${encodeURIComponent(minute.minute)}/download`;
+  return `
+    <tr data-minute="${name}" class="${minute.minute === activeMinute ? 'bg-blue-50' : ''}">
+      <td class="py-3 pr-4 font-mono text-sm text-gray-900">${name}</td>
+      <td class="py-3 pr-4 text-sm text-gray-700">${labels}</td>
+      <td class="py-3 pr-4">${statusCell(Boolean(minute.files?.video))}</td>
+      <td class="py-3 pr-4">${statusCell(Boolean(minute.files?.radar))}</td>
+      <td class="py-3 pr-4">${statusCell(Boolean(minute.files?.csi))}</td>
+      <td class="py-3 pr-4 text-sm text-gray-600">${escapeHtml(fmtTime(minute.modified))}</td>
+      <td class="py-3 pr-4">
+        <div class="flex flex-wrap justify-end gap-2">
+          <a href="${openUrl}" class="inline-flex items-center gap-1 border border-gray-300 px-2.5 py-1.5 text-xs font-semibold text-gray-800 hover:bg-gray-50"><i class="fas fa-folder-open"></i> Open</a>
+          <a href="${downloadUrl}" class="inline-flex items-center gap-1 border border-gray-300 px-2.5 py-1.5 text-xs font-semibold text-gray-800 hover:bg-gray-50"><i class="fas fa-download"></i> ZIP</a>
+          <button type="button" class="capture-upload inline-flex items-center gap-1 border border-blue-300 px-2.5 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50" data-minute="${name}"><i class="fas fa-cloud-upload-alt"></i> Upload</button>
+          <button type="button" class="capture-delete inline-flex items-center gap-1 border border-red-300 px-2.5 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50" data-minute="${name}"><i class="fas fa-trash"></i> Delete</button>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function renderCaptureRows(minutes) {
+  if (!capturesBody) return;
+  if (!minutes.length) {
+    capturesBody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-sm text-gray-500">No timestamp folders found in the capture directory.</td></tr>';
+    return;
+  }
+  capturesBody.innerHTML = minutes.map(renderCaptureRow).join('');
+}
+
+async function refreshCaptures() {
+  if (capturesBusy) return;
+  capturesBusy = true;
+  try {
+    const response = await fetch('/api/captures', { cache: 'no-store' });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || result.status !== 'success') return;
+    activeMinute = result.active_minute;
+    captureCount.textContent = String(result.count ?? result.minutes?.length ?? 0);
+    renderCaptureRows(result.minutes || []);
+  } finally {
+    capturesBusy = false;
+  }
+}
+
 async function refreshStats() {
   const response = await fetch('/api/captures/stats', { cache: 'no-store' });
   const result = await response.json().catch(() => ({}));
@@ -226,9 +325,71 @@ async function refreshStats() {
   document.getElementById('stat-network').textContent = `${stats.network_rx_mb || 0} MB rx / ${stats.network_tx_mb || 0} MB tx`;
 }
 
+async function uploadCapture(minute, button) {
+  const original = button?.innerHTML;
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading';
+  }
+  try {
+    const response = await fetch(`/api/captures/${encodeURIComponent(minute)}/upload`, { method: 'POST' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      showAlert(data.message || 'Upload failed', 'error');
+      return;
+    }
+    const uploaded = Array.isArray(data.uploaded) ? data.uploaded.length : 0;
+    const errors = Array.isArray(data.errors) ? data.errors.length : 0;
+    showAlert(`Uploaded ${uploaded} files${errors ? ` with ${errors} errors` : ''}`, errors ? 'error' : 'success');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = original;
+    }
+  }
+}
+
+async function deleteCapture(minute, button) {
+  if (!confirm(`Delete capture ${minute}? This removes the minute folder from disk.`)) return;
+  const original = button?.innerHTML;
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Deleting';
+  }
+  try {
+    const response = await fetch(`/api/captures/${encodeURIComponent(minute)}`, { method: 'DELETE' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      showAlert(data.message || 'Delete failed', 'error');
+      return;
+    }
+    showAlert(`Deleted ${minute}`, 'success');
+    await refreshCaptures();
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = original;
+    }
+  }
+}
+
 document.getElementById('save-ongoing-settings')?.addEventListener('click', saveOngoingSettings);
 document.getElementById('refresh-stats')?.addEventListener('click', refreshStats);
+document.getElementById('refresh-captures')?.addEventListener('click', refreshCaptures);
+capturesBody?.addEventListener('click', (event) => {
+  const uploadButton = event.target.closest('.capture-upload');
+  if (uploadButton) {
+    uploadCapture(uploadButton.dataset.minute, uploadButton);
+    return;
+  }
+  const deleteButton = event.target.closest('.capture-delete');
+  if (deleteButton) {
+    deleteCapture(deleteButton.dataset.minute, deleteButton);
+  }
+});
 refreshStats();
+refreshCaptures();
 window.setInterval(refreshStats, 5000);
+window.setInterval(refreshCaptures, 7000);
 </script>
 {% endblock %}

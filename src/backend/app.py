@@ -28,6 +28,7 @@ import requests
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
+from collections import deque
 from functools import lru_cache
 from apscheduler.schedulers.background import BackgroundScheduler
 from typing import Dict, List, Optional, Any, Tuple
@@ -315,17 +316,27 @@ def _parse_csi_payload(raw: str) -> List[float]:
     return values
 
 
-def _parse_csi_average_series(path: Path, limit: int = 5000) -> List[float]:
+def _parse_csi_average_series(path: Path, limit: int = 2400) -> List[float]:
     if not path.exists():
         return []
 
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as handle:
-            lines = [line.strip() for line in handle if line.strip()]
-    except Exception:
-        return []
+            first = ''
+            while True:
+                first = handle.readline()
+                if not first:
+                    return []
+                first = first.strip()
+                if first:
+                    break
 
-    if not lines:
+            recent_lines = deque(maxlen=limit + 1)
+            for line in handle:
+                line = line.strip()
+                if line:
+                    recent_lines.append(line)
+    except Exception:
         return []
 
     def _mean_from_payload(payload: str) -> Optional[float]:
@@ -342,9 +353,8 @@ def _parse_csi_average_series(path: Path, limit: int = 5000) -> List[float]:
         return sum(mags) / len(mags)
 
     series: List[float] = []
-    first = lines[0]
     if first.startswith('{'):
-        for line in lines:
+        for line in [first, *recent_lines]:
             try:
                 row = json.loads(line)
             except Exception:
@@ -367,7 +377,7 @@ def _parse_csi_average_series(path: Path, limit: int = 5000) -> List[float]:
             data_index = len(header) - 1
         if data_index < 0:
             return []
-        for line in lines[1:]:
+        for line in recent_lines:
             cells = _split_csv_line(line)
             if len(cells) <= data_index:
                 continue
@@ -489,7 +499,7 @@ def _render_video_frame(video_path: Path) -> bytes:
     raise RuntimeError(last_error or 'Unable to render video frame')
 
 
-def _csi_plot_payload(path: Path, limit: int = 5000) -> Dict[str, Any]:
+def _csi_plot_payload(path: Path, limit: int = 2400) -> Dict[str, Any]:
     points = _parse_csi_average_series(path, limit=limit)
     frames = _sample_series_frames(points)
     return {
@@ -505,7 +515,7 @@ def _csi_plot_payload(path: Path, limit: int = 5000) -> Dict[str, Any]:
     }
 
 
-def _sample_series_frames(points: List[float], max_frames: int = 240) -> List[Dict[str, Any]]:
+def _sample_series_frames(points: List[float], max_frames: int = 80) -> List[Dict[str, Any]]:
     if not points:
         return []
     if len(points) <= 1:
@@ -557,7 +567,7 @@ def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str
         raise RuntimeError('No radar frames available')
 
     mmw_proc = CubeProcessor(setting, num_azimuth_bin=16, num_elevation_bin=16)
-    max_frames = min(120, total_frames)
+    max_frames = min(60, total_frames)
     sample_indices = {1, total_frames}
     if max_frames > 2:
         for slot in range(1, max_frames - 1):
@@ -1371,9 +1381,21 @@ def download_capture_minute(minute):
 @app.route('/api/captures', methods=['GET'])
 def api_list_captures():
     """Return the capture minute index."""
+    minutes = list_minutes()
+    for minute in minutes:
+        name = str(minute.get('minute') or '')
+        if not name:
+            continue
+        minute['urls'] = {
+            'open': url_for('capture_detail', minute=name),
+            'download': url_for('download_capture_minute', minute=name),
+            'upload': url_for('upload_capture_minute', minute=name),
+            'delete': url_for('delete_capture_minute', minute=name),
+        }
     return jsonify({
         'status': 'success',
-        'minutes': list_minutes(),
+        'minutes': minutes,
+        'count': len(minutes),
         'active_minute': current_minute().name if current_minute() else None,
         'capture_dir': Config.CAPTURE_DATA_DIR,
         'keep_minutes': Config.CAPTURE_KEEP_MINUTES,
@@ -1416,6 +1438,31 @@ def api_capture_labels(minute):
         return jsonify({'status': 'error', 'message': 'Failed to update labels'}), 500
 
     return jsonify({'status': 'success', 'minute': minute, 'labels': updated})
+
+
+@app.route('/api/captures/<minute>', methods=['DELETE'])
+def delete_capture_minute(minute):
+    """Delete a completed capture minute folder."""
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        return jsonify({'status': 'error', 'message': 'Minute folder not found'}), 404
+
+    summary = minute_summary(minute_dir)
+    active = current_minute()
+    if active and active == minute_dir and not summary.get('capture_finished') and get_system_status(update_remote=False).collection_active:
+        return jsonify({
+            'status': 'error',
+            'message': 'This minute still appears to be recording. Wait for it to finish before deleting.',
+        }), 409
+
+    try:
+        relative_path = summary.get('relative_path') or minute_dir.name
+        shutil.rmtree(minute_dir)
+    except Exception as exc:
+        logger.exception("Failed to delete capture %s: %s", minute, exc)
+        return jsonify({'status': 'error', 'message': f'Failed to delete capture: {exc}'}), 500
+
+    return jsonify({'status': 'success', 'minute': minute, 'relative_path': relative_path})
 
 
 @app.route('/api/captures/<minute>/video/frame')
@@ -1569,7 +1616,12 @@ def api_capture_radar_data(minute, plot):
 @app.route('/api/captures/<minute>/upload', methods=['POST'])
 def upload_capture_minute(minute):
     """Upload all files in a capture minute to Brain."""
-    auth_token = getattr(Config, 'USER_AUTH_TOKEN', None)
+    auth_token = (
+        getattr(Config, 'USER_AUTH_TOKEN', None)
+        or getattr(device_manager, 'auth_token', None)
+        or getattr(Config, 'BRAIN_AUTH_TOKEN', None)
+    )
+    auth_token = auth_token.strip() if isinstance(auth_token, str) else auth_token
     if not auth_token:
         return jsonify({'status': 'error', 'message': 'Not authenticated'}), 401
 
@@ -1578,12 +1630,18 @@ def upload_capture_minute(minute):
         return jsonify({'status': 'error', 'message': 'Minute folder not found'}), 404
 
     files = capture_files(minute_dir)
+    summary = minute_summary(minute_dir)
+    device_id = getattr(device_manager, 'device_id', None)
     uploaded = []
     errors = []
+    skipped = []
     import base64
 
     for key, path in files.items():
         if not path or not path.exists():
+            continue
+        if key in {'video_log'} and path.stat().st_size == 0:
+            skipped.append(path.name)
             continue
         try:
             with open(path, 'rb') as handle:
@@ -1607,19 +1665,25 @@ def upload_capture_minute(minute):
                 'filename': f'{minute_dir.name}_{path.name}',
                 'content': content,
                 'is_base64': True,
-                'device_id': getattr(Config, 'DEVICE_ID', None),
+                'device_id': device_id,
                 'content_type': content_type,
+                'metadata': {
+                    'source': 'thoth_device',
+                    'device_id': device_id,
+                    'minute': minute_dir.name,
+                    'relative_path': summary.get('relative_path'),
+                    'file_kind': key,
+                    'size_bytes': path.stat().st_size,
+                },
             }
-            response = requests.post(
-                f"{Config.BRAIN_SERVER_URL}/file/upload",
-                json=payload,
-                headers=headers,
-                timeout=120,
-            )
+            response = requests.post(f"{Config.BRAIN_SERVER_URL}/api/file/upload", json=payload, headers=headers, timeout=120)
+            if response.status_code == 404:
+                response = requests.post(f"{Config.BRAIN_SERVER_URL}/file/upload", json=payload, headers=headers, timeout=120)
             if response.status_code in (200, 201):
-                uploaded.append(path.name)
+                uploaded.append({'name': path.name, 'bytes': path.stat().st_size})
             else:
-                errors.append(f"{path.name}: {response.status_code}")
+                detail = response.text[:300] if response.text else ''
+                errors.append(f"{path.name}: {response.status_code} {detail}".strip())
         except Exception as exc:
             errors.append(f"{path.name}: {exc}")
 
@@ -1627,6 +1691,7 @@ def upload_capture_minute(minute):
         'status': 'success' if not errors else 'partial',
         'minute': minute_dir.name,
         'uploaded': uploaded,
+        'skipped': skipped,
         'errors': errors,
     })
 

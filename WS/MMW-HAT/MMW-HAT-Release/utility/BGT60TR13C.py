@@ -24,13 +24,17 @@ class BGT60TR13C:
         self.__data_collection_stop_event = threading.Event()
         self.__file_fd = None
 
-        self.__spi = spidev.SpiDev()
-        self.__spi.open(spi_bus, spi_dev)
-        self.__spi.max_speed_hz = spi_speed
-        self.__spi.mode = 0
-        self.__rst = DigitalOutputDevice(rst_pin)
-        self.__irq = DigitalInputDevice(irq_pin, pull_up=False, bounce_time=0.001)
-        self.hard_reset()
+        try:
+            self.__spi = spidev.SpiDev()
+            self.__spi.open(spi_bus, spi_dev)
+            self.__spi.max_speed_hz = spi_speed
+            self.__spi.mode = 0
+            self.__rst = DigitalOutputDevice(rst_pin)
+            self.__irq = DigitalInputDevice(irq_pin, pull_up=False, bounce_time=0.001)
+            self.hard_reset()
+        except Exception:
+            self.close()
+            raise
         self.frame_buffer = queue.Queue(maxsize=128) # It is used to hold FMCW frames. Each one in it is a complete frame.
         self.__sub_frame_buffer = [] # It is used to hold incomplete FMCW frames segments, which come from SPI burst read. Once one complete frame is received, it will be cleared. It is in bytes.
 
@@ -191,6 +195,23 @@ class BGT60TR13C:
             self.__spi.close()
             self.__spi = None
         return ret_temp
+
+    def close(self):
+        if self.__data_collection_thread is not None and self.__data_collection_thread.is_alive():
+            self.__data_collection_stop_event.set()
+            self.__data_collection_thread.join()
+        if self.__file_fd is not None:
+            self.__file_fd.close()
+            self.__file_fd = None
+        if self.__irq is not None:
+            self.__irq.close()
+            self.__irq = None
+        if self.__rst is not None:
+            self.__rst.close()
+            self.__rst = None
+        if self.__spi is not None:
+            self.__spi.close()
+            self.__spi = None
 
     def soft_reset(self, reset_type):
         self.__sub_frame_buffer = []

@@ -101,7 +101,7 @@ def detect_dreamhat_radar() -> Dict[str, Any]:
     spi_available = bool(devices)
     chip_online = False
     error = None
-    if driver_available and spi_available:
+    if driver_available and spi_available and not service_active:
         radar = None
         try:
             if str(MMW_RELEASE) not in sys.path:
@@ -118,15 +118,17 @@ def detect_dreamhat_radar() -> Dict[str, Any]:
                     radar.stop()
                 except Exception:
                     pass
+    elif service_active:
+        error = "chip probe skipped while collector service is active"
 
     online = bool(chip_online or service_active or (driver_available and spi_available))
     source = "BGT60TR13C"
     if chip_online:
         source = "BGT60TR13C chip detected"
-    elif spi_available:
-        source = devices[0]
     elif service_active:
         source = "collector service"
+    elif spi_available:
+        source = devices[0]
 
     return {
         "name": "DreamHAT+ Radar",

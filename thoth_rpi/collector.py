@@ -120,8 +120,8 @@ def main() -> int:
     print(f"Thoth collector using {capture_script}")
     print(f"Keeping the latest {args.keep_minutes} minute folders")
 
+    target = next_minute_boundary()
     while True:
-        target = next_minute_boundary()
         print(f"Waiting for {target.isoformat(timespec='seconds')}")
         sleep_until(target)
 
@@ -132,6 +132,9 @@ def main() -> int:
             print(f"Capture exited with code {rc}", file=sys.stderr)
 
         cleanup_old_minutes(args.keep_minutes)
+        target = target + timedelta(minutes=1)
+        if target.timestamp() + 60 < time.time():
+            target = next_minute_boundary()
 
 
 if __name__ == "__main__":

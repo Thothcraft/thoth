@@ -12,6 +12,7 @@ import math
 import subprocess
 import tempfile
 import zipfile
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -131,17 +132,27 @@ def _parse_csi_payload(raw: str) -> List[float]:
     return values
 
 
-def _parse_csi_average_series(path: Path, limit: int = 5000) -> List[float]:
+def _parse_csi_average_series(path: Path, limit: int = 2400) -> List[float]:
     if not path or not path.exists():
         return []
 
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as handle:
-            lines = [line.strip() for line in handle if line.strip()]
-    except Exception:
-        return []
+            first = ""
+            while True:
+                first = handle.readline()
+                if not first:
+                    return []
+                first = first.strip()
+                if first:
+                    break
 
-    if not lines:
+            recent_lines = deque(maxlen=limit + 1)
+            for line in handle:
+                line = line.strip()
+                if line:
+                    recent_lines.append(line)
+    except Exception:
         return []
 
     def _mean_from_payload(payload: str) -> Optional[float]:
@@ -158,9 +169,8 @@ def _parse_csi_average_series(path: Path, limit: int = 5000) -> List[float]:
         return sum(mags) / len(mags)
 
     series: List[float] = []
-    first = lines[0]
     if first.startswith('{'):
-        for line in lines:
+        for line in [first, *recent_lines]:
             try:
                 row = json.loads(line)
             except Exception:
@@ -183,7 +193,7 @@ def _parse_csi_average_series(path: Path, limit: int = 5000) -> List[float]:
             data_index = len(header) - 1
         if data_index < 0:
             return []
-        for line in lines[1:]:
+        for line in recent_lines:
             cells = _split_csv_line(line)
             if len(cells) <= data_index:
                 continue
@@ -281,14 +291,6 @@ def _probe_video_metadata(video_path: Optional[Path]) -> Dict[str, object]:
 def _csi_subcarrier_count(path: Path) -> Optional[int]:
     if not path.exists():
         return None
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            lines = [line.strip() for line in handle if line.strip()]
-    except Exception:
-        return None
-
-    if not lines:
-        return None
 
     def _count_from_raw(raw: str) -> Optional[int]:
         values = _parse_csi_payload(raw)
@@ -296,37 +298,56 @@ def _csi_subcarrier_count(path: Path) -> Optional[int]:
             return None
         return max(1, len(values) // 2)
 
-    first = lines[0]
-    if first.startswith("{"):
-        for line in lines:
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            raw = str(row.get("line") or row.get("raw") or row.get("raw_csi_line") or "").strip()
-            if raw.startswith("CSI_DATA,"):
-                cells = _split_csv_line(raw)
-                if cells:
-                    count = _count_from_raw(cells[-1])
-                    if count:
-                        return count
-    else:
-        header = _split_csv_line(first)
-        data_index = -1
-        for candidate in ("data", "raw_csi_line"):
-            if candidate in header:
-                data_index = header.index(candidate)
-                break
-        if data_index < 0:
-            data_index = len(header) - 1
-        if data_index >= 0:
-            for line in lines[1:]:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            first = ""
+            while True:
+                first = handle.readline()
+                if not first:
+                    return None
+                first = first.strip()
+                if first:
+                    break
+
+            if first.startswith("{"):
+                candidates = [first]
+                candidates.extend(line.strip() for _, line in zip(range(200), handle) if line.strip())
+                for line in candidates:
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    raw = str(row.get("line") or row.get("raw") or row.get("raw_csi_line") or "").strip()
+                    if raw.startswith("CSI_DATA,"):
+                        cells = _split_csv_line(raw)
+                        if cells:
+                            count = _count_from_raw(cells[-1])
+                            if count:
+                                return count
+                return None
+
+            header = _split_csv_line(first)
+            data_index = -1
+            for candidate in ("data", "raw_csi_line"):
+                if candidate in header:
+                    data_index = header.index(candidate)
+                    break
+            if data_index < 0:
+                data_index = len(header) - 1
+            if data_index < 0:
+                return None
+            for _, line in zip(range(200), handle):
+                line = line.strip()
+                if not line:
+                    continue
                 cells = _split_csv_line(line)
                 if len(cells) <= data_index:
                     continue
                 count = _count_from_raw(cells[data_index])
                 if count:
                     return count
+    except Exception:
+        return None
     return None
 
 

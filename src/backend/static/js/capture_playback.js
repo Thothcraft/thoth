@@ -1,6 +1,6 @@
 (function () {
   function plotConfig() {
-    return { responsive: true, displayModeBar: true, displaylogo: false };
+    return { responsive: true, displayModeBar: false, displaylogo: false };
   }
 
   function buildPlaybackLayout(title, xLabel, yLabel, durationMs) {
@@ -12,6 +12,7 @@
       plot_bgcolor: '#ffffff',
       xaxis: { title: { text: xLabel }, gridcolor: '#e2e8f0', zeroline: false },
       yaxis: { title: { text: yLabel }, gridcolor: '#e2e8f0', zeroline: false },
+      hovermode: 'closest',
       updatemenus: [{
         type: 'buttons',
         direction: 'left',
@@ -108,8 +109,17 @@
     }, intervalMs);
     layout.yaxis = { title: { text: yLabel }, gridcolor: '#e2e8f0', zeroline: false };
 
-    await Plotly.newPlot(host, initial, layout, plotConfig());
+    if (host.data) {
+      await Plotly.react(host, initial, layout, plotConfig());
+    } else {
+      await Plotly.newPlot(host, initial, layout, plotConfig());
+    }
     if (frames.length > 1) {
+      try {
+        await Plotly.deleteFrames(host, frames.map((frame) => frame.name));
+      } catch (error) {
+        // Frames may not exist yet on the first render.
+      }
       await Plotly.addFrames(host, frames);
     }
   }
@@ -139,6 +149,7 @@
         y: yValues,
         z,
         colorscale: 'Viridis',
+        zsmooth: false,
         hoverongaps: false,
         hovertemplate: `${yLabel}: %{y}<br>${xLabel}: %{x}<br>Power %{z:.2f}<extra></extra>`,
         colorbar: { title: 'log power' },
@@ -154,6 +165,7 @@
         y: Array.isArray(frame.y) && frame.y.length ? frame.y : yValues,
         z: Array.isArray(frame.z) ? frame.z : [],
         colorscale: 'Viridis',
+        zsmooth: false,
         hoverongaps: false,
         hovertemplate: `${yLabel}: %{y}<br>${xLabel}: %{x}<br>Power %{z:.2f}<extra></extra>`,
         colorbar: { title: 'log power' },
@@ -163,8 +175,17 @@
     const staticLayout = buildPlaybackLayout(title, xLabel, yLabel, intervalMs);
     staticLayout.uirevision = options.uirevision || 'capture-heatmap';
     staticLayout.sliders = buildSliderFrames(frames, (frame, index) => String(index + 1), intervalMs);
-    await Plotly.newPlot(host, frames[0].data, staticLayout, plotConfig());
+    if (host.data) {
+      await Plotly.react(host, frames[0].data, staticLayout, plotConfig());
+    } else {
+      await Plotly.newPlot(host, frames[0].data, staticLayout, plotConfig());
+    }
     if (frames.length > 1) {
+      try {
+        await Plotly.deleteFrames(host, frames.map((frame) => frame.name));
+      } catch (error) {
+        // Frames may not exist yet on the first render.
+      }
       await Plotly.addFrames(host, frames);
     }
   }
