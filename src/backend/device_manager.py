@@ -524,6 +524,11 @@ class DeviceManager:
                         'type': file_path.suffix.lstrip('.') or 'file',
                     })
 
+            files_list.sort(key=lambda item: str(item.get('modified') or ''), reverse=True)
+            limit = int(getattr(self.config, 'CAPTURE_FILE_REPORT_LIMIT', 240) or 240)
+            if limit > 0 and len(files_list) > limit:
+                files_list = files_list[:limit]
+
             logger.info(f"Found {len(files_list)} capture files to report")
 
         except Exception as e:
