@@ -122,7 +122,10 @@ class DeviceManager:
             return None
 
     def _config_dir(self) -> Path:
-        base_dir = getattr(self.config, 'CAPTURE_DATA_DIR', None) or getattr(self.config, 'DATA_DIR', None) or self.config.DATA_DIR
+        config_dir = getattr(self.config, 'CONFIG_DIR', None)
+        if config_dir:
+            return Path(config_dir).expanduser()
+        base_dir = getattr(self.config, 'DATA_DIR', None) or self.config.DATA_DIR
         return Path(base_dir).expanduser() / 'config'
 
     def _settings_path(self) -> Path:
@@ -159,11 +162,16 @@ class DeviceManager:
         settings = self._default_device_settings()
         try:
             path = self._settings_path()
-            if path.exists():
-                with open(path, 'r', encoding='utf-8') as handle:
+            legacy_path = Path(getattr(self.config, 'LEGACY_CONFIG_DIR', Path(self.config.DATA_DIR) / 'config')) / 'device_settings.json'
+            source = path if path.exists() else legacy_path
+            if source.exists():
+                with open(source, 'r', encoding='utf-8') as handle:
                     loaded = json.load(handle)
                 if isinstance(loaded, dict):
                     settings.update({k: self._coerce_setting_value(k, v) for k, v in loaded.items()})
+                if source != path:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(settings, indent=2), encoding='utf-8')
         except Exception as e:
             logger.error(f"Error loading device settings: {e}")
         self.device_settings = settings
@@ -263,8 +271,13 @@ class DeviceManager:
     def load_capture_settings(self) -> Dict[str, Any]:
         try:
             path = self._capture_settings_path()
-            if path.exists():
-                loaded = json.loads(path.read_text(encoding='utf-8'))
+            legacy_path = Path(getattr(self.config, 'LEGACY_CONFIG_DIR', Path(self.config.DATA_DIR) / 'config')) / 'capture_settings.json'
+            source = path if path.exists() else legacy_path
+            if source.exists():
+                loaded = json.loads(source.read_text(encoding='utf-8'))
+                if source != path:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(loaded, indent=2), encoding='utf-8')
                 return self.normalize_capture_settings(loaded)
         except Exception as e:
             logger.error(f"Error loading capture settings: {e}")
@@ -502,7 +515,7 @@ class DeviceManager:
             return False, error_msg
 
     def _get_data_files_list(self) -> List[Dict[str, Any]]:
-        """Get list of capture files in the data directory.
+        """Get one representative record per minute folder for Brain sync.
 
         Returns:
             List of file records compatible with the Brain device registry.
@@ -512,20 +525,23 @@ class DeviceManager:
             for minute_dir in list_minute_folders():
                 summary = minute_summary(minute_dir)
                 relative_path = str(summary.get('relative_path') or minute_dir.name)
-                for _kind, file_path in capture_files(minute_dir).items():
-                    if not file_path or not file_path.exists():
-                        continue
-                    stat = file_path.stat()
-                    files_list.append({
-                        'name': f"{relative_path}/{file_path.name}",
-                        'size': stat.st_size,
-                        'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
-                        'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                        'type': file_path.suffix.lstrip('.') or 'file',
-                    })
+                minute_files = capture_files(minute_dir)
+                file_count = sum(1 for file_path in minute_files.values() if file_path and file_path.exists())
+                sizes = summary.get('sizes') if isinstance(summary, dict) else {}
+                total_size = sum(int(value or 0) for value in (sizes.values() if isinstance(sizes, dict) else []))
+                stat = minute_dir.stat()
+                files_list.append({
+                    'name': relative_path,
+                    'size': total_size,
+                    'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                    'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    'type': 'minute',
+                    'data_type': 'minute',
+                    'minute_files': file_count,
+                })
 
             files_list.sort(key=lambda item: str(item.get('modified') or ''), reverse=True)
-            limit = int(getattr(self.config, 'CAPTURE_FILE_REPORT_LIMIT', 240) or 240)
+            limit = int(getattr(self.config, 'CAPTURE_FILE_REPORT_LIMIT', 120) or 120)
             if limit > 0 and len(files_list) > limit:
                 files_list = files_list[:limit]
 
@@ -556,7 +572,7 @@ class DeviceManager:
     def _save_registration_info(self, device_info: Dict[str, Any], auth_token: str) -> None:
         """Save device registration information to disk."""
         try:
-            config_dir = os.path.join(self.config.DATA_DIR, 'config')
+            config_dir = getattr(self.config, 'CONFIG_DIR', os.path.join(self.config.DATA_DIR, 'config'))
             os.makedirs(config_dir, exist_ok=True)
 
             config_file = os.path.join(config_dir, 'device_config.json')
@@ -579,10 +595,12 @@ class DeviceManager:
     def load_registration_info(self) -> Optional[Dict[str, Any]]:
         """Load device registration information from disk."""
         try:
-            config_file = os.path.join(self.config.DATA_DIR, 'config', 'device_config.json')
+            config_file = os.path.join(getattr(self.config, 'CONFIG_DIR', os.path.join(self.config.DATA_DIR, 'config')), 'device_config.json')
+            legacy_file = os.path.join(getattr(self.config, 'LEGACY_CONFIG_DIR', os.path.join(self.config.DATA_DIR, 'config')), 'device_config.json')
 
-            if os.path.exists(config_file):
-                with open(config_file, 'r') as f:
+            source_file = config_file if os.path.exists(config_file) else legacy_file
+            if os.path.exists(source_file):
+                with open(source_file, 'r') as f:
                     config_data = json.load(f)
 
                     # Update instance state
@@ -593,6 +611,10 @@ class DeviceManager:
                     # Keep only the stable device identity; online state must
                     # come from a fresh login in the current session.
                     config_data.pop('auth_token', None)
+                    if source_file != config_file:
+                        os.makedirs(os.path.dirname(config_file), exist_ok=True)
+                        with open(config_file, 'w') as f:
+                            json.dump(config_data, f, indent=2)
                     return config_data
 
             return None

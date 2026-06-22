@@ -50,6 +50,7 @@ Thumbs.db
 *.swo
 
 # Configuration files with sensitive data
+config/
 thoth_core/backend/button_config.json
 
 # Backup files

@@ -10,8 +10,10 @@
 #   - WiFi configured via Imager (for initial setup only)
 #   - SSH enabled via Imager
 #
-# NOTE: WiFi credentials are provided by Imager at burn time.
-#       Account association uses /boot/firmware/thoth_credentials.json
+# NOTE: WiFi credentials are normally provided by Imager at burn time.
+#       If Imager cannot customize the image, users can place
+#       /boot/firmware/thoth_provisioning.json on the boot partition.
+#       Account association can also use /boot/firmware/thoth_credentials.json
 #       which is downloaded from the Research Portal per device.
 # ============================================================================
 
@@ -38,6 +40,7 @@ cat > /boot/firmware/thoth_credentials.json.example << 'EOF'
     "brain_server_url": "https://web-production-d7d37.up.railway.app"
 }
 EOF
+sudo cp "$SCRIPT_DIR/thoth_provisioning.json.example" /boot/firmware/thoth_provisioning.json.example
 
 # --- 3. Clean up for imaging ---
 echo "➤ Cleaning up for imaging …"
@@ -84,3 +87,9 @@ echo ""
 echo "Users burn the image with Raspberry Pi Imager which provides:"
 echo "  - WiFi credentials (SSID + password)"
 echo "  - /boot/firmware/thoth_credentials.json (downloaded from Research Portal)"
+echo ""
+echo "If their burner cannot customize this custom image, they can instead copy:"
+echo "  - /boot/firmware/thoth_provisioning.json.example"
+echo "to:"
+echo "  - /boot/firmware/thoth_provisioning.json"
+echo "and edit WiFi, SSH, hostname, timezone, and Brain credentials before boot."

@@ -48,9 +48,16 @@ class AuthManager:
         """Load authentication data from disk."""
         try:
             auth_file = os.path.join(self.config.CONFIG_DIR, 'auth.json')
+            legacy_auth_file = os.path.join(getattr(self.config, 'LEGACY_CONFIG_DIR', os.path.join(self.config.DATA_DIR, 'config')), 'auth.json')
             auth_data = None
+            source_file = None
             if os.path.exists(auth_file):
+                source_file = auth_file
                 with open(auth_file, 'r') as f:
+                    auth_data = json.load(f)
+            elif os.path.exists(legacy_auth_file):
+                source_file = legacy_auth_file
+                with open(legacy_auth_file, 'r') as f:
                     auth_data = json.load(f)
             elif getattr(self.config, 'BRAIN_AUTH_TOKEN', None):
                 auth_data = {'token': self.config.BRAIN_AUTH_TOKEN}
@@ -78,6 +85,8 @@ class AuthManager:
             }
             self.config.USER_AUTH_TOKEN = token
             self.config.BRAIN_AUTH_TOKEN = token
+            if source_file != auth_file:
+                self._save_auth_data()
             logger.info("Loaded saved Brain authentication token for headless heartbeat")
 
         except Exception as e:
@@ -88,6 +97,7 @@ class AuthManager:
         try:
             os.makedirs(self.config.CONFIG_DIR, exist_ok=True)
             auth_file = os.path.join(self.config.CONFIG_DIR, 'auth.json')
+            legacy_auth_file = os.path.join(getattr(self.config, 'LEGACY_CONFIG_DIR', os.path.join(self.config.DATA_DIR, 'config')), 'auth.json')
 
             auth_data = {
                 'token': self.token,
@@ -98,6 +108,12 @@ class AuthManager:
 
             with open(auth_file, 'w') as f:
                 json.dump(auth_data, f, indent=2)
+            if legacy_auth_file != auth_file:
+                try:
+                    with open(legacy_auth_file, 'w') as f:
+                        json.dump(auth_data, f, indent=2)
+                except Exception:
+                    pass
 
             logger.debug("Saved authentication data to disk")
 
@@ -276,9 +292,12 @@ class AuthManager:
         # Remove auth file
         try:
             auth_file = os.path.join(self.config.CONFIG_DIR, 'auth.json')
+            legacy_auth_file = os.path.join(getattr(self.config, 'LEGACY_CONFIG_DIR', os.path.join(self.config.DATA_DIR, 'config')), 'auth.json')
             if os.path.exists(auth_file):
                 os.remove(auth_file)
-                logger.info("Cleared authentication data")
+            if legacy_auth_file != auth_file and os.path.exists(legacy_auth_file):
+                os.remove(legacy_auth_file)
+            logger.info("Cleared authentication data")
         except Exception as e:
             logger.error(f"Error clearing auth data: {e}")
 

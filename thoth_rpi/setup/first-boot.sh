@@ -11,6 +11,7 @@ set -euo pipefail
 
 FIRST_BOOT_FLAG="/etc/thoth-first-boot-done"
 HOSTNAME="thoth"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ -f "$FIRST_BOOT_FLAG" ]; then
     exit 0
@@ -33,12 +34,24 @@ sudo systemctl enable NetworkManager-wait-online.service 2>/dev/null || true
 sudo systemctl restart NetworkManager || sudo systemctl start NetworkManager
 sudo systemctl restart NetworkManager-wait-online.service 2>/dev/null || true
 
-# thoth.local is provided by Avahi/mDNS.
-sudo hostnamectl set-hostname "$HOSTNAME" || true
-if grep -q '^127.0.1.1' /etc/hosts 2>/dev/null; then
-    sudo sed -i "s/^127.0.1.1.*/127.0.1.1\t$HOSTNAME/" /etc/hosts
+# Apply optional boot-partition provisioning for image burners that cannot
+# customize custom Raspberry Pi images.
+if [ -x "$SCRIPT_DIR/provision-boot.py" ]; then
+    sudo "$SCRIPT_DIR/provision-boot.py" || true
 else
-    printf '127.0.1.1\t%s\n' "$HOSTNAME" | sudo tee -a /etc/hosts >/dev/null
+    sudo python3 "$SCRIPT_DIR/provision-boot.py" || true
+fi
+
+# thoth.local is provided by Avahi/mDNS unless provisioning supplied a hostname.
+CURRENT_HOSTNAME="$(hostnamectl --static 2>/dev/null || hostname || true)"
+if [ -z "$CURRENT_HOSTNAME" ] || [ "$CURRENT_HOSTNAME" = "raspberrypi" ]; then
+    sudo hostnamectl set-hostname "$HOSTNAME" || true
+    CURRENT_HOSTNAME="$HOSTNAME"
+fi
+if grep -q '^127.0.1.1' /etc/hosts 2>/dev/null; then
+    sudo sed -i "s/^127.0.1.1.*/127.0.1.1\t$CURRENT_HOSTNAME/" /etc/hosts
+else
+    printf '127.0.1.1\t%s\n' "$CURRENT_HOSTNAME" | sudo tee -a /etc/hosts >/dev/null
 fi
 sudo systemctl enable avahi-daemon
 sudo systemctl restart avahi-daemon || sudo systemctl start avahi-daemon
@@ -59,4 +72,4 @@ sudo systemctl restart thoth-collector.service
 sudo touch "$FIRST_BOOT_FLAG"
 sudo rm -f /var/run/thoth-firstboot
 
-echo "First boot complete. Thoth is running at http://thoth.local:5000"
+echo "First boot complete. Thoth is running at http://$CURRENT_HOSTNAME.local:5000"

@@ -22,7 +22,7 @@ sys.path.insert(0, str(THOTH_ROOT / "src"))
 from backend.capture_manager import cleanup_old_minutes  # noqa: E402
 
 
-CAPTURE_SETTINGS_PATH = Path(os.environ.get("THOTH_CAPTURE_SETTINGS", str(THOTH_ROOT / "data" / "config" / "capture_settings.json")))
+CAPTURE_SETTINGS_PATH = Path(os.environ.get("THOTH_CAPTURE_SETTINGS", str(THOTH_ROOT / "config" / "capture_settings.json")))
 DEFAULT_CAPTURE_SETTINGS = {
     "labels": [],
     "sensors": {
