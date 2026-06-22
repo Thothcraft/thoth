@@ -311,23 +311,28 @@ def start_radar_capture(output_prefix: Path) -> Any:
     from utility.BGT60TR13C import BGT60TR13C, RET_VAL_OK
     from utility.helper import calculate_frame_size, find_register_config_in_directory, find_setting_in_directory
 
-    bgt60tr13c = BGT60TR13C(spi_speed=50_000_000, save_to_file=str(output_prefix))
-    if bgt60tr13c.check_chip_id() != RET_VAL_OK:
-        raise RuntimeError("BGT60TR13C chip ID check failed.")
+    bgt60tr13c = None
+    try:
+        bgt60tr13c = BGT60TR13C(spi_speed=50_000_000, save_to_file=str(output_prefix))
+        if bgt60tr13c.check_chip_id() != RET_VAL_OK:
+            raise RuntimeError("BGT60TR13C chip ID check failed.")
 
-    reg_file = find_register_config_in_directory(str(RADAR_CFG))
-    setting_file = find_setting_in_directory(str(RADAR_CFG))
-    bgt60tr13c.load_register_config_file(reg_file)
+        reg_file = find_register_config_in_directory(str(RADAR_CFG))
+        setting_file = find_setting_in_directory(str(RADAR_CFG))
+        bgt60tr13c.load_register_config_file(reg_file)
 
-    with open(setting_file, "r", encoding="utf-8") as fd:
-        setting_data = json.load(fd)
+        with open(setting_file, "r", encoding="utf-8") as fd:
+            setting_data = json.load(fd)
 
-    frame_size = calculate_frame_size(setting_data)
-    bgt60tr13c.set_fifo_parameters(frame_size, 4096, 2048)
-    if bgt60tr13c.start() != RET_VAL_OK:
-        raise RuntimeError("BGT60TR13C failed to start.")
+        frame_size = calculate_frame_size(setting_data)
+        bgt60tr13c.set_fifo_parameters(frame_size, 4096, 2048)
+        if bgt60tr13c.start() != RET_VAL_OK:
+            raise RuntimeError("BGT60TR13C failed to start.")
 
-    return bgt60tr13c
+        return bgt60tr13c
+    except Exception:
+        stop_radar_capture(bgt60tr13c)
+        raise
 
 
 def stop_radar_capture(radar: Any | None) -> None:

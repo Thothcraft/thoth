@@ -129,6 +129,9 @@ class DeviceManager:
     def _model_registry_path(self) -> Path:
         return self._config_dir() / 'deployed_models.json'
 
+    def _capture_settings_path(self) -> Path:
+        return self._config_dir() / 'capture_settings.json'
+
     def _default_device_settings(self) -> Dict[str, Any]:
         return {
             'portal_upload_allowed': True,
@@ -194,6 +197,7 @@ class DeviceManager:
             'portal_upload_allowed': bool(self.device_settings.get('portal_upload_allowed', True)),
             'deployment_requests_allowed': bool(self.device_settings.get('deployment_requests_allowed', True)),
             'cloud_sync_allowed': bool(self.device_settings.get('cloud_sync_allowed', True)),
+            'capture_settings': self.load_capture_settings(),
         }
         try:
             if os.path.exists('/proc/device-tree/model'):
@@ -205,6 +209,66 @@ class DeviceManager:
 
     def get_device_settings(self) -> Dict[str, Any]:
         return self.load_device_settings()
+
+    def default_capture_settings(self) -> Dict[str, Any]:
+        return {
+            'labels': [],
+            'sensors': {
+                'usb_camera': True,
+                'dreamhat_radar': True,
+                'esp32_csi': True,
+                'sense_hat': True,
+            },
+        }
+
+    def normalize_capture_settings(self, settings: Dict[str, Any] | None) -> Dict[str, Any]:
+        source = settings if isinstance(settings, dict) else {}
+        default = self.default_capture_settings()
+        labels_value = source.get('labels')
+        if isinstance(labels_value, str):
+            labels = [item.strip() for item in labels_value.split(',') if item.strip()]
+        elif isinstance(labels_value, list):
+            labels = [str(item).strip() for item in labels_value if str(item).strip()]
+        else:
+            label = str(source.get('label') or '').strip()
+            labels = [label] if label else []
+
+        raw_sensors = source.get('sensors') if isinstance(source.get('sensors'), dict) else {}
+        sensors = dict(default['sensors'])
+        for key in sensors:
+            if key in raw_sensors:
+                sensors[key] = bool(raw_sensors.get(key))
+        return {'labels': labels, 'sensors': sensors}
+
+    def load_capture_settings(self) -> Dict[str, Any]:
+        try:
+            path = self._capture_settings_path()
+            if path.exists():
+                loaded = json.loads(path.read_text(encoding='utf-8'))
+                return self.normalize_capture_settings(loaded)
+        except Exception as e:
+            logger.error(f"Error loading capture settings: {e}")
+        return self.default_capture_settings()
+
+    def save_capture_settings(self, settings: Dict[str, Any] | None) -> Dict[str, Any]:
+        normalized = self.normalize_capture_settings(settings)
+        try:
+            path = self._capture_settings_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(normalized, indent=2), encoding='utf-8')
+        except Exception as e:
+            logger.error(f"Error saving capture settings: {e}")
+        return normalized
+
+    def _apply_response_settings(self, result: Dict[str, Any]) -> None:
+        if not isinstance(result, dict):
+            return
+        settings = result.get('capture_settings')
+        data = result.get('data')
+        if settings is None and isinstance(data, dict):
+            settings = data.get('capture_settings')
+        if isinstance(settings, dict):
+            self.save_capture_settings(settings)
 
     def load_model_registry(self) -> Dict[str, Any]:
         default = {'models': []}
@@ -391,6 +455,7 @@ class DeviceManager:
 
             if response.status_code in (200, 201):
                 result = response.json()
+                self._apply_response_settings(result)
                 self.registered = True
                 self.auth_token = user_token
 
@@ -417,25 +482,29 @@ class DeviceManager:
             return False, error_msg
 
     def _get_data_files_list(self) -> List[Dict[str, Any]]:
-        """Get list of capture minutes in the data directory.
+        """Get list of capture files in the data directory.
 
         Returns:
-            List of minute summaries with available modalities
+            List of file records compatible with the Brain device registry.
         """
         files_list = []
         try:
-            for minute in list_minutes():
-                files_list.append({
-                    'minute': minute['minute'],
-                    'path': minute['path'],
-                    'modified': minute['modified'],
-                    'created': minute['created'],
-                    'files': minute['files'],
-                    'sizes': minute['sizes'],
-                    'type': 'minute-folder',
-                })
+            for minute_dir in list_minute_folders():
+                summary = minute_summary(minute_dir)
+                relative_path = str(summary.get('relative_path') or minute_dir.name)
+                for _kind, file_path in capture_files(minute_dir).items():
+                    if not file_path or not file_path.exists():
+                        continue
+                    stat = file_path.stat()
+                    files_list.append({
+                        'name': f"{relative_path}/{file_path.name}",
+                        'size': stat.st_size,
+                        'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                        'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                        'type': file_path.suffix.lstrip('.') or 'file',
+                    })
 
-            logger.info(f"Found {len(files_list)} minute folders to report")
+            logger.info(f"Found {len(files_list)} capture files to report")
 
         except Exception as e:
             logger.error(f"Error getting data files list: {e}")
@@ -542,6 +611,7 @@ class DeviceManager:
         # Prepare heartbeat data
         data = {
             "device_id": self.device_id,
+            "files": self._get_data_files_list(),
             **status_updates
         }
 
@@ -566,6 +636,7 @@ class DeviceManager:
 
             if response.status_code == 200:
                 result = response.json()
+                self._apply_response_settings(result)
                 logger.debug(f"Status update successful: {result}")
                 return True
             else:

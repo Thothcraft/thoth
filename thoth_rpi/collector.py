@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -19,6 +20,24 @@ DEFAULT_PYTHON = os.environ.get("THOTH_CAPTURE_PYTHON", sys.executable)
 sys.path.insert(0, str(THOTH_ROOT / "src"))
 
 from backend.capture_manager import cleanup_old_minutes  # noqa: E402
+
+
+CAPTURE_SETTINGS_PATH = Path(os.environ.get("THOTH_CAPTURE_SETTINGS", str(THOTH_ROOT / "data" / "config" / "capture_settings.json")))
+DEFAULT_CAPTURE_SETTINGS = {
+    "labels": [],
+    "sensors": {
+        "usb_camera": True,
+        "dreamhat_radar": True,
+        "esp32_csi": True,
+        "sense_hat": True,
+    },
+}
+SENSOR_FLAGS = {
+    "usb_camera": "--no-camera",
+    "dreamhat_radar": "--no-radar",
+    "esp32_csi": "--no-csi",
+    "sense_hat": "--no-sensehat",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,8 +63,32 @@ def sleep_until(target: datetime) -> None:
         time.sleep(min(remaining, 0.25))
 
 
+def load_capture_settings() -> dict:
+    settings = {
+        "labels": [label.strip() for label in os.environ.get("THOTH_MINUTE_LABELS", "").split(",") if label.strip()],
+        "sensors": dict(DEFAULT_CAPTURE_SETTINGS["sensors"]),
+    }
+    try:
+        if CAPTURE_SETTINGS_PATH.exists():
+            loaded = json.loads(CAPTURE_SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                labels = loaded.get("labels")
+                if isinstance(labels, str):
+                    settings["labels"] = [item.strip() for item in labels.split(",") if item.strip()]
+                elif isinstance(labels, list):
+                    settings["labels"] = [str(item).strip() for item in labels if str(item).strip()]
+                sensor_updates = loaded.get("sensors")
+                if isinstance(sensor_updates, dict):
+                    for key in SENSOR_FLAGS:
+                        if key in sensor_updates:
+                            settings["sensors"][key] = bool(sensor_updates[key])
+    except Exception as exc:
+        print(f"Unable to load capture settings from {CAPTURE_SETTINGS_PATH}: {exc}", file=sys.stderr)
+    return settings
+
+
 def run_capture(python: str, capture_script: str) -> int:
-    labels = [label.strip() for label in os.environ.get("THOTH_MINUTE_LABELS", "").split(",") if label.strip()]
+    settings = load_capture_settings()
     cmd = [
         python,
         capture_script,
@@ -53,8 +96,16 @@ def run_capture(python: str, capture_script: str) -> int:
         "--duration",
         "59.5",
     ]
-    for label in labels:
+    for label in settings["labels"]:
         cmd.extend(["--label", label])
+    for sensor, flag in SENSOR_FLAGS.items():
+        if settings["sensors"].get(sensor) is False:
+            cmd.append(flag)
+    print(
+        "Capture settings: labels=%s sensors=%s"
+        % (settings["labels"] or ["unlabeled"], settings["sensors"]),
+        flush=True,
+    )
     proc = subprocess.run(cmd)
     return proc.returncode
 

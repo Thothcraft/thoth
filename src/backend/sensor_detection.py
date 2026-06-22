@@ -44,7 +44,7 @@ def detect_usb_camera() -> Dict[str, Any]:
         "key": "usb_camera",
         "online": online,
         "source": source,
-        "stream": "/captures/live/video",
+        "stream": None,
         "files": "mp4 video",
         "devices": devices,
     }
@@ -78,13 +78,14 @@ def detect_esp32_csi() -> Dict[str, Any]:
         "key": "esp32_csi",
         "online": bool(candidates),
         "source": candidates[0] if candidates else "USB serial",
-        "stream": "/captures/live/csi",
+        "stream": None,
         "files": "csv/jsonl",
         "devices": candidates,
     }
 
 
 def detect_dreamhat_radar() -> Dict[str, Any]:
+    devices = sorted(glob.glob("/dev/spidev*"))
     service_active = False
     try:
         service_active = subprocess.run(
@@ -97,9 +98,11 @@ def detect_dreamhat_radar() -> Dict[str, Any]:
         service_active = False
 
     driver_available = MMW_RELEASE.exists() and RADAR_CONFIG_DIR.exists()
+    spi_available = bool(devices)
     chip_online = False
     error = None
-    if driver_available:
+    if driver_available and spi_available:
+        radar = None
         try:
             if str(MMW_RELEASE) not in sys.path:
                 sys.path.insert(0, str(MMW_RELEASE))
@@ -109,16 +112,34 @@ def detect_dreamhat_radar() -> Dict[str, Any]:
             chip_online = radar.check_chip_id() == RET_VAL_OK
         except Exception as exc:
             error = str(exc)
+        finally:
+            if radar is not None:
+                try:
+                    radar.stop()
+                except Exception:
+                    pass
+
+    online = bool(chip_online or service_active or (driver_available and spi_available))
+    source = "BGT60TR13C"
+    if chip_online:
+        source = "BGT60TR13C chip detected"
+    elif spi_available:
+        source = devices[0]
+    elif service_active:
+        source = "collector service"
 
     return {
         "name": "DreamHAT+ Radar",
         "key": "dreamhat_radar",
-        "online": bool(service_active or chip_online),
-        "source": "BGT60TR13C",
-        "stream": "/captures/live/radar",
+        "online": online,
+        "source": source,
+        "stream": None,
         "files": "radar binary",
+        "devices": devices,
         "driver_available": driver_available,
+        "spi_available": spi_available,
         "service_active": service_active,
+        "chip_online": chip_online,
         "error": error,
     }
 
