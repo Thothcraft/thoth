@@ -27,7 +27,7 @@ os.environ["THOTH_ROOT"] = THOTH_ROOT
 os.environ.setdefault("FLASK_PORT", "5000")
 
 from backend.config import Config
-from backend.app import socketio, app
+from backend.app import socketio, app, device_manager
 from backend.auth_manager import AuthManager
 
 # Register RPi-specific sensors
@@ -99,6 +99,17 @@ def load_imager_credentials():
 
 def main():
     load_imager_credentials()
+
+    # If auto-authenticated via imager credentials, register immediately and start heartbeat
+    token = getattr(Config, 'USER_AUTH_TOKEN', None)
+    if token:
+        success, msg = device_manager.register_device(token)
+        if success:
+            device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
+            logger.info("Device registered and heartbeat started via imager credentials")
+        else:
+            logger.warning("Initial auto-registration failed: %s", msg)
+
     logger.info("Starting Thoth RPi server on port %s", Config.PORT)
     socketio.run(
         app,

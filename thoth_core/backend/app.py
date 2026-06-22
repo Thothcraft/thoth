@@ -923,6 +923,9 @@ def register_device_periodically():
         success, message = device_manager.register_device(auth_token.strip())
         if success:
             logger.info(message)
+            # Ensure heartbeat is running so the brain server sees the device as online
+            if not (device_manager.heartbeat_thread and device_manager.heartbeat_thread.is_alive()):
+                device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
         else:
             logger.warning(message)
         return success
