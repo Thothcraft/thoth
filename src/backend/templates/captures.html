@@ -13,6 +13,105 @@
         </div>
     </div>
 
+    <div class="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+        <div class="card">
+            <div class="flex items-center justify-between gap-3">
+                <div>
+                    <h3 class="text-xl font-semibold text-gray-950">Ongoing stream</h3>
+                    <p class="mt-1 text-sm text-gray-600">These settings apply to the current and upcoming minute captures.</p>
+                </div>
+                <span class="rounded-full px-3 py-1 text-xs font-semibold {{ 'bg-green-100 text-green-800' if system_status.collection_active else 'bg-gray-100 text-gray-700' }}">
+                    {{ 'Collecting' if system_status.collection_active else 'Idle' }}
+                </span>
+            </div>
+
+            <label class="mt-5 block text-sm font-semibold text-gray-900">
+                Label
+                <input
+                    id="ongoing-label"
+                    value="{{ capture_settings.labels|join(', ') if capture_settings.labels else '' }}"
+                    placeholder="comma-separated labels"
+                    class="mt-2 h-11 w-full border border-gray-400 bg-white px-3 text-sm text-gray-950 outline-none focus:border-gray-950"
+                >
+            </label>
+
+            <div class="mt-5 grid gap-3 sm:grid-cols-2">
+                {% for sensor in sensors %}
+                {% set enabled = capture_settings.sensors.get(sensor.key, True) %}
+                <label class="flex min-h-14 items-center justify-between gap-3 border border-gray-300 bg-gray-50 px-3 py-2 text-sm">
+                    <span>
+                        <span class="block font-semibold text-gray-950">{{ sensor.name }}</span>
+                        <span class="text-xs {{ 'text-green-700' if sensor.online else 'text-gray-600' }}">{{ 'Detected' if sensor.online else 'Not detected' }}</span>
+                    </span>
+                    <input type="checkbox" class="ongoing-sensor h-5 w-5" data-sensor="{{ sensor.key }}" {% if enabled %}checked{% endif %}>
+                </label>
+                {% endfor %}
+            </div>
+
+            <div class="mt-5 flex items-center gap-3">
+                <button id="save-ongoing-settings" class="bg-gray-950 px-4 py-2.5 text-sm font-semibold text-white hover:bg-gray-800">
+                    Apply settings
+                </button>
+                <span id="settings-status" class="text-sm text-gray-600"></span>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="flex items-center justify-between gap-3">
+                <div>
+                    <h3 class="text-xl font-semibold text-gray-950">Realtime statistics</h3>
+                    <p class="mt-1 text-sm text-gray-600">Updated while the collector is running.</p>
+                </div>
+                <button id="refresh-stats" class="border border-gray-400 px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50">Refresh</button>
+            </div>
+
+            <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div class="border border-gray-300 bg-gray-50 p-3">
+                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">CPU</div>
+                    <div id="stat-cpu" class="mt-1 text-2xl font-semibold text-gray-950">--</div>
+                </div>
+                <div class="border border-gray-300 bg-gray-50 p-3">
+                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">Memory</div>
+                    <div id="stat-memory" class="mt-1 text-2xl font-semibold text-gray-950">--</div>
+                </div>
+                <div class="border border-gray-300 bg-gray-50 p-3">
+                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">Disk</div>
+                    <div id="stat-disk" class="mt-1 text-2xl font-semibold text-gray-950">--</div>
+                </div>
+                <div class="border border-gray-300 bg-gray-50 p-3">
+                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">Temp</div>
+                    <div id="stat-temp" class="mt-1 text-2xl font-semibold text-gray-950">--</div>
+                </div>
+            </div>
+
+            <div class="mt-4 grid gap-3 md:grid-cols-3">
+                <div class="border border-gray-300 p-3">
+                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">CSI rate</div>
+                    <div id="stat-csi" class="mt-1 text-lg font-semibold text-gray-950">--</div>
+                </div>
+                <div class="border border-gray-300 p-3">
+                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">Radar rate</div>
+                    <div id="stat-radar" class="mt-1 text-lg font-semibold text-gray-950">--</div>
+                </div>
+                <div class="border border-gray-300 p-3">
+                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">Video FPS</div>
+                    <div id="stat-video" class="mt-1 text-lg font-semibold text-gray-950">--</div>
+                </div>
+            </div>
+
+            <div class="mt-4 grid gap-3 md:grid-cols-2">
+                <div class="border border-gray-300 p-3 text-sm text-gray-700">
+                    <span class="font-semibold text-gray-950">Disk I/O</span>
+                    <span id="stat-disk-io" class="ml-2">--</span>
+                </div>
+                <div class="border border-gray-300 p-3 text-sm text-gray-700">
+                    <span class="font-semibold text-gray-950">Network</span>
+                    <span id="stat-network" class="ml-2">--</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="card">
         <div class="overflow-x-auto">
             <table class="min-w-full divide-y divide-gray-200">
@@ -74,4 +173,62 @@
         </div>
     </div>
 </div>
+
+<script>
+const settingsStatus = document.getElementById('settings-status');
+
+function selectedOngoingSensors() {
+  const sensors = {};
+  document.querySelectorAll('.ongoing-sensor').forEach((input) => {
+    sensors[input.dataset.sensor] = input.checked;
+  });
+  return sensors;
+}
+
+async function saveOngoingSettings() {
+  settingsStatus.textContent = 'Saving...';
+  const payload = {
+    labels: document.getElementById('ongoing-label').value.split(',').map((item) => item.trim()).filter(Boolean),
+    sensors: selectedOngoingSensors(),
+  };
+  const response = await fetch('/api/capture-settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json().catch(() => ({}));
+  settingsStatus.textContent = response.ok && result.success ? 'Applied' : (result.message || 'Save failed');
+}
+
+function fmtPercent(value) {
+  return Number.isFinite(Number(value)) ? `${Number(value).toFixed(0)}%` : '--';
+}
+
+function fmtRate(value, suffix) {
+  return Number.isFinite(Number(value)) && Number(value) > 0 ? `${Number(value).toFixed(1)} ${suffix}` : '--';
+}
+
+async function refreshStats() {
+  const response = await fetch('/api/captures/stats', { cache: 'no-store' });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.success) return;
+  const stats = result.stats || {};
+  const metrics = stats.latest_metrics || {};
+
+  document.getElementById('stat-cpu').textContent = fmtPercent(stats.cpu_percent);
+  document.getElementById('stat-memory').textContent = fmtPercent(stats.memory_percent);
+  document.getElementById('stat-disk').textContent = fmtPercent(stats.disk_percent);
+  document.getElementById('stat-temp').textContent = Number.isFinite(Number(stats.temperature_c)) ? `${Number(stats.temperature_c).toFixed(1)} C` : '--';
+  document.getElementById('stat-csi').textContent = fmtRate(metrics.csi?.effective_rate_hz, 'Hz');
+  document.getElementById('stat-radar').textContent = fmtRate(metrics.radar?.effective_fps, 'fps');
+  document.getElementById('stat-video').textContent = fmtRate(metrics.video?.fps, 'fps');
+  document.getElementById('stat-disk-io').textContent = `${stats.disk_read_mb || 0} MB read / ${stats.disk_write_mb || 0} MB written`;
+  document.getElementById('stat-network').textContent = `${stats.network_rx_mb || 0} MB rx / ${stats.network_tx_mb || 0} MB tx`;
+}
+
+document.getElementById('save-ongoing-settings')?.addEventListener('click', saveOngoingSettings);
+document.getElementById('refresh-stats')?.addEventListener('click', refreshStats);
+refreshStats();
+window.setInterval(refreshStats, 5000);
+</script>
 {% endblock %}

@@ -1243,12 +1243,64 @@ def captures():
     """Show the minute capture browser."""
     minutes = list_minutes()
     active = current_minute()
+    system_status = get_system_status(update_remote=False)
+    sensors = detect_sensor_inventory()
+    capture_settings = device_manager.load_capture_settings()
     return render_template(
         'captures.html',
         minutes=minutes,
         active_minute=active.name if active else None,
         username=session.get('username'),
+        system_status=system_status,
+        sensors=sensors,
+        capture_settings=capture_settings,
     )
+
+
+def _capture_runtime_stats() -> Dict[str, Any]:
+    status = get_system_status(update_remote=False)
+    disk_io = psutil.disk_io_counters()
+    net_io = psutil.net_io_counters()
+    memory = psutil.virtual_memory()
+    latest = list_minutes()[:1]
+    latest_summary = latest[0] if latest else None
+    latest_metrics = {}
+    if latest_summary:
+        minute_dir = get_minute(str(latest_summary.get('relative_path') or latest_summary.get('minute')))
+        if minute_dir:
+            latest_metrics = minute_metrics(minute_dir)
+
+    return {
+        'timestamp': datetime.utcnow().isoformat(),
+        'collection_active': status.collection_active,
+        'cpu_percent': psutil.cpu_percent(interval=None),
+        'memory_percent': memory.percent,
+        'temperature_c': status.temperature,
+        'disk_percent': status.disk_usage.get('percent_used') if status.disk_usage else None,
+        'disk_read_mb': round((disk_io.read_bytes if disk_io else 0) / (1024 * 1024), 1),
+        'disk_write_mb': round((disk_io.write_bytes if disk_io else 0) / (1024 * 1024), 1),
+        'network_rx_mb': round((net_io.bytes_recv if net_io else 0) / (1024 * 1024), 1),
+        'network_tx_mb': round((net_io.bytes_sent if net_io else 0) / (1024 * 1024), 1),
+        'latest_minute': latest_summary,
+        'latest_metrics': latest_metrics,
+    }
+
+
+@app.route('/api/capture-settings', methods=['GET', 'PUT'])
+def capture_settings_api():
+    """Get or update settings used by ongoing minute collection."""
+    if request.method == 'GET':
+        return jsonify({'success': True, 'capture_settings': device_manager.load_capture_settings()})
+
+    payload = request.get_json(silent=True) or {}
+    settings = device_manager.save_capture_settings(payload)
+    return jsonify({'success': True, 'capture_settings': settings, 'message': 'Capture settings updated'})
+
+
+@app.route('/api/captures/stats')
+def capture_stats_api():
+    """Return realtime system and latest capture statistics."""
+    return jsonify({'success': True, 'stats': _capture_runtime_stats()})
 
 
 @app.route('/captures/<minute>')

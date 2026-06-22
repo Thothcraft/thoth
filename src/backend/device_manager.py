@@ -42,6 +42,8 @@ class DeviceManager:
         self.stop_event = threading.Event()
         self.heartbeat_thread = None
         self.device_settings = self.load_device_settings()
+        self._last_file_report_at = 0.0
+        self._last_file_report_signature = None
 
         # Device status
         self.status = {
@@ -511,6 +513,23 @@ class DeviceManager:
 
         return files_list
 
+    def _heartbeat_file_payload(self) -> Optional[List[Dict[str, Any]]]:
+        """Return local file registry only when changed or periodically."""
+        now = time.time()
+        try:
+            files = self._get_data_files_list()
+            signature = json.dumps(
+                [(item.get('name'), item.get('size'), item.get('modified')) for item in files],
+                sort_keys=True,
+            )
+            if signature != self._last_file_report_signature or now - self._last_file_report_at >= 60:
+                self._last_file_report_signature = signature
+                self._last_file_report_at = now
+                return files
+        except Exception as e:
+            logger.error(f"Error preparing heartbeat file payload: {e}")
+        return None
+
     def _save_registration_info(self, device_info: Dict[str, Any], auth_token: str) -> None:
         """Save device registration information to disk."""
         try:
@@ -611,9 +630,11 @@ class DeviceManager:
         # Prepare heartbeat data
         data = {
             "device_id": self.device_id,
-            "files": self._get_data_files_list(),
             **status_updates
         }
+        file_payload = self._heartbeat_file_payload()
+        if file_payload is not None:
+            data["files"] = file_payload
 
         # Add timestamp if not provided
         if 'timestamp' not in data:

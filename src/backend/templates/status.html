@@ -20,39 +20,7 @@
     </div>
   </section>
 
-  <section class="grid gap-6 lg:grid-cols-[1.25fr_0.75fr]">
-    <div class="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-      <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h2 class="text-2xl font-semibold text-slate-950">New capture</h2>
-          <p class="mt-1 text-sm text-slate-500">A label stores the minute under <code>data/&lt;label&gt;/</code>.</p>
-        </div>
-        <input id="capture-label" type="text" placeholder="Label, optional" class="h-11 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 text-sm text-slate-950 outline-none transition focus:border-slate-400 sm:w-56">
-      </div>
-
-      <div class="mt-5 grid gap-3 sm:grid-cols-2">
-        {% for sensor in sensors %}
-        <label class="flex min-h-16 items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-          <span>
-            <span class="block text-sm font-medium text-slate-950">{{ sensor.name }}</span>
-            <span class="mt-0.5 block text-xs {{ 'text-emerald-600' if sensor.online else 'text-slate-400' }}">{{ 'Online' if sensor.online else 'Offline' }}</span>
-          </span>
-          <input type="checkbox" class="sensor-toggle h-5 w-5 rounded border-slate-300 text-slate-950" data-sensor="{{ sensor.key }}" {% if sensor.online %}checked{% endif %}>
-        </label>
-        {% endfor %}
-      </div>
-
-      <div class="mt-6 flex flex-col gap-3 sm:flex-row">
-        <button id="start-capture" class="h-12 rounded-2xl bg-slate-950 px-6 text-sm font-semibold text-white transition hover:bg-slate-800">
-          Start one-minute capture
-        </button>
-        <button id="stop-capture" class="h-12 rounded-2xl border border-slate-200 bg-white px-6 text-sm font-semibold text-slate-700 transition hover:bg-slate-50">
-          Stop
-        </button>
-      </div>
-      <div id="capture-action-status" class="mt-4 min-h-6 text-sm text-slate-500"></div>
-    </div>
-
+  <section class="grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
     <aside class="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
       <h2 class="text-2xl font-semibold text-slate-950">Device</h2>
       <div class="mt-5 space-y-4 text-sm">
@@ -65,75 +33,42 @@
         {{ capture_overview.capture_dir }}
       </div>
     </aside>
-  </section>
 
-  <section class="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-    <div class="flex items-center justify-between gap-4">
-      <div>
-        <h2 class="text-2xl font-semibold text-slate-950">Recent data</h2>
-        <p class="mt-1 text-sm text-slate-500">Latest synchronized minute folders.</p>
-      </div>
-      <a href="{{ url_for('captures') }}" class="rounded-2xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">View all</a>
-    </div>
-
-    <div class="mt-5 divide-y divide-slate-100">
-      {% for minute in recent_minutes %}
-      <a href="{{ url_for('capture_detail', minute=minute.minute) }}" class="flex items-center justify-between gap-4 py-4">
+    <div class="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div class="flex items-center justify-between gap-4">
         <div>
-          <div class="font-mono text-sm font-semibold text-slate-950">{{ minute.relative_path or minute.minute }}</div>
-          <div class="mt-1 flex flex-wrap gap-2 text-xs text-slate-500">
-            <span>Video {{ 'on' if minute.files.video else 'off' }}</span>
-            <span>Radar {{ 'on' if minute.files.radar else 'off' }}</span>
-            <span>CSI {{ 'on' if minute.files.csi else 'off' }}</span>
-            <span>Sense HAT {{ 'on' if minute.files.sense_hat else 'off' }}</span>
+          <h2 class="text-2xl font-semibold text-slate-950">Recent data</h2>
+          <p class="mt-1 text-sm text-slate-500">Latest synchronized minute folders.</p>
+        </div>
+        <a href="{{ url_for('captures') }}" class="rounded-2xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">View all</a>
+      </div>
+
+      <div class="mt-5 divide-y divide-slate-100">
+        {% for minute in recent_minutes %}
+        <a href="{{ url_for('capture_detail', minute=minute.minute) }}" class="flex items-center justify-between gap-4 py-4">
+          <div>
+            <div class="font-mono text-sm font-semibold text-slate-950">{{ minute.relative_path or minute.minute }}</div>
+            <div class="mt-1 flex flex-wrap gap-2 text-xs text-slate-500">
+              <span>Video data {{ 'saved' if minute.files.video else 'missing' }}</span>
+              <span>Radar data {{ 'saved' if minute.files.radar else 'missing' }}</span>
+              <span>CSI data {{ 'saved' if minute.files.csi else 'missing' }}</span>
+              <span>Sense HAT data {{ 'saved' if minute.files.sense_hat else 'missing' }}</span>
+            </div>
           </div>
-        </div>
-        <div class="text-right">
-          {% if minute.labels %}
-          <div class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">{{ minute.labels|join(', ') }}</div>
-          {% else %}
-          <div class="text-xs text-slate-400">Unlabeled</div>
-          {% endif %}
-        </div>
-      </a>
-      {% endfor %}
-      {% if not recent_minutes %}
-      <div class="py-8 text-sm text-slate-500">No captures yet.</div>
-      {% endif %}
+          <div class="text-right">
+            {% if minute.labels %}
+            <div class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">{{ minute.labels|join(', ') }}</div>
+            {% else %}
+            <div class="text-xs text-slate-400">Unlabeled</div>
+            {% endif %}
+          </div>
+        </a>
+        {% endfor %}
+        {% if not recent_minutes %}
+        <div class="py-8 text-sm text-slate-500">No captures yet.</div>
+        {% endif %}
+      </div>
     </div>
   </section>
 </div>
-
-<script>
-const statusTarget = document.getElementById('capture-action-status');
-const startButton = document.getElementById('start-capture');
-const stopButton = document.getElementById('stop-capture');
-
-function selectedSensors() {
-  const sensors = {};
-  document.querySelectorAll('.sensor-toggle').forEach((input) => {
-    sensors[input.dataset.sensor] = input.checked;
-  });
-  return sensors;
-}
-
-async function postCollection(action) {
-  const payload = action === 'start'
-    ? { label: document.getElementById('capture-label').value, sensors: selectedSensors() }
-    : {};
-  statusTarget.textContent = action === 'start' ? 'Starting one-minute capture...' : 'Stopping capture...';
-  startButton.disabled = true;
-  const response = await fetch(`/api/collection/${action}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const result = await response.json().catch(() => ({}));
-  statusTarget.textContent = result.message || (response.ok ? 'Done' : 'Request failed');
-  if (!response.ok || action === 'stop') startButton.disabled = false;
-}
-
-startButton?.addEventListener('click', () => postCollection('start'));
-stopButton?.addEventListener('click', () => postCollection('stop'));
-</script>
 {% endblock %}
