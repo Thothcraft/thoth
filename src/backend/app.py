@@ -866,7 +866,7 @@ def register_device_periodically():
             logger.warning("Brain server URL not configured, skipping device registration")
             return False
 
-        auth_token = getattr(Config, 'USER_AUTH_TOKEN', None)
+        auth_token = getattr(Config, 'USER_AUTH_TOKEN', None) or getattr(Config, 'BRAIN_AUTH_TOKEN', None)
         if not auth_token:
             logger.debug("No authenticated user token available, skipping device registration")
             return False
@@ -933,7 +933,7 @@ device_scheduler.start()
 # Load registration info if available
 device_manager.load_registration_info()
 cleanup_old_minutes(Config.CAPTURE_KEEP_MINUTES)
-if not auth_manager.is_authenticated():
+if not auth_manager.is_authenticated() and not getattr(Config, 'BRAIN_AUTH_TOKEN', None):
     try:
         device_manager.mark_device_offline()
     except Exception as e:
@@ -1854,19 +1854,20 @@ def api_live_capture_plot(plot):
 @app.route('/logout')
 def logout():
     """Log out the current user."""
-    # Update device status
-    try:
-        device_manager.mark_device_offline()
-    except Exception as e:
-        logger.error(f"Error updating device status on logout: {e}")
+    persistent_token = getattr(Config, 'BRAIN_AUTH_TOKEN', None)
+    if not persistent_token:
+        try:
+            device_manager.mark_device_offline()
+        except Exception as e:
+            logger.error(f"Error updating device status on logout: {e}")
 
-    # Clear auth state so the device cannot remain online without a fresh login
-    try:
-        auth_manager.logout()
-    except Exception as e:
-        logger.error(f"Error clearing auth state on logout: {e}")
+    if not persistent_token:
+        try:
+            auth_manager.logout()
+        except Exception as e:
+            logger.error(f"Error clearing auth state on logout: {e}")
 
-    Config.USER_AUTH_TOKEN = None
+    Config.USER_AUTH_TOKEN = persistent_token
 
     session.clear()
     flash('You have been logged out.', 'info')

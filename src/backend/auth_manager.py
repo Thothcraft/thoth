@@ -48,16 +48,37 @@ class AuthManager:
         """Load authentication data from disk."""
         try:
             auth_file = os.path.join(self.config.CONFIG_DIR, 'auth.json')
-
+            auth_data = None
             if os.path.exists(auth_file):
-                # Do not restore a previous login automatically.
-                # The device should only be considered online after a fresh
-                # login during the current session.
                 with open(auth_file, 'r') as f:
-                    _ = json.load(f)
+                    auth_data = json.load(f)
+            elif getattr(self.config, 'BRAIN_AUTH_TOKEN', None):
+                auth_data = {'token': self.config.BRAIN_AUTH_TOKEN}
 
+            if not isinstance(auth_data, dict) or not auth_data.get('token'):
+                return
+
+            token = str(auth_data.get('token') or '').strip()
+            token_data = _decode_unverified_jwt(token)
+            expiry = datetime.utcfromtimestamp(token_data['exp']) if token_data.get('exp') else None
+            if expiry and datetime.utcnow() >= expiry:
+                logger.info("Saved authentication token expired")
                 self.logout()
-                logger.info("Ignored persisted authentication data; login is required for online state")
+                return
+
+            self.token = token
+            self.refresh_token = auth_data.get('refresh_token')
+            self.token_expiry = expiry
+            self.user_info = auth_data.get('user_info') or {
+                'username': token_data.get('username') or token_data.get('sub'),
+                'user_id': token_data.get('user_id') or token_data.get('sub'),
+                'email': token_data.get('email'),
+                'role': token_data.get('role'),
+                'scopes': token_data.get('scopes', []),
+            }
+            self.config.USER_AUTH_TOKEN = token
+            self.config.BRAIN_AUTH_TOKEN = token
+            logger.info("Loaded saved Brain authentication token for headless heartbeat")
 
         except Exception as e:
             logger.error(f"Error loading auth data: {e}")
