@@ -763,7 +763,7 @@ class DeviceManager:
                 return 0, 0, []
 
             # Get list of files already on cloud
-            url = f"{self.config.BRAIN_SERVER_URL}/file/files"
+            url = f"{self.config.BRAIN_SERVER_URL}/api/file/files"
             headers = {
                 "Authorization": f"Bearer {self.auth_token}",
                 "Content-Type": "application/json"
@@ -796,7 +796,7 @@ class DeviceManager:
                     file_size = os.path.getsize(file_path)
 
                     # Upload to Brain server
-                    upload_url = f"{self.config.BRAIN_SERVER_URL}/file/upload"
+                    upload_url = f"{self.config.BRAIN_SERVER_URL}/api/file/upload"
                     upload_data = {
                         "filename": filename,
                         "content": content,
