@@ -12,6 +12,8 @@ import logging
 import uuid
 import time
 import threading
+import base64
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Any, Tuple, List
@@ -150,6 +152,9 @@ class DeviceManager:
 
     def _model_registry_path(self) -> Path:
         return self._config_dir() / 'deployed_models.json'
+
+    def _models_root(self) -> Path:
+        return Path(getattr(self.config, 'MODELS_DIR', Path(self.config.BASE_DIR) / 'models')).expanduser()
 
     def _capture_settings_path(self) -> Path:
         return self._config_dir() / 'capture_settings.json'
@@ -350,6 +355,102 @@ class DeviceManager:
             models.append(item)
         return models
 
+    def _safe_model_stem(self, value: str) -> str:
+        stem = re.sub(r'[^A-Za-z0-9_.-]+', '_', value.strip())
+        return stem.strip('._') or 'model'
+
+    def _deployment_data_type(self, deployment: Dict[str, Any]) -> str:
+        config = deployment.get('config') if isinstance(deployment.get('config'), dict) else {}
+        preprocessing = config.get('preprocessing') if isinstance(config.get('preprocessing'), dict) else {}
+        data_type = (
+            deployment.get('data_type')
+            or config.get('data_type')
+            or preprocessing.get('data_type')
+            or 'csi'
+        )
+        data_type = str(data_type or 'csi').lower()
+        aliases = {
+            'wifi_csi': 'csi',
+            'fmcw': 'radar',
+            'mmwave': 'radar',
+            'camera': 'image',
+            'images': 'image',
+            'videos': 'video',
+        }
+        data_type = aliases.get(data_type, data_type)
+        return data_type if data_type in {'csi', 'radar', 'image', 'video'} else 'csi'
+
+    def _deployment_classes(self, deployment: Dict[str, Any]) -> List[str]:
+        config = deployment.get('config') if isinstance(deployment.get('config'), dict) else {}
+        for value in (
+            deployment.get('classes'),
+            deployment.get('class_names'),
+            config.get('classes'),
+            config.get('class_names'),
+        ):
+            if isinstance(value, list):
+                return [str(item) for item in value]
+        return []
+
+    def install_deployment_model(self, deployment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Persist a Brain deployment payload as a local edge model."""
+        model_data = deployment.get('model_data')
+        if not model_data:
+            return None
+
+        deployment_id = str(deployment.get('deployment_id') or uuid.uuid4())
+        model_name = str(deployment.get('model_name') or 'model')
+        data_type = self._deployment_data_type(deployment)
+        model_dir = self._models_root() / data_type
+        model_dir.mkdir(parents=True, exist_ok=True)
+
+        stem = self._safe_model_stem(f"{model_name}_{deployment_id[:8]}")
+        model_path = model_dir / f"{stem}.pth"
+        metadata_path = model_path.with_suffix('.json')
+
+        try:
+            raw = base64.b64decode(str(model_data))
+            model_path.write_bytes(raw)
+            config = deployment.get('config') if isinstance(deployment.get('config'), dict) else {}
+            preprocessing = config.get('preprocessing') if isinstance(config.get('preprocessing'), dict) else {}
+            classes = self._deployment_classes(deployment)
+            metadata = {
+                'model_name': model_name,
+                'deployment_id': deployment_id,
+                'model_type': deployment.get('model_type') or config.get('model_type') or 'unknown',
+                'data_type': data_type,
+                'classes': classes,
+                'class_names': classes,
+                'input_shape': config.get('input_shape') or preprocessing.get('input_shape'),
+                'output_shape': config.get('output_shape') or preprocessing.get('output_shape'),
+                'preprocessing': preprocessing,
+                'deployed_at': config.get('deployed_at') or deployment.get('deployed_at'),
+                'installed_at': datetime.utcnow().isoformat(),
+                'runtime': 'local-thoth-edge',
+            }
+            metadata_path.write_text(json.dumps(metadata, indent=2), encoding='utf-8')
+            return {
+                'model_path': str(model_path),
+                'metadata_path': str(metadata_path),
+                'data_type': data_type,
+                'classes': classes,
+            }
+        except Exception as exc:
+            logger.error('Failed to install deployment %s locally: %s', deployment_id, exc)
+            return None
+
+    def _apply_pending_deployments(self, result: Dict[str, Any]) -> None:
+        pending = result.get('pending_deployments') if isinstance(result, dict) else None
+        if not isinstance(pending, list):
+            return
+        for deployment in pending:
+            if not isinstance(deployment, dict):
+                continue
+            deployment_id = str(deployment.get('deployment_id') or '')
+            if not deployment_id:
+                continue
+            self.acknowledge_deployment(deployment, accepted=True)
+
     def list_pending_deployments(self) -> List[Dict[str, Any]]:
         if not self.registered or not self.auth_token:
             return []
@@ -377,6 +478,11 @@ class DeviceManager:
         if not deployment_id:
             return False
         try:
+            installed = self.install_deployment_model(deployment) if accepted else None
+            if accepted and deployment.get('model_data') and not installed:
+                logger.error("Deployment %s was not acknowledged because local install failed", deployment_id)
+                return False
+
             url = f"{self.config.BRAIN_SERVER_URL}/api/device/{self.device_id}/deployment/{deployment_id}/ack"
             response = self.session.post(url, params={'status': 'delivered' if accepted else 'declined'}, timeout=15)
             if response.status_code not in (200, 201):
@@ -388,6 +494,10 @@ class DeviceManager:
                 'deployment_id': deployment_id,
                 'model_name': deployment.get('model_name') or 'Unknown model',
                 'model_type': deployment.get('model_type') or 'unknown',
+                'data_type': (installed or {}).get('data_type') or self._deployment_data_type(deployment),
+                'model_path': (installed or {}).get('model_path'),
+                'metadata_path': (installed or {}).get('metadata_path'),
+                'classes': (installed or {}).get('classes') or self._deployment_classes(deployment),
                 'device_id': self.device_id,
                 'device_name': deployment.get('device_name') or self.device_id,
                 'status': 'running' if accepted else 'declined',
@@ -508,6 +618,7 @@ class DeviceManager:
                 self._apply_response_settings(result)
                 self.registered = True
                 self.auth_token = user_token
+                self._apply_pending_deployments(result)
 
                 if 'device_name' in result:
                     data['device_name'] = result['device_name']

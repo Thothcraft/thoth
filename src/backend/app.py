@@ -1513,6 +1513,7 @@ def api_capture_file(minute, kind):
         'csi_timestamped': files.get('csi_timestamped'),
         'csi_serial': files.get('csi_serial'),
         'manifest': files.get('manifest'),
+        'predictions': files.get('predictions'),
         'log': files.get('video_log'),
     }
     file_path = mapping.get(kind)

@@ -40,6 +40,7 @@ def _read_json(path: Path) -> Dict[str, Any]:
 
 
 def _metadata_candidates(model_path: Path) -> Iterable[Path]:
+    yield model_path.with_suffix("")
     yield model_path.with_suffix(".json")
     yield model_path.with_suffix(".metadata.json")
     yield model_path.parent / f"{model_path.name}.json"
@@ -314,6 +315,7 @@ def predict_minute(minute_dir: Path, labels: Optional[List[str]] = None) -> Dict
                 output = model_obj(tensor)
             classes = metadata.get("classes") if isinstance(metadata.get("classes"), list) else []
             entry.update(_prediction_from_output(output, classes))
+            entry["classes"] = [str(item) for item in classes]
             entry["status"] = "ok"
         except Exception as exc:
             entry.update({
