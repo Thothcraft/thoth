@@ -7,14 +7,16 @@ Trains three tasks end-to-end:
 2. Radar reconstruction: Radar -> embedding -> reconstructed radar
 3. CSI reconstruction: CSI -> embedding -> reconstructed CSI
 
-Models produced (3 total):
-1. radar_model.pth - Radar autoencoder (encoder + decoder)
-2. csi_model.pth - CSI autoencoder (encoder + decoder)
-3. multimodal_model.pth - Multi-modal classifier (radar + CSI encoders + classifier)
+Models produced (3 total with metadata):
+1. radar_spatial_vision_encoder.pth + radar_spatial_vision_encoder.json
+2. csi_temporal_signal_encoder.pth + csi_temporal_signal_encoder.json
+3. multimodal_fusion_classifier.pth + multimodal_fusion_classifier.json
 
-Plots produced:
-1. training_history.png - Radar reconstruction, CSI reconstruction, Classification confusion matrix
-2. training_history_multimodal.png - Multimodal classification performance
+Each metadata file includes:
+- Data type the model works on
+- Input/output shapes
+- What predictions the model produces
+- Label indices for interpreting model outputs (for classifier)
 
 Usage:
     python train.py --train-dataset <dataset_dir> --epochs 50 --batch-size 8
@@ -27,13 +29,10 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import confusion_matrix
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
@@ -841,81 +840,6 @@ def validate(model, dataloader, criterion_class, criterion_recon,
 
 
 # =============================================================================
-# Plotting Functions
-# =============================================================================
-def plot_training_history(train_radar_recon_losses, val_radar_recon_losses,
-                          train_csi_recon_losses, val_csi_recon_losses,
-                          all_predictions, all_labels, class_names, output_dir):
-    """Plot radar reconstruction, CSI reconstruction, and classification confusion matrix."""
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    
-    epochs = range(1, len(train_radar_recon_losses) + 1)
-    
-    # Radar reconstruction loss
-    axes[0].plot(epochs, train_radar_recon_losses, 'b-', label='Train', linewidth=2)
-    axes[0].plot(epochs, val_radar_recon_losses, 'r-', label='Validation', linewidth=2)
-    axes[0].set_xlabel('Epoch', fontsize=12)
-    axes[0].set_ylabel('MSE Loss', fontsize=12)
-    axes[0].set_title('Radar Reconstruction', fontsize=14, fontweight='bold')
-    axes[0].legend(fontsize=10)
-    axes[0].grid(True, alpha=0.3)
-    
-    # CSI reconstruction loss
-    axes[1].plot(epochs, train_csi_recon_losses, 'b-', label='Train', linewidth=2)
-    axes[1].plot(epochs, val_csi_recon_losses, 'r-', label='Validation', linewidth=2)
-    axes[1].set_xlabel('Epoch', fontsize=12)
-    axes[1].set_ylabel('MSE Loss', fontsize=12)
-    axes[1].set_title('CSI Reconstruction', fontsize=14, fontweight='bold')
-    axes[1].legend(fontsize=10)
-    axes[1].grid(True, alpha=0.3)
-    
-    # Confusion matrix
-    cm = confusion_matrix(all_labels, all_predictions)
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[2], 
-                xticklabels=class_names, yticklabels=class_names)
-    axes[2].set_xlabel('Predicted', fontsize=12)
-    axes[2].set_ylabel('True', fontsize=12)
-    axes[2].set_title('Classification Confusion Matrix', fontsize=14, fontweight='bold')
-    
-    plt.tight_layout()
-    plot_path = output_dir / 'training_history.png'
-    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-    print(f"Training history plot saved to: {plot_path}")
-    plt.close()
-
-
-def plot_multimodal_performance(train_class_losses, val_class_losses, train_accs, val_accs, output_dir):
-    """Plot multimodal classification performance."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    
-    epochs = range(1, len(train_class_losses) + 1)
-    
-    # Classification loss
-    axes[0].plot(epochs, train_class_losses, 'b-', label='Train', linewidth=2)
-    axes[0].plot(epochs, val_class_losses, 'r-', label='Validation', linewidth=2)
-    axes[0].set_xlabel('Epoch', fontsize=12)
-    axes[0].set_ylabel('Cross-Entropy Loss', fontsize=12)
-    axes[0].set_title('Multimodal Classification Loss', fontsize=14, fontweight='bold')
-    axes[0].legend(fontsize=10)
-    axes[0].grid(True, alpha=0.3)
-    
-    # Accuracy
-    axes[1].plot(epochs, train_accs, 'b-', label='Train', linewidth=2)
-    axes[1].plot(epochs, val_accs, 'r-', label='Validation', linewidth=2)
-    axes[1].set_xlabel('Epoch', fontsize=12)
-    axes[1].set_ylabel('Accuracy (%)', fontsize=12)
-    axes[1].set_title('Multimodal Classification Accuracy', fontsize=14, fontweight='bold')
-    axes[1].legend(fontsize=10)
-    axes[1].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plot_path = output_dir / 'training_history_multimodal.png'
-    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-    print(f"Multimodal performance plot saved to: {plot_path}")
-    plt.close()
-
-
-# =============================================================================
 # Main
 # =============================================================================
 def main():
@@ -1050,33 +974,82 @@ def main():
         csi_autoencoder.encoder.load_state_dict(model.csi_encoder.state_dict())
         csi_autoencoder.decoder.load_state_dict(model.csi_decoder.state_dict())
     
-    # Save 3 models
-    torch.save(radar_autoencoder.state_dict(), output_dir / 'radar_model.pth')
-    torch.save(csi_autoencoder.state_dict(), output_dir / 'csi_model.pth')
-    torch.save(model.state_dict(), output_dir / 'multimodal_model.pth')
+    # Save models with fancy names and metadata
+    model_configs = {
+        'radar_spatial_vision_encoder': {
+            'model': radar_autoencoder,
+            'data_type': 'radar_video',
+            'input_shape': [args.num_radar_frames, 3, 64, 64],
+            'output_shape': [args.num_radar_frames, 3, 64, 64],
+            'predictions': 'reconstructed_radar_video_frames',
+            'channels': ['range_doppler', 'range_azimuth', 'range_elevation'],
+            'description': '3D CNN encoder-decoder for radar video reconstruction and feature extraction'
+        },
+        'csi_temporal_signal_encoder': {
+            'model': csi_autoencoder,
+            'data_type': 'csi_temporal',
+            'input_shape': [args.window_len, 52],
+            'output_shape': [args.window_len, 52],
+            'predictions': 'reconstructed_csi_subcarrier_amplitude',
+            'subcarriers': '52 LLTF subcarriers from 64 total',
+            'description': '1D CNN encoder-decoder for CSI temporal signal reconstruction and feature extraction'
+        },
+        'multimodal_fusion_classifier': {
+            'model': model,
+            'data_type': 'multimodal',
+            'input_shapes': {
+                'radar': [args.num_radar_frames, 3, 64, 64],
+                'csi': [args.window_len, 52]
+            },
+            'output_shape': [num_classes],
+            'predictions': 'activity_class_labels',
+            'label_map': train_dataset.label_map,
+            'label_index': {i: name for i, name in enumerate(class_names)},
+            'description': 'Fusion classifier combining radar and CSI encoders for activity recognition'
+        }
+    }
     
-    # Save label map
-    with open(output_dir / 'label_map.json', 'w') as f:
-        json.dump(train_dataset.label_map, f, indent=2)
-    
-    # Create plots
-    plot_training_history(
-        train_radar_recon_losses, val_radar_recon_losses,
-        train_csi_recon_losses, val_csi_recon_losses,
-        val_preds, val_labels, class_names, output_dir
-    )
-    
-    plot_multimodal_performance(
-        train_class_losses, val_class_losses, train_accs, val_accs, output_dir
-    )
+    for model_name, config in model_configs.items():
+        # Save model
+        model_path = output_dir / f'{model_name}.pth'
+        torch.save(config['model'].state_dict(), model_path)
+        
+        # Create metadata
+        metadata = {
+            'model_name': model_name,
+            'data_type': config['data_type'],
+            'description': config['description'],
+            'input': config.get('input_shape') or config.get('input_shapes'),
+            'output': config['output_shape'],
+            'predictions': config['predictions'],
+            'architecture': {
+                'radar_encoder_dim': 128,
+                'csi_encoder_dim': 128,
+                'latent_dim': 128
+            }
+        }
+        
+        # Add type-specific metadata
+        if 'channels' in config:
+            metadata['channels'] = config['channels']
+        if 'subcarriers' in config:
+            metadata['subcarriers'] = config['subcarriers']
+        if 'label_map' in config:
+            metadata['label_map'] = config['label_map']
+            metadata['label_index'] = config['label_index']
+        
+        # Save metadata
+        metadata_path = output_dir / f'{model_name}.json'
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        print(f"  - {model_name}.pth (model)")
+        print(f"  - {model_name}.json (metadata)")
     
     print(f"\n{'='*60}")
     print(f"Training complete!")
     print(f"Final validation accuracy: {val_accs[-1]:.2f}%")
-    print(f"Models saved to: {output_dir}")
-    print(f"  - radar_model.pth (radar autoencoder)")
-    print(f"  - csi_model.pth (CSI autoencoder)")
-    print(f"  - multimodal_model.pth (multi-modal classifier)")
+    print(f"Models and metadata saved to: {output_dir}")
     print(f"{'='*60}")
 
 

@@ -1,0 +1,28 @@
+{
+  "model_name": "radar_spatial_vision_encoder",
+  "data_type": "radar_video",
+  "description": "3D CNN encoder-decoder for radar video reconstruction and feature extraction",
+  "input": [
+    100,
+    3,
+    64,
+    64
+  ],
+  "output": [
+    100,
+    3,
+    64,
+    64
+  ],
+  "predictions": "reconstructed_radar_video_frames",
+  "architecture": {
+    "radar_encoder_dim": 128,
+    "csi_encoder_dim": 128,
+    "latent_dim": 128
+  },
+  "channels": [
+    "range_doppler",
+    "range_azimuth",
+    "range_elevation"
+  ]
+}
