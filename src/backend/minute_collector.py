@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .model_inference import predict_minute
 
 THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / "WS" / "MMW-HAT" / "MMW-HAT-Release"
@@ -519,13 +520,11 @@ def main() -> int:
         manifest["host"] = os.uname().nodename
         manifest["status"] = "success" if not manifest["errors"] else "partial" if manifest["warnings"] else "error"
 
-        manifest_file = output_dir / "manifest.json"
-        with open(manifest_file, "w", encoding="utf-8") as fd:
-            json.dump(manifest, fd, indent=2)
-
-        predictions_file = output_dir / "predictions.json"
-        if not predictions_file.exists():
-            with open(predictions_file, "w", encoding="utf-8") as fd:
+        try:
+            predict_minute(output_dir, labels=preset_labels)
+        except Exception as exc:
+            manifest["warnings"].append(f"Model prediction failed for this minute: {exc}")
+            with open(output_dir / "predictions.json", "w", encoding="utf-8") as fd:
                 json.dump(
                     {
                         "minute": folder_name,
@@ -534,10 +533,17 @@ def main() -> int:
                         "deployed_models": [],
                         "timeline": [],
                         "labels": preset_labels,
+                        "status": "error",
+                        "error": str(exc),
                     },
                     fd,
                     indent=2,
                 )
+
+        manifest["status"] = "success" if not manifest["errors"] else "partial" if manifest["warnings"] else "error"
+        manifest_file = output_dir / "manifest.json"
+        with open(manifest_file, "w", encoding="utf-8") as fd:
+            json.dump(manifest, fd, indent=2)
 
         chown_to_invoking_user(output_dir)
 
