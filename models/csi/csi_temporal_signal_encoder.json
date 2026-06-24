@@ -1,0 +1,20 @@
+{
+  "model_name": "csi_temporal_signal_encoder",
+  "data_type": "csi_temporal",
+  "description": "1D CNN encoder-decoder for CSI temporal signal reconstruction and feature extraction",
+  "input": [
+    100,
+    52
+  ],
+  "output": [
+    100,
+    52
+  ],
+  "predictions": "reconstructed_csi_subcarrier_amplitude",
+  "architecture": {
+    "radar_encoder_dim": 128,
+    "csi_encoder_dim": 128,
+    "latent_dim": 128
+  },
+  "subcarriers": "52 LLTF subcarriers from 64 total"
+}
