@@ -76,7 +76,16 @@ class DeviceManager:
 
     def _get_device_id(self) -> str:
         """Get or generate a persistent device ID."""
-        device_id_file = os.path.join(self.config.DATA_DIR, 'device_id.txt')
+        device_id_file = getattr(
+            self.config,
+            'DEVICE_ID_FILE',
+            os.path.join(getattr(self.config, 'CONFIG_DIR', self.config.DATA_DIR), 'device_id.txt')
+        )
+        legacy_device_id_file = getattr(
+            self.config,
+            'LEGACY_DEVICE_ID_FILE',
+            os.path.join(self.config.DATA_DIR, 'device_id.txt')
+        )
 
         try:
             # Try to read existing device ID
@@ -85,6 +94,14 @@ class DeviceManager:
                     device_id = f.read().strip()
                     if device_id:
                         return device_id
+            if os.path.exists(legacy_device_id_file):
+                with open(legacy_device_id_file, 'r') as f:
+                    device_id = f.read().strip()
+                if device_id:
+                    os.makedirs(os.path.dirname(device_id_file), exist_ok=True)
+                    with open(device_id_file, 'w') as f:
+                        f.write(device_id)
+                    return device_id
 
             # Generate new device ID if not found
             device_id = str(uuid.uuid4())

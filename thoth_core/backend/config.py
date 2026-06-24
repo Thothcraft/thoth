@@ -38,14 +38,17 @@ class Config:
     # Data collection
     COLLECTION_RATE = float(os.getenv('COLLECTION_RATE', 1.0))  # Hz
     DATA_RETENTION_DAYS = int(os.getenv('DATA_RETENTION_DAYS', 30))
-    CAPTURE_KEEP_MINUTES = int(os.getenv('CAPTURE_KEEP_MINUTES', 100))
+    CAPTURE_KEEP_MINUTES = int(os.getenv('CAPTURE_KEEP_MINUTES', 1000))
     
     # File paths — set dynamically by each platform's entry point
     BASE_DIR = os.environ.get("THOTH_ROOT", str(Path(__file__).parent.parent.parent))
     DATA_DIR = os.path.join(BASE_DIR, 'data')
     CAPTURE_DATA_DIR = os.getenv('CAPTURE_DATA_DIR', os.path.join(BASE_DIR, 'data'))
     LOGS_DIR = os.path.join(BASE_DIR, 'logs')
-    CONFIG_DIR = os.path.join(DATA_DIR, 'config')
+    LEGACY_CONFIG_DIR = os.path.join(DATA_DIR, 'config')
+    LEGACY_DEVICE_ID_FILE = os.path.join(DATA_DIR, 'device_id.txt')
+    CONFIG_DIR = os.getenv('THOTH_CONFIG_DIR', os.path.join(BASE_DIR, 'config'))
+    DEVICE_ID_FILE = os.path.join(CONFIG_DIR, 'device_id.txt')
     SENSOR_DATA_FILE = os.path.join(DATA_DIR, 'sensor_data.json')
     
     # Logging

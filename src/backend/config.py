@@ -54,13 +54,15 @@ class Config:
     DATA_DIR = os.path.join(BASE_DIR, 'data')
     CAPTURE_DATA_DIR = os.getenv('CAPTURE_DATA_DIR', os.path.join(BASE_DIR, 'data'))
     LEGACY_CONFIG_DIR = os.path.join(DATA_DIR, 'config')
-    CAPTURE_KEEP_MINUTES = int(os.getenv('CAPTURE_KEEP_MINUTES', 100))
+    LEGACY_DEVICE_ID_FILE = os.path.join(DATA_DIR, 'device_id.txt')
+    CAPTURE_KEEP_MINUTES = int(os.getenv('CAPTURE_KEEP_MINUTES', 1000))
     CAPTURE_CAMERA_DEVICE = os.getenv('CAPTURE_CAMERA_DEVICE', '/dev/video0')
     CAPTURE_CAMERA_WIDTH = int(os.getenv('CAPTURE_CAMERA_WIDTH', 640))
     CAPTURE_CAMERA_HEIGHT = int(os.getenv('CAPTURE_CAMERA_HEIGHT', 480))
     CAPTURE_CAMERA_FPS = int(os.getenv('CAPTURE_CAMERA_FPS', 30))
     LOGS_DIR = os.path.join(BASE_DIR, 'logs')
     CONFIG_DIR = os.getenv('THOTH_CONFIG_DIR', os.path.join(BASE_DIR, 'config'))
+    DEVICE_ID_FILE = os.path.join(CONFIG_DIR, 'device_id.txt')
     SENSOR_DATA_FILE = os.path.join(DATA_DIR, 'sensor_data.json')
 
     # Logging
