@@ -1228,6 +1228,18 @@ def api_pending_model_deployments():
     return jsonify({'success': True, 'deployments': device_manager.list_pending_deployments()})
 
 
+@app.route('/api/models/prediction-timelines', methods=['GET'])
+def api_model_prediction_timelines():
+    if 'username' not in session:
+        return jsonify({'success': False, 'message': 'Authentication required'}), 401
+    timelines = collect_prediction_timelines()
+    return jsonify({
+        'success': True,
+        'timelines': timelines,
+        'model_count': len(timelines),
+    })
+
+
 @app.route('/api/models/deployments/<deployment_id>/accept', methods=['POST'])
 def api_accept_model_deployment(deployment_id: str):
     if 'username' not in session:
