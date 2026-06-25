@@ -380,16 +380,24 @@ class DeviceManager:
         data_type = aliases.get(data_type, data_type)
         return data_type if data_type in {'csi', 'radar', 'image', 'video'} else 'csi'
 
-    def _deployment_classes(self, deployment: Dict[str, Any]) -> List[str]:
+    def _deployment_labels(self, deployment: Dict[str, Any]) -> List[str]:
         config = deployment.get('config') if isinstance(deployment.get('config'), dict) else {}
         for value in (
+            deployment.get('labels'),
+            config.get('labels'),
             deployment.get('classes'),
             deployment.get('class_names'),
             config.get('classes'),
             config.get('class_names'),
         ):
+            if isinstance(value, str):
+                labels = [item.strip() for item in value.split(',') if item.strip()]
+                if labels:
+                    return labels
             if isinstance(value, list):
-                return [str(item) for item in value]
+                labels = [str(item).strip() for item in value if str(item).strip()]
+                if labels:
+                    return labels
         return []
 
     def install_deployment_model(self, deployment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -413,14 +421,17 @@ class DeviceManager:
             model_path.write_bytes(raw)
             config = deployment.get('config') if isinstance(deployment.get('config'), dict) else {}
             preprocessing = config.get('preprocessing') if isinstance(config.get('preprocessing'), dict) else {}
-            classes = self._deployment_classes(deployment)
+            labels = self._deployment_labels(deployment)
+            if not labels:
+                raise ValueError("Deployment metadata must include a non-empty labels list")
             metadata = {
                 'model_name': model_name,
                 'deployment_id': deployment_id,
                 'model_type': deployment.get('model_type') or config.get('model_type') or 'unknown',
                 'data_type': data_type,
-                'classes': classes,
-                'class_names': classes,
+                'labels': labels,
+                'classes': labels,
+                'class_names': labels,
                 'input_shape': config.get('input_shape') or preprocessing.get('input_shape'),
                 'output_shape': config.get('output_shape') or preprocessing.get('output_shape'),
                 'preprocessing': preprocessing,
@@ -433,7 +444,8 @@ class DeviceManager:
                 'model_path': str(model_path),
                 'metadata_path': str(metadata_path),
                 'data_type': data_type,
-                'classes': classes,
+                'labels': labels,
+                'classes': labels,
             }
         except Exception as exc:
             logger.error('Failed to install deployment %s locally: %s', deployment_id, exc)
@@ -497,7 +509,8 @@ class DeviceManager:
                 'data_type': (installed or {}).get('data_type') or self._deployment_data_type(deployment),
                 'model_path': (installed or {}).get('model_path'),
                 'metadata_path': (installed or {}).get('metadata_path'),
-                'classes': (installed or {}).get('classes') or self._deployment_classes(deployment),
+                'labels': (installed or {}).get('labels') or self._deployment_labels(deployment),
+                'classes': (installed or {}).get('labels') or self._deployment_labels(deployment),
                 'device_id': self.device_id,
                 'device_name': deployment.get('device_name') or self.device_id,
                 'status': 'running' if accepted else 'declined',
