@@ -57,14 +57,34 @@ def _load_metadata(model_path: Path, folder_data_type: str) -> Dict[str, Any]:
             break
     metadata.setdefault("model_name", model_path.stem)
     metadata.setdefault("data_type", folder_data_type)
-    metadata.setdefault("classes", [])
+    metadata.setdefault("labels", [])
     if metadata_path:
         metadata["metadata_path"] = str(metadata_path)
     return metadata
 
+def _labels_from_metadata(metadata: Dict[str, Any]) -> List[str]:
+    """Return the required classification labels from model metadata."""
+    value = metadata.get("labels")
+    if isinstance(value, list):
+        labels = [str(item).strip() for item in value if str(item).strip()]
+    elif isinstance(value, str):
+        labels = [item.strip() for item in value.split(",") if item.strip()]
+    else:
+        labels = []
 
-def discover_models(models_root: Path = MODELS_ROOT) -> List[Dict[str, Any]]:
+    # Backward-compatible read only; new deployments must write labels.
+    if not labels:
+        for legacy_key in ("classes", "class_names"):
+            legacy = metadata.get(legacy_key)
+            if isinstance(legacy, list):
+                labels = [str(item).strip() for item in legacy if str(item).strip()]
+                break
+    return labels
+
+
+def discover_models(models_root: Optional[Path] = None) -> List[Dict[str, Any]]:
     """Return .pth models stored under dedicated data-type folders."""
+    models_root = Path(models_root or MODELS_ROOT)
     discovered: List[Dict[str, Any]] = []
     if not models_root.exists():
         return discovered
@@ -75,13 +95,10 @@ def discover_models(models_root: Path = MODELS_ROOT) -> List[Dict[str, Any]]:
             continue
         for model_path in sorted(data_type_dir.rglob("*.pth")):
             metadata = _load_metadata(model_path, folder_type)
-            data_type = str(metadata.get("data_type") or folder_type).strip().lower()
-            if data_type not in DATA_TYPES:
-                data_type = folder_type
             discovered.append({
                 "path": model_path,
                 "model_name": str(metadata.get("model_name") or model_path.stem),
-                "data_type": data_type,
+                "data_type": folder_type,
                 "metadata": metadata,
             })
     return discovered
@@ -154,7 +171,7 @@ def _resize_flat(values: List[float], size: int) -> List[float]:
 
 
 def _shape_from_metadata(metadata: Dict[str, Any]) -> Optional[Tuple[int, ...]]:
-    raw = metadata.get("input_shape") or metadata.get("shape")
+    raw = metadata.get("input_shape") or metadata.get("shape") or metadata.get("input")
     if not isinstance(raw, list):
         return None
     shape: List[int] = []
@@ -253,7 +270,7 @@ def _load_torch_model(model_path: Path):
         return model
 
 
-def _prediction_from_output(output: Any, classes: List[Any]) -> Dict[str, Any]:
+def _prediction_from_output(output: Any, labels: List[Any]) -> Dict[str, Any]:
     import torch
 
     if isinstance(output, (tuple, list)):
@@ -266,7 +283,7 @@ def _prediction_from_output(output: Any, classes: List[Any]) -> Dict[str, Any]:
     probabilities = torch.softmax(output.float(), dim=0) if output.numel() > 1 else output.float()
     index = int(torch.argmax(probabilities).item()) if probabilities.numel() else 0
     confidence = _safe_float(probabilities[index].item()) if probabilities.numel() else None
-    label = str(classes[index]) if index < len(classes) else str(index)
+    label = str(labels[index]) if index < len(labels) else str(index)
     return {
         "prediction": label,
         "class_index": index,
@@ -306,6 +323,16 @@ def predict_minute(minute_dir: Path, labels: Optional[List[str]] = None) -> Dict
             deployed_models.append(entry)
             continue
 
+        model_labels = _labels_from_metadata(metadata)
+        if not model_labels:
+            entry.update({
+                "status": "skipped",
+                "error": "Model metadata must include a non-empty labels list for classification deployment.",
+            })
+            timeline.append(entry)
+            deployed_models.append(entry)
+            continue
+
         try:
             tensor = _tensor_for_data(data_type, data_path, metadata)
             model_obj = _load_torch_model(model_path)
@@ -313,9 +340,9 @@ def predict_minute(minute_dir: Path, labels: Optional[List[str]] = None) -> Dict
 
             with torch.no_grad():
                 output = model_obj(tensor)
-            classes = metadata.get("classes") if isinstance(metadata.get("classes"), list) else []
-            entry.update(_prediction_from_output(output, classes))
-            entry["classes"] = [str(item) for item in classes]
+            entry.update(_prediction_from_output(output, model_labels))
+            entry["labels"] = [str(item) for item in model_labels]
+            entry["classes"] = [str(item) for item in model_labels]
             entry["status"] = "ok"
         except Exception as exc:
             entry.update({
