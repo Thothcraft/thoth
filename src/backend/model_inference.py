@@ -6,6 +6,7 @@ import csv
 import datetime as dt
 import json
 import math
+import sys
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -198,10 +199,38 @@ def _tensor_for_data(data_type: str, path: Path, metadata: Dict[str, Any]):
         width = max(len(row) for row in rows)
         values = np.asarray([_resize_flat(row, width) for row in rows], dtype=np.float32)
     elif data_type == "radar":
-        values = np.fromfile(path, dtype=np.uint8).astype(np.float32)
-        if values.size == 0:
-            raise ValueError(f"No radar bytes found in {path}")
-        values = values / 255.0
+        if shape and len(shape) == 4:
+            dl_root = THOTH_ROOT / "dl"
+            if str(dl_root) not in sys.path:
+                sys.path.insert(0, str(dl_root))
+            from radar_processor import RadarProcessor
+
+            with open(path, "rb") as handle:
+                raw_data = handle.read()
+            if not raw_data:
+                raise ValueError(f"No radar bytes found in {path}")
+
+            processor = RadarProcessor(
+                config_path=None,
+                num_range_bin=128,
+                num_azimuth_bin=16,
+                num_elevation_bin=16,
+                min_range=0.2,
+            )
+            processor.process_raw_data(raw_data)
+            frame_count, channels, height, width = shape
+            image = processor.generate_3channel_image(target_size=(height, width))
+            image = np.asarray(image, dtype=np.float32)
+            if image.shape[0] != channels:
+                raise ValueError(
+                    f"Radar processor produced {image.shape[0]} channels, model expects {channels}."
+                )
+            values = np.tile(image[np.newaxis, :, :, :], (frame_count, 1, 1, 1))
+        else:
+            values = np.fromfile(path, dtype=np.uint8).astype(np.float32)
+            if values.size == 0:
+                raise ValueError(f"No radar bytes found in {path}")
+            values = values / 255.0
     elif data_type == "image":
         try:
             from PIL import Image
@@ -256,7 +285,9 @@ def _load_torch_model(model_path: Path):
             loaded = torch.load(str(model_path), map_location="cpu", weights_only=False)
         except TypeError:
             loaded = torch.load(str(model_path), map_location="cpu")
-        if isinstance(loaded, dict) and callable(loaded.get("model")):
+        if _looks_like_radar_classifier_state_dict(loaded):
+            model = _build_radar_classifier_from_state_dict(loaded)
+        elif isinstance(loaded, dict) and callable(loaded.get("model")):
             model = loaded["model"]
         else:
             model = loaded
@@ -268,6 +299,63 @@ def _load_torch_model(model_path: Path):
         if hasattr(model, "eval"):
             model.eval()
         return model
+
+
+def _looks_like_radar_classifier_state_dict(loaded: Any) -> bool:
+    return isinstance(loaded, dict) and {
+        "conv3d_1.weight",
+        "conv3d_2.weight",
+        "conv3d_3.weight",
+        "fc.6.weight",
+    }.issubset(set(loaded.keys()))
+
+
+def _build_radar_classifier_from_state_dict(state_dict: Dict[str, Any]):
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    class RadarClassifier(nn.Module):
+        def __init__(self, input_channels: int, num_classes: int):
+            super().__init__()
+            self.conv3d_1 = nn.Conv3d(input_channels, 32, kernel_size=(3, 3, 3), padding=(1, 1, 1))
+            self.bn3d_1 = nn.BatchNorm3d(32)
+            self.pool3d_1 = nn.MaxPool3d((2, 2, 2))
+            self.conv3d_2 = nn.Conv3d(32, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
+            self.bn3d_2 = nn.BatchNorm3d(64)
+            self.pool3d_2 = nn.MaxPool3d((2, 2, 2))
+            self.conv3d_3 = nn.Conv3d(64, 128, kernel_size=(3, 3, 3), padding=(1, 1, 1))
+            self.bn3d_3 = nn.BatchNorm3d(128)
+            self.pool3d_3 = nn.MaxPool3d((2, 2, 2))
+            self.adaptive_pool = nn.AdaptiveAvgPool3d((1, 4, 4))
+            self.fc = nn.Sequential(
+                nn.Linear(128 * 4 * 4, 256),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(256, 128),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(128, num_classes),
+            )
+
+        def forward(self, x):
+            x = x.permute(0, 2, 1, 3, 4)
+            x = F.relu(self.bn3d_1(self.conv3d_1(x)))
+            x = self.pool3d_1(x)
+            x = F.relu(self.bn3d_2(self.conv3d_2(x)))
+            x = self.pool3d_2(x)
+            x = F.relu(self.bn3d_3(self.conv3d_3(x)))
+            x = self.pool3d_3(x)
+            x = self.adaptive_pool(x)
+            x = x.view(x.size(0), -1)
+            return self.fc(x)
+
+    input_channels = int(state_dict["conv3d_1.weight"].shape[1])
+    num_classes = int(state_dict["fc.6.weight"].shape[0])
+    model = RadarClassifier(input_channels=input_channels, num_classes=num_classes)
+    model.load_state_dict(state_dict)
+    model.eval()
+    return model
 
 
 def _prediction_from_output(output: Any, labels: List[Any]) -> Dict[str, Any]:
