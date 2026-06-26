@@ -1,0 +1,44 @@
+{
+  "model_name": "radar_classifier",
+  "data_type": "radar_video",
+  "description": "3D CNN classifier for radar video activity recognition",
+  "input_shape": [
+    100,
+    3,
+    64,
+    64
+  ],
+  "output_shape": [
+    2
+  ],
+  "predictions": "activity_class_labels",
+  "labels": [
+    "empty",
+    "present"
+  ],
+  "label_map": {
+    "empty": 0,
+    "present": 1
+  },
+  "label_index": {
+    "0": "empty",
+    "1": "present"
+  },
+  "channels": [
+    "rdi",
+    "azimuth_range",
+    "azimuth_doppler"
+  ],
+  "architecture": {
+    "type": "3D CNN",
+    "layers": [
+      32,
+      64,
+      128
+    ],
+    "fc_layers": [
+      256,
+      128
+    ]
+  }
+}
