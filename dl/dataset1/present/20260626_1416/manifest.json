@@ -1,0 +1,62 @@
+{
+  "folder_minute": "20260626_1416",
+  "scheduled_start": "2026-06-26T14:16:00-04:00",
+  "duration_seconds": 59.5,
+  "labels": [],
+  "outputs": {
+    "wifi_csi": {
+      "raw_path": "/home/pi/Desktop/thoth/data/20260626_1416/wifi_csi_raw.csv",
+      "timestamped_path": "/home/pi/Desktop/thoth/data/20260626_1416/wifi_csi_timestamped.csv",
+      "all_serial_path": "/home/pi/Desktop/thoth/data/20260626_1416/wifi_csi_serial_all.jsonl",
+      "type": "csv/jsonl",
+      "device": "/dev/ttyACM0",
+      "baud": 115200,
+      "detected_candidates": [
+        "/dev/ttyACM0",
+        "/dev/ttyAMA10"
+      ],
+      "started": "2026-06-26T14:16:52.416-04:00",
+      "source": "USB-connected ESP32 receiver printing ESP-NOW CSI_DATA lines",
+      "raw_path_bytes": 3714939,
+      "timestamped_path_bytes": 4208547,
+      "all_serial_path_bytes": 4663975
+    },
+    "video": {
+      "path": "/home/pi/Desktop/thoth/data/20260626_1416/usb_camera.mp4",
+      "type": "mp4",
+      "device": "/dev/video0",
+      "started": "2026-06-26T14:16:52.417-04:00",
+      "ffmpeg_returncode": 0
+    },
+    "sense_hat": {
+      "path": "/home/pi/Desktop/thoth/data/20260626_1416/sense_hat.jsonl",
+      "type": "jsonl",
+      "source": "Sense HAT GPIO / I2C",
+      "started": "2026-06-26T14:16:52.544-04:00"
+    },
+    "radar": {
+      "path_prefix": "/home/pi/Desktop/thoth/data/20260626_1416/mmw_radar_raw",
+      "type": "bin",
+      "config_dir": "/home/pi/Desktop/thoth/WS/MMW-HAT/MMW-HAT-Release/radar_config/config_3rx_3m",
+      "started": "2026-06-26T14:16:52.545-04:00",
+      "note": "Driver appends wall-clock timestamp and .bin extension to path_prefix.",
+      "files": [
+        "/home/pi/Desktop/thoth/data/20260626_1416/mmw_radar_raw_20260626_141653_605.bin"
+      ]
+    }
+  },
+  "errors": [],
+  "warnings": [],
+  "primary_label": null,
+  "relative_path": "20260626_1416",
+  "sensors_enabled": {
+    "usb_camera": true,
+    "dreamhat_radar": true,
+    "esp32_csi": true,
+    "sense_hat": true
+  },
+  "capture_started": "2026-06-26T14:16:52.416-04:00",
+  "capture_finished": "2026-06-26T14:17:53.163-04:00",
+  "host": "thoth",
+  "status": "success"
+}

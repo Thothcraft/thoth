@@ -1,0 +1,55 @@
+{
+  "minute": "20260626_1417",
+  "generated_at": "2026-06-26T14:18:54.184-04:00",
+  "source": "backend.model_inference",
+  "models_root": "/home/pi/Desktop/thoth/models",
+  "labels": [],
+  "deployed_models": [
+    {
+      "minute": "20260626_1417",
+      "model_name": "csi_temporal_signal_encoder",
+      "model_path": "/home/pi/Desktop/thoth/models/csi/csi_temporal_signal_encoder.pth",
+      "data_type": "csi",
+      "data_path": "/home/pi/Desktop/thoth/data/20260626_1417/wifi_csi_timestamped.csv",
+      "metadata_path": "/home/pi/Desktop/thoth/models/csi/csi_temporal_signal_encoder.json",
+      "generated_at": "2026-06-26T14:18:54.184-04:00",
+      "status": "skipped",
+      "error": "Model metadata must include a non-empty labels list for classification deployment."
+    },
+    {
+      "minute": "20260626_1417",
+      "model_name": "radar_spatial_vision_encoder",
+      "model_path": "/home/pi/Desktop/thoth/models/radar/radar_spatial_vision_encoder.pth",
+      "data_type": "radar",
+      "data_path": "/home/pi/Desktop/thoth/data/20260626_1417/mmw_radar_raw_20260626_141754_763.bin",
+      "metadata_path": "/home/pi/Desktop/thoth/models/radar/radar_spatial_vision_encoder.json",
+      "generated_at": "2026-06-26T14:18:54.184-04:00",
+      "status": "skipped",
+      "error": "Model metadata must include a non-empty labels list for classification deployment."
+    }
+  ],
+  "timeline": [
+    {
+      "minute": "20260626_1417",
+      "model_name": "csi_temporal_signal_encoder",
+      "model_path": "/home/pi/Desktop/thoth/models/csi/csi_temporal_signal_encoder.pth",
+      "data_type": "csi",
+      "data_path": "/home/pi/Desktop/thoth/data/20260626_1417/wifi_csi_timestamped.csv",
+      "metadata_path": "/home/pi/Desktop/thoth/models/csi/csi_temporal_signal_encoder.json",
+      "generated_at": "2026-06-26T14:18:54.184-04:00",
+      "status": "skipped",
+      "error": "Model metadata must include a non-empty labels list for classification deployment."
+    },
+    {
+      "minute": "20260626_1417",
+      "model_name": "radar_spatial_vision_encoder",
+      "model_path": "/home/pi/Desktop/thoth/models/radar/radar_spatial_vision_encoder.pth",
+      "data_type": "radar",
+      "data_path": "/home/pi/Desktop/thoth/data/20260626_1417/mmw_radar_raw_20260626_141754_763.bin",
+      "metadata_path": "/home/pi/Desktop/thoth/models/radar/radar_spatial_vision_encoder.json",
+      "generated_at": "2026-06-26T14:18:54.184-04:00",
+      "status": "skipped",
+      "error": "Model metadata must include a non-empty labels list for classification deployment."
+    }
+  ]
+}
