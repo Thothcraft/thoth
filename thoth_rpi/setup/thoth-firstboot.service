@@ -2,7 +2,7 @@
 Description=Thoth first boot network and service setup
 After=multi-user.target
 Before=thoth.service thoth-collector.service
-Wants=NetworkManager.service NetworkManager-wait-online.service avahi-daemon.service
+Wants=avahi-daemon.service
 ConditionPathExists=!/etc/thoth-first-boot-done
 
 [Service]

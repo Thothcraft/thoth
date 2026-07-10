@@ -3,7 +3,7 @@
 # Thoth RPi — First Boot Script
 #
 # Runs once after the image is flashed to a new SD card.
-# Regenerates SSH keys, restores LAN WiFi services, advertises thoth.local,
+# Regenerates SSH keys, advertises thoth.local,
 # and ensures the web app and collector are running.
 # ============================================================================
 
@@ -16,23 +16,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "$FIRST_BOOT_FLAG" ]; then
     exit 0
 fi
-
-# Ensure the image never boots into the old hotspot/captive-portal path.
-sudo systemctl disable --now nodogsplash 2>/dev/null || true
-sudo systemctl disable --now thoth-hotspot 2>/dev/null || true
-sudo systemctl disable --now hostapd 2>/dev/null || true
-sudo systemctl disable --now dnsmasq 2>/dev/null || true
-sudo systemctl mask nodogsplash 2>/dev/null || true
-sudo systemctl mask thoth-hotspot 2>/dev/null || true
-sudo systemctl mask hostapd 2>/dev/null || true
-sudo systemctl mask dnsmasq 2>/dev/null || true
-
-# Raspberry Pi Imager writes WiFi settings for NetworkManager on current Pi OS.
-sudo systemctl unmask NetworkManager 2>/dev/null || true
-sudo systemctl enable NetworkManager
-sudo systemctl enable NetworkManager-wait-online.service 2>/dev/null || true
-sudo systemctl restart NetworkManager || sudo systemctl start NetworkManager
-sudo systemctl restart NetworkManager-wait-online.service 2>/dev/null || true
 
 # Apply optional boot-partition provisioning for image burners that cannot
 # customize custom Raspberry Pi images.

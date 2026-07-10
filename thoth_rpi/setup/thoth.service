@@ -1,11 +1,12 @@
 [Unit]
 Description=Thoth Smart Home Sensor Platform
-After=NetworkManager-wait-online.service network-online.target
-Wants=NetworkManager-wait-online.service network-online.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
+User=__USER__
+Group=__GROUP__
 ExecStart=__PYTHON__ __APP__
 WorkingDirectory=__WORKDIR__
 Environment=THOTH_ROOT=__THOTH_ROOT__

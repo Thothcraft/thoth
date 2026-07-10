@@ -42,12 +42,25 @@ On first boot:
 
 ## First Boot Script
 
-`setup/first-boot.sh` now performs only:
+From a fresh clone on Raspberry Pi OS, run:
 
-- hostname setup
-- cleanup of legacy hotspot/captive files
-- start or restart `thoth-web.service`
-- start or restart `thoth-collector.service`
+```bash
+cd thoth
+sudo bash first-boot.sh
+```
+
+The command is safe to rerun. It:
+
+- installs system and Python dependencies
+- enables SPI for the DreamHat radar
+- grants the clone owner access to SPI, GPIO, serial, and video devices
+- installs systemd units using the actual clone owner instead of a hard-coded user
+- starts or restarts `thoth.service` and `thoth-collector.service`
+- sets the hostname and enables `thoth.local` through Avahi
+
+The script does not alter NetworkManager or hostapd. If SPI was disabled before
+installation, reboot once when prompted; the services are already enabled and
+will start automatically afterward.
 
 ## Access
 
