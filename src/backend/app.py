@@ -26,6 +26,7 @@ except Exception:  # pragma: no cover - optional on minimal installs
     netifaces = None
 import requests
 import tempfile
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from collections import deque
@@ -1388,6 +1389,107 @@ def download_capture_minute(minute):
         mimetype='application/zip',
         conditional=True,
     )
+
+
+def _requested_capture_minutes() -> tuple[list[str], list[Path], tuple[Response, int] | None]:
+    payload = request.get_json(silent=True) or {}
+    requested = payload.get('minutes', [])
+    if not isinstance(requested, list):
+        return [], [], (jsonify({'status': 'error', 'message': 'minutes must be a list'}), 400)
+
+    names = list(dict.fromkeys(str(item).strip() for item in requested if str(item).strip()))
+    if not names:
+        return [], [], (jsonify({'status': 'error', 'message': 'Select at least one capture'}), 400)
+    if len(names) > 100:
+        return [], [], (jsonify({'status': 'error', 'message': 'Select no more than 100 captures at once'}), 400)
+
+    minute_dirs: list[Path] = []
+    missing: list[str] = []
+    for name in names:
+        minute_dir = get_minute(name)
+        if minute_dir is None:
+            missing.append(name)
+        else:
+            minute_dirs.append(minute_dir)
+    if missing:
+        return [], [], (jsonify({
+            'status': 'error',
+            'message': f"Capture not found: {', '.join(missing)}",
+            'missing': missing,
+        }), 404)
+    return names, minute_dirs, None
+
+
+@app.route('/api/captures/bulk-download', methods=['POST'])
+def bulk_download_captures():
+    """Download selected capture folders in one ZIP archive."""
+    names, minute_dirs, error = _requested_capture_minutes()
+    if error:
+        return error
+
+    temp = tempfile.NamedTemporaryFile(prefix='thoth-captures-', suffix='.zip', delete=False)
+    zip_path = Path(temp.name)
+    temp.close()
+    try:
+        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+            for minute_dir in minute_dirs:
+                for path in sorted(minute_dir.rglob('*')):
+                    if path.is_file():
+                        archive.write(path, arcname=str(Path(minute_dir.name) / path.relative_to(minute_dir)))
+    except Exception:
+        zip_path.unlink(missing_ok=True)
+        raise
+
+    @after_this_request
+    def cleanup_bulk_archive(response):
+        zip_path.unlink(missing_ok=True)
+        return response
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return send_file(
+        zip_path,
+        as_attachment=True,
+        download_name=f'thoth-captures-{timestamp}.zip',
+        mimetype='application/zip',
+        conditional=True,
+    )
+
+
+@app.route('/api/captures/bulk-delete', methods=['POST'])
+def bulk_delete_captures():
+    """Delete selected completed capture folders as one validated operation."""
+    names, minute_dirs, error = _requested_capture_minutes()
+    if error:
+        return error
+
+    active = current_minute()
+    collection_active = get_system_status(update_remote=False).collection_active
+    blocked = []
+    for minute_dir in minute_dirs:
+        summary = minute_summary(minute_dir)
+        if active and active == minute_dir and not summary.get('capture_finished') and collection_active:
+            blocked.append(minute_dir.name)
+    if blocked:
+        return jsonify({
+            'status': 'error',
+            'message': 'An actively recording capture cannot be deleted.',
+            'blocked': blocked,
+        }), 409
+
+    deleted = []
+    try:
+        for name, minute_dir in zip(names, minute_dirs):
+            shutil.rmtree(minute_dir)
+            deleted.append(name)
+    except Exception as exc:
+        logger.exception('Bulk capture delete failed: %s', exc)
+        return jsonify({
+            'status': 'error',
+            'message': f'Bulk delete stopped after deleting {len(deleted)} captures: {exc}',
+            'deleted': deleted,
+        }), 500
+
+    return jsonify({'status': 'success', 'deleted': deleted, 'count': len(deleted)})
 
 
 @app.route('/api/captures', methods=['GET'])

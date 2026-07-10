@@ -120,10 +120,24 @@
     </div>
 
     <div class="card">
+        <div class="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 pb-4">
+            <div class="text-sm text-gray-700"><span id="selected-capture-count" class="font-semibold text-gray-950">0</span> selected</div>
+            <div class="flex flex-wrap items-center gap-2">
+                <button id="download-selected" type="button" disabled class="inline-flex items-center gap-2 border border-gray-400 px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40">
+                    <i class="fas fa-download"></i> Download selected
+                </button>
+                <button id="delete-selected" type="button" disabled class="inline-flex items-center gap-2 border border-red-300 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40">
+                    <i class="fas fa-trash"></i> Delete selected
+                </button>
+            </div>
+        </div>
         <div class="overflow-x-auto">
             <table class="min-w-full divide-y divide-gray-200">
                 <thead>
                     <tr class="text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
+                        <th class="py-3 pr-4">
+                            <input id="select-all-captures" type="checkbox" class="h-4 w-4" aria-label="Select all captures">
+                        </th>
                         <th class="py-3 pr-4">Minute</th>
                         <th class="py-3 pr-4">Label</th>
                         <th class="py-3 pr-4">Video</th>
@@ -136,6 +150,9 @@
                 <tbody id="captures-table-body" class="divide-y divide-gray-100">
                     {% for minute in minutes %}
                     <tr data-minute="{{ minute.minute }}" class="{% if minute.minute == active_minute %}bg-blue-50{% endif %}">
+                        <td class="py-3 pr-4">
+                            <input type="checkbox" class="capture-select h-4 w-4" value="{{ minute.minute }}" aria-label="Select capture {{ minute.minute }}">
+                        </td>
                         <td class="py-3 pr-4 font-mono text-sm text-gray-900">{{ minute.minute }}</td>
                         <td class="py-3 pr-4 text-sm text-gray-700">
                             {% if minute.labels %}
@@ -188,7 +205,7 @@
                     {% endfor %}
                     {% if not minutes %}
                     <tr>
-                        <td colspan="7" class="py-8 text-center text-sm text-gray-500">No timestamp folders found in the capture directory.</td>
+                        <td colspan="8" class="py-8 text-center text-sm text-gray-500">No timestamp folders found in the capture directory.</td>
                     </tr>
                     {% endif %}
                 </tbody>
@@ -217,6 +234,20 @@ const capturesBody = document.getElementById('captures-table-body');
 const captureCount = document.getElementById('capture-count');
 let activeMinute = {{ active_minute|tojson }};
 let capturesBusy = false;
+const selectedMinutes = new Set();
+
+function updateBulkControls() {
+  const checkboxes = Array.from(document.querySelectorAll('.capture-select'));
+  const selectedCount = selectedMinutes.size;
+  document.getElementById('selected-capture-count').textContent = String(selectedCount);
+  document.getElementById('download-selected').disabled = selectedCount === 0;
+  document.getElementById('delete-selected').disabled = selectedCount === 0;
+  const selectAll = document.getElementById('select-all-captures');
+  if (selectAll) {
+    selectAll.checked = checkboxes.length > 0 && checkboxes.every((input) => input.checked);
+    selectAll.indeterminate = checkboxes.some((input) => input.checked) && !selectAll.checked;
+  }
+}
 
 function selectedOngoingSensors() {
   const sensors = {};
@@ -353,6 +384,7 @@ function renderCaptureRow(minute) {
   const downloadUrl = urls.download || `/captures/${encodeURIComponent(minute.minute)}/download`;
   return `
     <tr data-minute="${name}" class="${minute.minute === activeMinute ? 'bg-blue-50' : ''}">
+      <td class="py-3 pr-4"><input type="checkbox" class="capture-select h-4 w-4" value="${name}" aria-label="Select capture ${name}" ${selectedMinutes.has(minute.minute) ? 'checked' : ''}></td>
       <td class="py-3 pr-4 font-mono text-sm text-gray-900">${name}</td>
       <td class="py-3 pr-4 text-sm text-gray-700">${labels}</td>
       <td class="py-3 pr-4">${statusCell(Boolean(minute.files?.video))}</td>
@@ -375,10 +407,76 @@ function renderCaptureRow(minute) {
 function renderCaptureRows(minutes) {
   if (!capturesBody) return;
   if (!minutes.length) {
-    capturesBody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-sm text-gray-500">No timestamp folders found in the capture directory.</td></tr>';
+    capturesBody.innerHTML = '<tr><td colspan="8" class="py-8 text-center text-sm text-gray-500">No timestamp folders found in the capture directory.</td></tr>';
+    selectedMinutes.clear();
+    updateBulkControls();
     return;
   }
+  const available = new Set(minutes.map((minute) => minute.minute));
+  selectedMinutes.forEach((minute) => {
+    if (!available.has(minute)) selectedMinutes.delete(minute);
+  });
   capturesBody.innerHTML = minutes.map(renderCaptureRow).join('');
+  updateBulkControls();
+}
+
+async function bulkDownloadCaptures() {
+  const button = document.getElementById('download-selected');
+  const original = button.innerHTML;
+  button.disabled = true;
+  button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Preparing ZIP';
+  try {
+    const response = await fetch('/api/captures/bulk-download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: Array.from(selectedMinutes) }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      showAlert(data.message || 'Bulk download failed', 'error');
+      return;
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = match?.[1] || 'thoth-captures.zip';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
+  } finally {
+    button.innerHTML = original;
+    updateBulkControls();
+  }
+}
+
+async function bulkDeleteCaptures() {
+  const minutes = Array.from(selectedMinutes);
+  if (!minutes.length || !confirm(`Delete ${minutes.length} selected captures? This permanently removes their folders from disk.`)) return;
+  const button = document.getElementById('delete-selected');
+  const original = button.innerHTML;
+  button.disabled = true;
+  button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Deleting';
+  try {
+    const response = await fetch('/api/captures/bulk-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      showAlert(data.message || 'Bulk delete failed', 'error');
+      return;
+    }
+    selectedMinutes.clear();
+    showAlert(`Deleted ${data.count ?? minutes.length} captures`, 'success');
+    await refreshCaptures();
+  } finally {
+    button.innerHTML = original;
+    updateBulkControls();
+  }
 }
 
 async function refreshCaptures() {
@@ -465,6 +563,22 @@ async function deleteCapture(minute, button) {
 document.getElementById('save-ongoing-settings')?.addEventListener('click', saveOngoingSettings);
 document.getElementById('refresh-stats')?.addEventListener('click', refreshStats);
 document.getElementById('refresh-captures')?.addEventListener('click', refreshCaptures);
+document.getElementById('download-selected')?.addEventListener('click', bulkDownloadCaptures);
+document.getElementById('delete-selected')?.addEventListener('click', bulkDeleteCaptures);
+document.getElementById('select-all-captures')?.addEventListener('change', (event) => {
+  document.querySelectorAll('.capture-select').forEach((input) => {
+    input.checked = event.target.checked;
+    if (input.checked) selectedMinutes.add(input.value);
+    else selectedMinutes.delete(input.value);
+  });
+  updateBulkControls();
+});
+capturesBody?.addEventListener('change', (event) => {
+  if (!event.target.matches('.capture-select')) return;
+  if (event.target.checked) selectedMinutes.add(event.target.value);
+  else selectedMinutes.delete(event.target.value);
+  updateBulkControls();
+});
 capturesBody?.addEventListener('click', (event) => {
   const predictionsButton = event.target.closest('.capture-predictions');
   if (predictionsButton) {
