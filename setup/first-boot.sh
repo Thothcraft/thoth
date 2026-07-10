@@ -1,28 +1,27 @@
-#!/bin/bash
-# Thoth First Boot Setup Script
-# Minimal boot path:
-# - set hostname
-# - remove captive portal leftovers
-# - start web app and collector
+#!/usr/bin/env bash
+# Install and configure Thoth from a fresh Raspberry Pi OS clone.
 
-set +e
+set -euo pipefail
 
-THOTH_DIR="/home/pi/Desktop/thoth"
-FIRST_BOOT_FLAG="/etc/thoth-first-boot-done"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+THOTH_DIR="$(dirname "$SCRIPT_DIR")"
 LOG_FILE="/var/log/thoth-first-boot.log"
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
-if [ -f "$FIRST_BOOT_FLAG" ]; then
-    log "First boot already completed, exiting"
-    exit 0
+if [ "${EUID}" -ne 0 ]; then
+    echo "Run this script with sudo: sudo bash first-boot.sh" >&2
+    exit 1
 fi
 
 log "=========================================="
 log "  Thoth First Boot Initialization"
 log "=========================================="
+
+log "Installing Thoth services and hardware dependencies..."
+bash "$THOTH_DIR/thoth_rpi/setup/install.sh"
 
 log "Setting hostname to thoth..."
 hostnamectl set-hostname thoth || log "Warning: could not set hostname"
@@ -32,35 +31,19 @@ else
     printf '127.0.1.1\tthoth\n' >> /etc/hosts
 fi
 
-log "Removing legacy hotspot and captive portal state..."
-sudo systemctl unmask NetworkManager 2>/dev/null || true
-sudo systemctl enable NetworkManager 2>/dev/null || true
-sudo systemctl enable NetworkManager-wait-online.service 2>/dev/null || true
-sudo systemctl restart NetworkManager 2>/dev/null || true
-sudo systemctl disable --now nodogsplash 2>/dev/null || true
-sudo systemctl disable --now thoth-hotspot 2>/dev/null || true
-sudo systemctl disable --now hostapd 2>/dev/null || true
-sudo systemctl disable --now dnsmasq 2>/dev/null || true
-sudo systemctl mask hostapd 2>/dev/null || true
-sudo systemctl mask dnsmasq 2>/dev/null || true
-sudo systemctl enable avahi-daemon 2>/dev/null || true
-sudo systemctl restart avahi-daemon 2>/dev/null || true
-rm -f /etc/systemd/system/hostapd.service 2>/dev/null || true
-rm -f /etc/systemd/system/dnsmasq.service 2>/dev/null || true
-rm -f /etc/nodogsplash/nodogsplash.conf 2>/dev/null || true
-rm -rf /etc/nodogsplash 2>/dev/null || true
-rm -f /var/lib/nodogsplash/* 2>/dev/null || true
-rm -f /var/run/thoth-firstboot 2>/dev/null || true
-
 log "Starting Thoth web application..."
-sudo systemctl enable thoth-web.service 2>/dev/null || true
-sudo systemctl restart thoth-web.service || log "Warning: thoth-web restart failed"
+systemctl enable thoth.service
+systemctl restart thoth.service
 
 log "Starting Thoth continuous collector..."
-sudo systemctl enable thoth-collector.service 2>/dev/null || true
-sudo systemctl restart thoth-collector.service || log "Warning: thoth-collector restart failed"
+systemctl enable thoth-collector.service
+systemctl restart thoth-collector.service
 
-touch "$FIRST_BOOT_FLAG"
+touch /etc/thoth-first-boot-done
 
 log "First boot initialization complete"
 log "Access the web app at http://thoth.local:5000"
+
+if [ ! -e /dev/spidev0.0 ]; then
+    log "SPI was enabled for the DreamHat radar; reboot once before radar capture will work."
+fi

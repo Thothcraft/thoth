@@ -10,6 +10,11 @@ APScheduler
 psutil
 PyJWT>=2.8.0
 numpy
+numba
+scipy
+pyfftw
+spidev
+gpiozero
 matplotlib
 pyserial
 pexpect

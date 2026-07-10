@@ -99,27 +99,11 @@ def detect_dreamhat_radar() -> Dict[str, Any]:
 
     driver_available = MMW_RELEASE.exists() and RADAR_CONFIG_DIR.exists()
     spi_available = bool(devices)
+    # The continuous collector is the sole owner of the radar's SPI and GPIO
+    # lines. Probing the chip from the web process races the collector and can
+    # leave GPIO12/GPIO25 busy, so inventory detection is intentionally passive.
     chip_online = False
-    error = None
-    if driver_available and spi_available and not service_active:
-        radar = None
-        try:
-            if str(MMW_RELEASE) not in sys.path:
-                sys.path.insert(0, str(MMW_RELEASE))
-            from utility.BGT60TR13C import BGT60TR13C, RET_VAL_OK
-
-            radar = BGT60TR13C(spi_speed=50_000_000)
-            chip_online = radar.check_chip_id() == RET_VAL_OK
-        except Exception as exc:
-            error = str(exc)
-        finally:
-            if radar is not None:
-                try:
-                    radar.stop()
-                except Exception:
-                    pass
-    elif service_active:
-        error = "chip probe skipped while collector service is active"
+    error = None if service_active else "waiting for collector service"
 
     online = bool(chip_online or service_active or (driver_available and spi_available))
     source = "BGT60TR13C"

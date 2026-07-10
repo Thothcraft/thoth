@@ -111,8 +111,40 @@ def iso_now() -> str:
 def find_camera(requested: str | None) -> str | None:
     if requested:
         return requested
-    devices = sorted(glob.glob("/dev/video*"))
-    return devices[0] if devices else None
+
+    devices = sorted(
+        glob.glob("/dev/video*"),
+        key=lambda path: int(Path(path).name.removeprefix("video")),
+    )
+    usb_devices = []
+    for device in devices:
+        sysfs_device = Path("/sys/class/video4linux") / Path(device).name / "device"
+        try:
+            resolved = sysfs_device.resolve(strict=True)
+        except OSError:
+            continue
+        if any((parent / "idVendor").exists() for parent in (resolved, *resolved.parents)):
+            usb_devices.append(device)
+
+    v4l2_ctl = shutil.which("v4l2-ctl")
+    if v4l2_ctl:
+        for device in usb_devices:
+            try:
+                probe = subprocess.run(
+                    [v4l2_ctl, "--device", device, "--all"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=3,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            is_usb_camera = "Driver name      : uvcvideo" in probe.stdout or "Bus info         : usb-" in probe.stdout
+            is_capture_node = "Video Capture" in probe.stdout and "Video Output" not in probe.stdout
+            if probe.returncode == 0 and is_usb_camera and is_capture_node:
+                return device
+    return None
 
 
 def serial_candidates() -> list[str]:
@@ -132,12 +164,28 @@ def serial_candidates() -> list[str]:
     return sorted(candidates)
 
 
+def open_serial_without_reset(port: str, baud: int, timeout: float):
+    import serial
+
+    connection = serial.Serial()
+    connection.port = port
+    connection.baudrate = baud
+    connection.timeout = timeout
+    # ESP32-C6 USB Serial/JTAG reboots when DTR is deasserted as the port opens.
+    # Keep DTR asserted and RTS deasserted so rotating minute files does not
+    # reset the CSI receiver firmware.
+    connection.dtr = True
+    connection.rts = False
+    connection.open()
+    return connection
+
+
 def probe_csi_port(port: str, baud: int, timeout_s: float) -> bool:
     try:
         import serial
 
         deadline = time.monotonic() + timeout_s
-        with serial.Serial(port, baudrate=baud, timeout=0.1) as ser:
+        with open_serial_without_reset(port, baud, 0.1) as ser:
             while time.monotonic() < deadline:
                 line = ser.readline()
                 if not line:
@@ -154,6 +202,17 @@ def find_csi_port(requested: str, baud: int, detect_seconds: float) -> tuple[str
     candidates = serial_candidates()
     if requested and requested != "auto":
         return requested, candidates
+
+    try:
+        import serial.tools.list_ports as list_ports
+
+        for port in list_ports.comports():
+            manufacturer = (port.manufacturer or "").lower()
+            description = (port.description or "").lower()
+            if port.vid == 0x303A or "espressif" in manufacturer or "espressif" in description:
+                return port.device, candidates
+    except Exception:
+        pass
 
     if detect_seconds <= 0:
         return (candidates[0] if candidates else None), candidates
@@ -182,7 +241,7 @@ def collect_csi(
 
     try:
         with (
-            serial.Serial(port, baudrate=baud, timeout=0.05) as ser,
+            open_serial_without_reset(port, baud, 0.05) as ser,
             open(raw_file, "w", encoding="utf-8", buffering=1) as raw_fd,
             open(timestamped_file, "w", encoding="utf-8", newline="", buffering=1) as ts_fd,
             open(all_serial_file, "w", encoding="utf-8", buffering=1) as all_fd,
@@ -309,6 +368,9 @@ def stop_video_capture(proc: subprocess.Popen | None, timeout: float = 10.0) -> 
 
 
 def start_radar_capture(output_prefix: Path) -> Any:
+    if not Path("/dev/spidev0.0").exists():
+        raise RuntimeError("/dev/spidev0.0 is missing; enable SPI and reboot the Raspberry Pi.")
+
     from utility.BGT60TR13C import BGT60TR13C, RET_VAL_OK
     from utility.helper import calculate_frame_size, find_register_config_in_directory, find_setting_in_directory
 
@@ -497,6 +559,9 @@ def main() -> int:
         video_returncode = stop_video_capture(video_proc)
         if video_returncode is not None:
             manifest["outputs"].setdefault("video", {})["ffmpeg_returncode"] = video_returncode
+            video_path = Path(manifest["outputs"]["video"]["path"])
+            if video_returncode != 0 or not video_path.exists() or video_path.stat().st_size == 0:
+                manifest["warnings"].append(f"Camera capture failed with ffmpeg exit code {video_returncode}.")
 
         radar_files = sorted(str(path) for path in output_dir.glob("mmw_radar_raw_*.bin"))
         if radar_files:
@@ -508,6 +573,9 @@ def main() -> int:
                 path = Path(wifi_csi[key])
                 if path.exists():
                     wifi_csi[f"{key}_bytes"] = path.stat().st_size
+            raw_path = Path(wifi_csi["raw_path"])
+            if raw_path.exists() and raw_path.stat().st_size <= len(CSI_HEADER) + 1:
+                manifest["warnings"].append("ESP32 CSI receiver was detected but produced no CSI_DATA samples this minute.")
 
         sense_hat = manifest["outputs"].get("sense_hat")
         if isinstance(sense_hat, dict):
