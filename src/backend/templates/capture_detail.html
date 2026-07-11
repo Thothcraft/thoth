@@ -142,7 +142,7 @@
                 </div>
             </div>
             {% endif %}
-            <div class="grid gap-4 xl:grid-cols-3">
+            <div class="grid gap-4 xl:grid-cols-2">
                 <div class="rounded-2xl border border-slate-200 p-3">
                     <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Range / Doppler</div>
                     <div id="capture-radar-range-doppler" class="h-[420px]" data-url="{{ radar_data_urls[0] }}"></div>
@@ -154,6 +154,10 @@
                 <div class="rounded-2xl border border-slate-200 p-3">
                     <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Azimuth / Doppler</div>
                     <div id="capture-radar-azimuth-doppler" class="h-[420px]" data-url="{{ radar_data_urls[2] }}"></div>
+                </div>
+                <div class="rounded-2xl border border-slate-200 p-3">
+                    <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">X / Y Tracking</div>
+                    <div id="capture-radar-xy-tracking" class="h-[420px]" data-url="{{ radar_data_urls[3] }}"></div>
                 </div>
             </div>
             {% else %}
@@ -200,6 +204,7 @@ const radarTargets = [
   ['capture-radar-range-doppler', {{ radar_data_urls[0]|tojson if radar_data_urls|length > 0 else 'null' }}],
   ['capture-radar-azimuth-range', {{ radar_data_urls[1]|tojson if radar_data_urls|length > 1 else 'null' }}],
   ['capture-radar-azimuth-doppler', {{ radar_data_urls[2]|tojson if radar_data_urls|length > 2 else 'null' }}],
+  ['capture-radar-xy-tracking', {{ radar_data_urls[3]|tojson if radar_data_urls|length > 3 else 'null' }}],
 ];
 const csiTarget = ['capture-csi-chart', {{ csi_data_url|tojson }}];
 

@@ -1,7 +1,0 @@
-occupied
-when I open the rasspbery pi it does not connect to the wifi directly. prepare a rpi image (as the thoth repository is configured to push a new release when tagged with a version). the image
-  should take the wifi credentials when the user is burning hte image (thorugh image burner). on boot the rasspbery pi will: 1. connect the wifi network. have a name that is thoth.local and 2.
-  running on thoth.local:5000 the thoth web app which collects data from the connected sensors. make sure these functionalities are running. after you confirm they are ok. I will download the
-  released image from github and burn it on the rasspbery pi and witout a monitor I should be able to acces the data collection from IP:5000 or from thoth.local:5000 from my laptop. currently it
-  seems that a hostapd service is blocking the networkmanager: pi@thoth:~ $ ^C pi@thoth:~ $ sudo systemctl stop hostapd pi@thoth:~ $ sudo systemctl unmask NetworkManager pi@thoth:~ $ sudo systemctl
-  start NetworkManager. continue working on this

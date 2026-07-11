@@ -24,6 +24,15 @@
         <input type="checkbox" name="portal_upload_allowed" class="mt-1 h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" {% if device_settings.portal_upload_allowed %}checked{% endif %}>
       </label>
 
+      <label class="block rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
+        <span class="block text-base font-semibold text-white">Radar detection threshold</span>
+        <span class="mt-1 block text-sm text-slate-400">Required signal above the measured noise floor. Raise it to reject more noise; lower it for weaker or more distant people.</span>
+        <span class="mt-4 flex items-center gap-3">
+          <input type="range" name="radar_detection_threshold_db" min="0" max="24" step="0.5" value="{{ device_settings.radar_detection_threshold_db|default(8.0) }}" class="h-2 flex-1 accent-cyan-400" oninput="document.getElementById('radar-threshold-value').textContent = Number(this.value).toFixed(1) + ' dB'">
+          <output id="radar-threshold-value" class="w-20 text-right font-mono text-sm text-cyan-300">{{ '%.1f'|format(device_settings.radar_detection_threshold_db|default(8.0)|float) }} dB</output>
+        </span>
+      </label>
+
       <label class="flex items-start justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
         <span>
           <span class="block text-base font-semibold text-white">Model deployment requests</span>
@@ -63,6 +72,7 @@ document.getElementById('settings-form').addEventListener('submit', async (event
   payload.portal_upload_allowed = event.target.portal_upload_allowed.checked;
   payload.deployment_requests_allowed = event.target.deployment_requests_allowed.checked;
   payload.cloud_sync_allowed = event.target.cloud_sync_allowed.checked;
+  payload.radar_detection_threshold_db = Number(event.target.radar_detection_threshold_db.value);
 
   const response = await fetch('/settings', {
     method: 'POST',

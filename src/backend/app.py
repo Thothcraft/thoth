@@ -166,6 +166,7 @@ terminal_manager = SSHTerminalManager(socketio, Config)
 # Global state
 collection_active = False
 collection_process: Optional[subprocess.Popen] = None
+COLLECTOR_PAUSE_PATH = THOTH_ROOT / 'config' / 'collector.pause'
 wifi_manager = None
 
 # Mock user for local authentication (in production, use a proper user database)
@@ -568,7 +569,12 @@ def _count_radar_frames(path: Path) -> int:
 
 
 @lru_cache(maxsize=32)
-def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str, Dict[str, Any]]:
+def _radar_animation_bundle(
+    path_str: str,
+    mtime_ns: int,
+    size: int,
+    detection_threshold_db: float,
+) -> Dict[str, Dict[str, Any]]:
     del mtime_ns, size
     radar_path = Path(path_str)
     if np is None or CubeProcessor is None:
@@ -588,6 +594,7 @@ def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str
     tracking_proc = None
     if all((SigProc, parse_radar_cfg, read_uint12, split_samples)) and RADAR_TRACKING_CONFIG.exists():
         tracking_proc = SigProc(str(RADAR_TRACKING_CONFIG), parse_radar_cfg(setting))
+        tracking_proc.detection_threshold_db = detection_threshold_db
     max_frames = min(60, total_frames)
     sample_indices = {1, total_frames}
     if max_frames > 2:
@@ -613,7 +620,7 @@ def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str
                 )
                 tracking_frame = np.transpose(split[0], (2, 0, 1))
                 location, score, gui_plot = tracking_proc.update(tracking_frame)
-                tracking_result = (location, score, gui_plot)
+                tracking_result = (location, score, gui_plot, dict(tracking_proc.last_detection))
             except Exception as exc:
                 logger.warning('Radar X-Y tracking failed for frame %s: %s', index, exc)
                 tracking_proc = None
@@ -642,7 +649,7 @@ def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str
             })
 
         if tracking_result is not None:
-            location, score, gui_plot = tracking_result
+            location, score, gui_plot, detection = tracking_result
             location_values = np.asarray(location, dtype=float)
             safe_location = [float(value) if np.isfinite(value) else None for value in location_values]
             frames_by_plot['xy-tracking'].append({
@@ -653,6 +660,11 @@ def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str
                 'z': np.asarray(gui_plot['map'], dtype=float).T.tolist(),
                 'location': safe_location,
                 'score': float(score) if np.isfinite(score) else None,
+                'detected': bool(detection.get('detected')),
+                'snr_db': detection.get('snr_db'),
+                'threshold_db': detection.get('threshold_db'),
+                'peak_power_db': detection.get('peak_power_db'),
+                'noise_floor_db': detection.get('noise_floor_db'),
             })
 
     bundle: Dict[str, Dict[str, Any]] = {}
@@ -682,6 +694,11 @@ def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str
             bundle[plot]['y_label'] = 'Y (lateral, m)'
             bundle[plot]['location'] = latest.get('location')
             bundle[plot]['score'] = latest.get('score')
+            bundle[plot]['detected'] = latest.get('detected', False)
+            bundle[plot]['snr_db'] = latest.get('snr_db')
+            bundle[plot]['threshold_db'] = latest.get('threshold_db')
+            bundle[plot]['peak_power_db'] = latest.get('peak_power_db')
+            bundle[plot]['noise_floor_db'] = latest.get('noise_floor_db')
     return bundle
 
 
@@ -691,7 +708,17 @@ def _radar_plot_payload(radar_path: Path, plot: str) -> Dict[str, Any]:
         raise RuntimeError(f'Unsupported radar plot kind: {plot}')
 
     stat = radar_path.stat()
-    bundle = _radar_animation_bundle(str(radar_path), stat.st_mtime_ns, stat.st_size)
+    settings = device_manager.get_device_settings()
+    try:
+        detection_threshold_db = min(40.0, max(0.0, float(settings.get('radar_detection_threshold_db', 8.0))))
+    except (TypeError, ValueError):
+        detection_threshold_db = 8.0
+    bundle = _radar_animation_bundle(
+        str(radar_path),
+        stat.st_mtime_ns,
+        stat.st_size,
+        detection_threshold_db,
+    )
     payload = bundle.get(plot)
     if not payload:
         raise RuntimeError('No radar frames available')
@@ -768,7 +795,7 @@ def get_system_status(update_remote: bool = True) -> SystemStatus:
                     ["systemctl", "is-active", "thoth-collector"],
                     capture_output=True, text=True
                 ).stdout.strip() == "active"
-                collection_status = collection_status or service_collection_status
+                collection_status = (collection_status or service_collection_status) and not COLLECTOR_PAUSE_PATH.exists()
             except Exception:
                 pass
 
@@ -1237,6 +1264,7 @@ def settings():
             'portal_upload_allowed': str(payload.get('portal_upload_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
             'deployment_requests_allowed': str(payload.get('deployment_requests_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
             'cloud_sync_allowed': str(payload.get('cloud_sync_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
+            'radar_detection_threshold_db': payload.get('radar_detection_threshold_db', 8.0),
         }
         saved = device_manager.save_device_settings(updates)
         if request.is_json:
@@ -2101,35 +2129,25 @@ def collection_action(action):
     global collection_active, collection_process
 
     if action == 'start':
-        if collection_process is not None and collection_process.poll() is None:
-            return jsonify({'status': 'error', 'message': 'Collection already running'}), 409
-
         payload = request.get_json(silent=True) or {}
         sensors = payload.get('sensors') or {}
         label = str(payload.get('label') or '').strip()
-        try:
-            duration = float(payload.get('duration') or 59.5)
-        except Exception:
-            duration = 59.5
+        if label or sensors:
+            device_manager.save_capture_settings({'labels': [label] if label else [], 'sensors': sensors})
+        COLLECTOR_PAUSE_PATH.unlink(missing_ok=True)
 
-        command = [
-            str(THOTH_ROOT / 'capture_dreamhat_minute.sh'),
-            '--start-now',
-            '--duration',
-            f'{duration:.3f}',
-        ]
-        if label:
-            command.extend(['--label', label])
+        service_running = subprocess.run(
+            ['systemctl', 'is-active', '--quiet', 'thoth-collector.service'],
+            capture_output=True,
+        ).returncode == 0
+        if service_running:
+            collection_active = True
+            return jsonify({'status': 'success', 'message': 'Continuous collection resumed'})
+        if collection_process is not None and collection_process.poll() is None:
+            collection_active = True
+            return jsonify({'status': 'success', 'message': 'Collection already running'})
 
-        sensor_flags = {
-            'usb_camera': '--no-camera',
-            'dreamhat_radar': '--no-radar',
-            'esp32_csi': '--no-csi',
-            'sense_hat': '--no-sensehat',
-        }
-        for key, flag in sensor_flags.items():
-            if sensors.get(key) is False:
-                command.append(flag)
+        command = [sys.executable, str(THOTH_ROOT / 'src' / 'collector.py')]
 
         try:
             collection_process = subprocess.Popen(
@@ -2147,6 +2165,8 @@ def collection_action(action):
         logger.info('Data collection started: %s', ' '.join(command))
         return jsonify({'status': 'success', 'message': 'Collection started', 'pid': collection_process.pid})
     elif action == 'stop':
+        COLLECTOR_PAUSE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        COLLECTOR_PAUSE_PATH.write_text(datetime.utcnow().isoformat(), encoding='utf-8')
         if collection_process is not None and collection_process.poll() is None:
             try:
                 collection_process.terminate()

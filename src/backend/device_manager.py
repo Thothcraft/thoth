@@ -167,9 +167,15 @@ class DeviceManager:
             'deployment_requests_allowed': True,
             'cloud_sync_allowed': True,
             'auto_registration_enabled': True,
+            'radar_detection_threshold_db': 8.0,
         }
 
     def _coerce_setting_value(self, key: str, value: Any) -> Any:
+        if key == 'radar_detection_threshold_db':
+            try:
+                return min(40.0, max(0.0, float(value)))
+            except (TypeError, ValueError):
+                return 8.0
         if key.endswith('_allowed') or key.startswith('auto_'):
             if isinstance(value, bool):
                 return value

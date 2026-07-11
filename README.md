@@ -1,104 +1,65 @@
-# Thoth — Edge Smart Home Sensor Platform
+# Thoth Raspberry Pi Sensor Platform
 
-Thoth is the edge device component of the [Thothcraft](https://thothcraft.com)
-smart home research ecosystem.  It collects multi-modal sensor data, runs
-deployed ML models for real-time predictions, and communicates with the Brain
-cloud server for training, federated learning, and Home Assistant integration.
+Thoth is a Raspberry Pi edge sensor platform for synchronized DreamHat radar,
+ESP32 WiFi CSI, USB camera, and Sense HAT capture. It provides a local Flask
+dashboard, continuous one-minute collection, radar visualization and tracking,
+model inference, and cloud synchronization.
 
-## Repository Structure
+## Fresh Raspberry Pi OS install
 
-```
-thoth/
-├── thoth_core/          # Shared platform-agnostic code
-│   ├── backend/         #   Flask web app, auth, device manager
-│   ├── data_manager/    #   Data protocol, storage, scanning
-│   ├── fl_client/       #   Federated learning client
-│   └── sensors/         #   Base sensor classes & manager
-│
-├── thoth_mac/           # macOS status-bar application
-│   ├── app.py           #   rumps menu-bar app + Flask launcher
-│   ├── sensors/         #   Camera, mic, IMU, CSI
-│   ├── install.sh       #   One-click installer (LaunchAgent)
-│   └── README.md
-│
-├── thoth_win/           # Windows system-tray application
-│   ├── app.py           #   pystray tray app + Flask launcher
-│   ├── sensors/         #   Camera, mic, IMU, CSI
-│   ├── install.ps1      #   One-click installer (Scheduled Task)
-│   └── README.md
-│
-├── thoth_rpi/           # Raspberry Pi headless edge device
-│   ├── app.py           #   Entry point (reads Imager credentials)
-│   ├── sensors/         #   RPi camera (picamera2), CSI
-│   ├── setup/           #   systemd service, image build scripts
-│   └── README.md
-│
-├── WS/                  # WiFi Sensing (ESP32 firmware, training, live)
-├── .env                 # Environment variables (Brain URL, tokens)
-└── LICENSE
-```
-
-## Quick Start
-
-### macOS
-
-Use the release DMG for guided installation:
-
-1. Download `Thoth-macOS-Installer.dmg` from releases.
-2. Open the DMG and run `Install Thoth.command`.
-
-Manual install:
+1. Flash Raspberry Pi OS 64-bit with Raspberry Pi Imager.
+2. Configure the username, WiFi, hostname, and SSH in Imager.
+3. Boot the Pi and clone this repository.
+4. Run the one-file installer from the repository root:
 
 ```bash
-cd thoth_mac
-chmod +x install.sh
-./install.sh
+cd thoth
+sudo bash setup/first-boot.sh
 ```
 
-### Windows
+The installer is safe to rerun. It installs system and Python dependencies,
+enables SPI, grants hardware-device groups to the clone owner, creates `.venv`,
+installs and starts `thoth.service` and `thoth-collector.service`, enables
+Avahi/SSH, and configures `http://thoth.local:5000`.
 
-```powershell
-cd thoth_win
-powershell -ExecutionPolicy Bypass -File install.ps1
+If SPI was not previously enabled, reboot once after installation. Both Thoth
+services are already enabled and will start automatically.
+
+## Repository layout
+
+```text
+src/
+  app.py                 Raspberry Pi dashboard entrypoint
+  collector.py           Continuous one-minute collector
+  backend/               Dashboard, capture, radar, models, and API code
+setup/
+  first-boot.sh           Complete fresh-OS installer
+WS/MMW-HAT/              DreamHat radar driver, configs, and examples
+config/                   Runtime settings and credentials
+models/                   Deployed sensor models
+data/                     Rolling capture folders (newest 300 retained)
 ```
 
-### Raspberry Pi
+This repository targets Raspberry Pi OS only. It does not include Windows or
+macOS application variants.
 
-1. Flash the Thoth image with **Raspberry Pi Imager**
-2. Configure WiFi in Imager settings
-3. Power on — Thoth starts automatically
-4. Log in once to create the local SSH account used by the dashboard Connect page
+## Services
 
-For manual install:
 ```bash
-cd thoth_rpi
-sudo ./setup/install.sh
+systemctl status thoth.service
+systemctl status thoth-collector.service
+journalctl -u thoth-collector.service -f
 ```
 
-## Architecture
+The collector keeps the newest 300 minute folders by default.
 
-All three platform variants share **thoth_core** which provides:
+## Sensors
 
-- **Flask web dashboard** — sensor status, media gallery, model predictions
-- **Data manager** — save/load sensor data with metadata
-- **FL client** — federated learning participation
-- **Sensor base classes** — extensible `BaseSensor` + `SensorRegistry`
-
-Each platform adds:
-
-| Platform | Status Bar | Sensors | Boot | WiFi CSI |
-|----------|-----------|---------|------|----------|
-| **macOS** | rumps (menu bar) | Camera, Mic, IMU | LaunchAgent | ESP32 via `/dev/tty.usbserial*` |
-| **Windows** | pystray (tray) | Camera, Mic, IMU | Scheduled Task | ESP32 via COM ports |
-| **RPi** | headless | picamera2, CSI | systemd | ESP32 via `/dev/ttyUSB*` |
-
-## WiFi Sensing (ESP32 CSI)
-
-The `WS/` directory contains ESP32 firmware for Channel State Information
-collection.  Mac and Windows apps detect ESP32 devices connected via USB
-and read the CSI stream.  See `WS/csi_recv/` and `WS/csi_send/` for the
-firmware source.
+- DreamHat BGT60TR13C radar over SPI/GPIO
+- ESP32 CSI receiver over USB serial
+- USB UVC camera when attached
+- Sense HAT when attached
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT — see [LICENSE](LICENSE).

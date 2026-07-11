@@ -1,4 +1,0 @@
-# macOS-specific dependencies (on top of thoth_core/requirements.txt)
-rumps
-pyobjc-framework-Cocoa
-py2app

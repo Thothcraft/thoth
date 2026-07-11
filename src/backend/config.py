@@ -56,7 +56,7 @@ class Config:
     MODELS_DIR = os.getenv('THOTH_MODELS_DIR', os.path.join(BASE_DIR, 'models'))
     LEGACY_CONFIG_DIR = os.path.join(DATA_DIR, 'config')
     LEGACY_DEVICE_ID_FILE = os.path.join(DATA_DIR, 'device_id.txt')
-    CAPTURE_KEEP_MINUTES = int(os.getenv('CAPTURE_KEEP_MINUTES', 1000))
+    CAPTURE_KEEP_MINUTES = int(os.getenv('CAPTURE_KEEP_MINUTES', 300))
     CAPTURE_CAMERA_DEVICE = os.getenv('CAPTURE_CAMERA_DEVICE', '/dev/video0')
     CAPTURE_CAMERA_WIDTH = int(os.getenv('CAPTURE_CAMERA_WIDTH', 640))
     CAPTURE_CAMERA_HEIGHT = int(os.getenv('CAPTURE_CAMERA_HEIGHT', 480))

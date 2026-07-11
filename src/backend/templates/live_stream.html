@@ -67,7 +67,7 @@
                 <span>Range, Doppler, and azimuth views</span>
                 <span id="radar-updated">Waiting</span>
             </div>
-            <div class="grid gap-4 xl:grid-cols-3">
+            <div class="grid gap-4 xl:grid-cols-2">
                 <div class="rounded-2xl border border-slate-200 p-3">
                     <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Range / Doppler</div>
                     <div id="live-radar-range-doppler" class="h-[420px]"></div>
@@ -79,6 +79,10 @@
                 <div class="rounded-2xl border border-slate-200 p-3">
                     <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Azimuth / Doppler</div>
                     <div id="live-radar-azimuth-doppler" class="h-[420px]"></div>
+                </div>
+                <div class="rounded-2xl border border-slate-200 p-3">
+                    <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">X / Y Tracking</div>
+                    <div id="live-radar-xy-tracking" class="h-[420px]"></div>
                 </div>
             </div>
         </div>
@@ -163,6 +167,7 @@ async function renderRadar() {
     ['live-radar-range-doppler', radarDataUrls[0]],
     ['live-radar-azimuth-range', radarDataUrls[1]],
     ['live-radar-azimuth-doppler', radarDataUrls[2]],
+    ['live-radar-xy-tracking', radarDataUrls[3]],
   ];
   const status = document.getElementById('radar-updated');
   if (!window.ThothPlayback) return;

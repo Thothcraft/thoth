@@ -134,6 +134,24 @@
     const xLabel = options.xLabel || data.x_label || 'X';
     const yLabel = options.yLabel || data.y_label || 'Y';
     const intervalMs = options.intervalMs || data.frame_interval_ms || 120;
+    const isTracking = data.plot === 'xy-tracking';
+    const valueLabel = isTracking ? 'Track score' : 'Power';
+    const colorbarTitle = isTracking ? 'track history' : 'log power';
+
+    function trackingMarker(location, score, detected, snrDb, thresholdDb) {
+      const valid = detected === true && Array.isArray(location) && Number.isFinite(location[0]) && Number.isFinite(location[1]);
+      return {
+        type: 'scatter',
+        mode: 'markers',
+        x: valid ? [location[0]] : [],
+        y: valid ? [location[1]] : [],
+        marker: { color: '#ef4444', size: 13, line: { color: '#ffffff', width: 2 } },
+        customdata: valid ? [[score, snrDb, thresholdDb]] : [],
+        name: 'Tracked target',
+        hovertemplate: 'X: %{x:.2f} m<br>Y: %{y:.2f} m<br>Track: %{customdata[0]:.2f}<br>SNR: %{customdata[1]:.1f} dB<br>Threshold: %{customdata[2]:.1f} dB<extra></extra>',
+        showlegend: isTracking,
+      };
+    }
 
     if (!framesData.length) {
       const z = Array.isArray(data.z) ? data.z : [];
@@ -143,7 +161,7 @@
       }
       const staticLayout = buildPlaybackLayout(title, xLabel, yLabel, intervalMs);
       staticLayout.uirevision = options.uirevision || 'capture-heatmap';
-      await Plotly.newPlot(host, [{
+      const staticTraces = [{
         type: 'heatmap',
         x: xValues,
         y: yValues,
@@ -151,15 +169,16 @@
         colorscale: 'Viridis',
         zsmooth: false,
         hoverongaps: false,
-        hovertemplate: `${yLabel}: %{y}<br>${xLabel}: %{x}<br>Power %{z:.2f}<extra></extra>`,
-        colorbar: { title: 'log power' },
-      }], staticLayout, plotConfig());
+        hovertemplate: `${yLabel}: %{y}<br>${xLabel}: %{x}<br>${valueLabel} %{z:.2f}<extra></extra>`,
+        colorbar: { title: colorbarTitle },
+      }];
+      if (isTracking) staticTraces.push(trackingMarker(data.location, data.score, data.detected, data.snr_db, data.threshold_db));
+      await Plotly.newPlot(host, staticTraces, staticLayout, plotConfig());
       return;
     }
 
-    const frames = framesData.map((frame, index) => ({
-      name: String(index),
-      data: [{
+    const frames = framesData.map((frame, index) => {
+      const frameTraces = [{
         type: 'heatmap',
         x: Array.isArray(frame.x) && frame.x.length ? frame.x : xValues,
         y: Array.isArray(frame.y) && frame.y.length ? frame.y : yValues,
@@ -167,10 +186,12 @@
         colorscale: 'Viridis',
         zsmooth: false,
         hoverongaps: false,
-        hovertemplate: `${yLabel}: %{y}<br>${xLabel}: %{x}<br>Power %{z:.2f}<extra></extra>`,
-        colorbar: { title: 'log power' },
-      }],
-    }));
+        hovertemplate: `${yLabel}: %{y}<br>${xLabel}: %{x}<br>${valueLabel} %{z:.2f}<extra></extra>`,
+        colorbar: { title: colorbarTitle },
+      }];
+      if (isTracking) frameTraces.push(trackingMarker(frame.location, frame.score, frame.detected, frame.snr_db, frame.threshold_db));
+      return { name: String(index), data: frameTraces };
+    });
 
     const staticLayout = buildPlaybackLayout(title, xLabel, yLabel, intervalMs);
     staticLayout.uirevision = options.uirevision || 'capture-heatmap';

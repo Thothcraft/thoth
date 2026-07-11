@@ -1,4 +1,0 @@
-# Windows-specific dependencies (on top of thoth_core/requirements.txt)
-pystray
-Pillow
-pyinstaller

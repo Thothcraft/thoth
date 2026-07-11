@@ -11,7 +11,7 @@ Build a custom Pi image that:
 3. Starts `thoth-web` and `thoth-collector` automatically.
 4. Serves the UI at `http://thoth.local:5000`.
 5. Detects supported sensors and starts collecting immediately.
-6. Keeps the newest 100 minute folders in `/home/pi/Desktop/thoth/data`.
+6. Keeps the newest 300 minute folders in the clone's `data` directory.
 
 ## What Is Removed
 
@@ -46,7 +46,7 @@ From a fresh clone on Raspberry Pi OS, run:
 
 ```bash
 cd thoth
-sudo bash first-boot.sh
+sudo bash setup/first-boot.sh
 ```
 
 The command is safe to rerun. It:

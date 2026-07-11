@@ -18,8 +18,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .config import Config
-from .model_inference import predict_minute
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from backend.config import Config  # type: ignore
+    from backend.model_inference import predict_minute  # type: ignore
+else:
+    from .config import Config
+    from .model_inference import predict_minute
 
 THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / "WS" / "MMW-HAT" / "MMW-HAT-Release"
@@ -597,7 +602,7 @@ def main() -> int:
                     {
                         "minute": folder_name,
                         "generated_at": iso_now(),
-                        "source": "capture_dreamhat_minute.py",
+                        "source": "src/backend/minute_collector.py",
                         "deployed_models": [],
                         "timeline": [],
                         "labels": preset_labels,

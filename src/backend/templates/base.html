@@ -13,7 +13,7 @@
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
             color: #0f172a;
-            background: #f5f5f7;
+            background: radial-gradient(circle at 50% -20%, #ffffff 0, #f5f5f7 45%, #ececf0 100%);
         }
 
         a {
@@ -81,18 +81,26 @@
             border-color: #3b82f6;
         }
         .card {
-            background-color: #ffffff;
+            background-color: rgba(255, 255, 255, 0.82);
             color: #0f172a;
-            border-radius: 0.5rem;
-            box-shadow: 0 10px 30px -20px rgba(15, 23, 42, 0.6);
+            border: 1px solid rgba(255,255,255,.9);
+            border-radius: 1.5rem;
+            box-shadow: 0 18px 50px -32px rgba(15, 23, 42, 0.45);
+            backdrop-filter: blur(24px);
             padding: 1.5rem;
             margin-bottom: 1.5rem;
         }
+        button, .button { border-radius: .8rem; transition: transform .18s ease, box-shadow .18s ease, background .18s ease; }
+        button:active, .button:active { transform: scale(.97); }
+        .apple-primary { background: #0071e3; color: white; box-shadow: 0 8px 20px -12px #0071e3; }
+        .apple-primary:hover { background: #0077ed; }
+        .apple-danger { background: #ff3b30; color: white; box-shadow: 0 8px 20px -12px #ff3b30; }
+        .apple-danger:hover { background: #e9342b; }
     </style>
     {% block extra_head %}{% endblock %}
 </head>
 <body class="min-h-screen bg-[#f5f5f7] text-slate-950">
-    <header class="sticky top-0 z-20 border-b border-slate-200 bg-white/80 backdrop-blur-xl">
+    <header class="sticky top-0 z-20 border-b border-white/70 bg-white/70 backdrop-blur-xl">
         <div class="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8 flex justify-between items-center">
             <h1 class="text-xl font-semibold text-slate-950">
                 {{ config.get('app_name', 'Thoth Device') }}

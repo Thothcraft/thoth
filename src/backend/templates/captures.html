@@ -4,18 +4,21 @@
 
 {% block content %}
 <div class="space-y-6">
-    <div class="card">
+    <div class="card overflow-hidden">
         <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
-                <h2 class="text-2xl font-semibold text-gray-900">Minute Captures</h2>
-                <p class="text-sm text-gray-600 mt-1">Timestamp folders from <code>{{ config.get('CAPTURE_DATA_DIR', '~/Desktop/thoth/data') }}</code> are shown, including labeled subfolders.</p>
+                <div class="text-xs font-semibold uppercase tracking-widest text-blue-600">Thoth sensing</div>
+                <h2 class="mt-2 text-4xl font-semibold tracking-tight text-gray-950">Captures</h2>
+                <p class="text-sm text-gray-500 mt-2">Every synchronized minute, live from this Raspberry Pi.</p>
             </div>
             <div class="flex flex-wrap items-center gap-3">
                 <div class="rounded-lg border border-gray-300 bg-gray-50 px-4 py-2">
                     <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">Saved minutes</div>
                     <div id="capture-count" class="text-2xl font-semibold text-gray-950">{{ minutes|length }}</div>
                 </div>
-                <button id="refresh-captures" class="border border-gray-400 px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50">Refresh list</button>
+                <button id="start-capturing" class="apple-primary px-4 py-2.5 text-sm font-semibold {{ 'hidden' if system_status.collection_active else '' }}"><i class="fas fa-play mr-2"></i>Start capturing</button>
+                <button id="stop-capturing" class="apple-danger px-4 py-2.5 text-sm font-semibold {{ '' if system_status.collection_active else 'hidden' }}"><i class="fas fa-stop mr-2"></i>Stop capturing</button>
+                <button id="refresh-captures" class="border border-gray-200 bg-white px-3 py-2.5 text-sm font-semibold text-gray-700 shadow-sm hover:bg-gray-50"><i class="fas fa-rotate mr-2"></i>Refresh</button>
             </div>
         </div>
     </div>
@@ -27,7 +30,7 @@
                     <h3 class="text-xl font-semibold text-gray-950">Ongoing stream</h3>
                     <p class="mt-1 text-sm text-gray-600">These settings apply to the current and upcoming minute captures.</p>
                 </div>
-                <span class="rounded-full px-3 py-1 text-xs font-semibold {{ 'bg-green-100 text-green-800' if system_status.collection_active else 'bg-gray-100 text-gray-700' }}">
+                <span id="capture-state" class="rounded-full px-3 py-1 text-xs font-semibold {{ 'bg-green-100 text-green-800' if system_status.collection_active else 'bg-gray-100 text-gray-700' }}">
                     {{ 'Collecting' if system_status.collection_active else 'Idle' }}
                 </span>
             </div>
@@ -232,6 +235,9 @@
 const settingsStatus = document.getElementById('settings-status');
 const capturesBody = document.getElementById('captures-table-body');
 const captureCount = document.getElementById('capture-count');
+const captureState = document.getElementById('capture-state');
+const startCapturing = document.getElementById('start-capturing');
+const stopCapturing = document.getElementById('stop-capturing');
 let activeMinute = {{ active_minute|tojson }};
 let capturesBusy = false;
 const selectedMinutes = new Set();
@@ -255,6 +261,38 @@ function selectedOngoingSensors() {
     sensors[input.dataset.sensor] = input.checked;
   });
   return sensors;
+}
+
+function setCaptureState(active) {
+  captureState.textContent = active ? 'Collecting' : 'Paused';
+  captureState.className = `rounded-full px-3 py-1 text-xs font-semibold ${active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-700'}`;
+  startCapturing.classList.toggle('hidden', active);
+  stopCapturing.classList.toggle('hidden', !active);
+}
+
+async function controlCapture(action) {
+  const button = action === 'start' ? startCapturing : stopCapturing;
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/collection/${action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        label: document.getElementById('ongoing-label').value.split(',')[0]?.trim() || '',
+        sensors: selectedOngoingSensors(),
+      }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.message || `Unable to ${action} capturing`);
+    setCaptureState(action === 'start');
+    showAlert(result.message || `Capturing ${action === 'start' ? 'started' : 'stopped'}`);
+    await refreshCaptures();
+    await refreshStats();
+  } catch (error) {
+    showAlert(error.message || 'Capture control failed', 'error');
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function saveOngoingSettings() {
@@ -485,7 +523,10 @@ async function refreshCaptures() {
   try {
     const response = await fetch('/api/captures', { cache: 'no-store' });
     const result = await response.json().catch(() => ({}));
-    if (!response.ok || result.status !== 'success') return;
+    if (!response.ok || result.status !== 'success') {
+      showAlert(result.message || 'Unable to refresh captures', 'error');
+      return;
+    }
     activeMinute = result.active_minute;
     captureCount.textContent = String(result.count ?? result.minutes?.length ?? 0);
     renderCaptureRows(result.minutes || []);
@@ -499,6 +540,7 @@ async function refreshStats() {
   const result = await response.json().catch(() => ({}));
   if (!response.ok || !result.success) return;
   const stats = result.stats || {};
+  setCaptureState(Boolean(stats.collection_active));
   const metrics = stats.latest_metrics || {};
 
   document.getElementById('stat-cpu').textContent = fmtPercent(stats.cpu_percent);
@@ -561,6 +603,8 @@ async function deleteCapture(minute, button) {
 }
 
 document.getElementById('save-ongoing-settings')?.addEventListener('click', saveOngoingSettings);
+startCapturing?.addEventListener('click', () => controlCapture('start'));
+stopCapturing?.addEventListener('click', () => controlCapture('stop'));
 document.getElementById('refresh-stats')?.addEventListener('click', refreshStats);
 document.getElementById('refresh-captures')?.addEventListener('click', refreshCaptures);
 document.getElementById('download-selected')?.addEventListener('click', bulkDownloadCaptures);

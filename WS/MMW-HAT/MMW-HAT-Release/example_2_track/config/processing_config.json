@@ -11,6 +11,9 @@
     "detection": {
         "num_frames": 5,
         "range_win": 0.25,
-        "angle_win": 10
+        "angle_win": 10,
+        "threshold_db": 8.0,
+        "min_consecutive_frames": 2,
+        "max_position_jump_m": 0.75
     }
 }

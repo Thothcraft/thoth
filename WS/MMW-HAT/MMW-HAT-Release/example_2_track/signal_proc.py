@@ -48,6 +48,18 @@ class SigProc:
         self.detection_num_frames = self.processing_config["detection"]["num_frames"]
         self.detection_range_win = self.processing_config["detection"]["range_win"]
         self.detection_angle_win = self.processing_config["detection"]["angle_win"]
+        self.detection_threshold_db = float(self.processing_config["detection"].get("threshold_db", 8.0))
+        self.detection_min_frames = max(1, int(self.processing_config["detection"].get("min_consecutive_frames", 2)))
+        self.detection_max_jump_m = max(0.0, float(self.processing_config["detection"].get("max_position_jump_m", 0.75)))
+        self._candidate_location = None
+        self._candidate_frames = 0
+        self.last_detection = {
+            "detected": False,
+            "snr_db": None,
+            "threshold_db": self.detection_threshold_db,
+            "peak_power_db": None,
+            "noise_floor_db": None,
+        }
 
 
         # Create objects for Range-Doppler and DBF
@@ -97,14 +109,55 @@ class SigProc:
         range_idx, angle_idx = np.unravel_index(beam_range_energy_cropped.argmax(), beam_range_energy_cropped.shape)
         range_idx += range_clear_idx
 
+        # An argmax always exists, even in an empty room.  Treat it as a target
+        # only when it rises sufficiently above the frame's robust noise floor.
+        # This relative dB margin is stable across gain changes and radar units.
+        eps = np.finfo(float).tiny
+        peak_power = float(beam_range_energy[range_idx, angle_idx])
+        noise_floor = float(np.median(beam_range_energy_cropped))
+        snr_db = float(10.0 * np.log10(max(peak_power, eps) / max(noise_floor, eps)))
+        candidate_range = float(self.range_bin[range_idx])
+        candidate_angle = float(self.angle_bin[angle_idx])
+        candidate_xy = np.array([
+            candidate_range * np.cos(np.deg2rad(candidate_angle)),
+            candidate_range * np.sin(np.deg2rad(candidate_angle)),
+        ])
+
         # range_idx, angle_idx = np.unravel_index(beam_range_energy.argmax(), beam_range_energy.shape)
 
         beam_range_map = np.zeros_like(beam_range_energy)
-        if self.target_validation(beam_range_energy, range_idx, angle_idx):
+        above_threshold = (
+            self.target_validation(beam_range_energy, range_idx, angle_idx)
+            and np.isfinite(snr_db)
+            and snr_db >= self.detection_threshold_db
+        )
+        if above_threshold:
+            if (
+                self._candidate_location is not None
+                and np.linalg.norm(candidate_xy - self._candidate_location) <= self.detection_max_jump_m
+            ):
+                self._candidate_frames += 1
+            else:
+                self._candidate_frames = 1
+            self._candidate_location = candidate_xy
+        else:
+            self._candidate_location = None
+            self._candidate_frames = 0
+
+        detected = above_threshold and self._candidate_frames >= self.detection_min_frames
+        if detected:
             beam_range_map[range_idx, angle_idx] = 1
             self.location_buffer.append([self.range_bin[range_idx], self.angle_bin[angle_idx]])
         else:
             self.location_buffer.append(None)
+
+        self.last_detection = {
+            "detected": bool(detected),
+            "snr_db": snr_db,
+            "threshold_db": self.detection_threshold_db,
+            "peak_power_db": float(10.0 * np.log10(max(peak_power, eps))),
+            "noise_floor_db": float(10.0 * np.log10(max(noise_floor, eps))),
+        }
 
         xy_map = range_angle_map_2_x_y_map_binary(beam_range_map, self.range_bin, self.angle_bin, self.x_bin,
                                                   self.y_bin, 2)
