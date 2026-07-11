@@ -12,6 +12,7 @@ Build a custom Pi image that:
 4. Serves the UI at `http://thoth.local:5000`.
 5. Detects supported sensors and starts collecting immediately.
 6. Keeps the newest 300 minute folders in the clone's `data` directory.
+7. Runs Home Assistant Container on the host network with persistent configuration.
 
 ## What Is Removed
 
@@ -56,6 +57,7 @@ The command is safe to rerun. It:
 - grants the clone owner access to SPI, GPIO, serial, and video devices
 - installs systemd units using the actual clone owner instead of a hard-coded user
 - starts or restarts `thoth.service` and `thoth-collector.service`
+- installs Docker and starts Home Assistant at port 8123
 - sets the hostname and enables `thoth.local` through Avahi
 
 The script does not alter NetworkManager or hostapd. If SPI was disabled before
@@ -65,6 +67,7 @@ will start automatically afterward.
 ## Access
 
 - Web app: `http://thoth.local:5000`
+- Home Assistant: `http://thoth.local:8123`
 - If mDNS is not supported by a client, use the Pi's LAN IP instead.
 
 ## Reliability Note
@@ -75,3 +78,10 @@ will start automatically afterward.
 - router/local DNS entry for `thoth`
 
 The Pi can advertise `thoth.local`, but it cannot force every client network stack to resolve mDNS if the client or network blocks it.
+
+## Home Assistant, Thoth Occupancy, and Philips Hue
+
+1. Open `http://thoth.local:8123` and complete Home Assistant onboarding.
+2. In Home Assistant, open your profile, create a long-lived access token, then paste it into Thoth **Settings → Home Assistant occupancy**.
+3. Home Assistant normally discovers a Hue Bridge automatically. Go to **Settings → Devices & services**, choose the discovered Hue integration, press the bridge button when prompted, and submit. If it is not discovered, choose **Add integration → Philips Hue** and enter the bridge IP.
+4. After each evaluated capture minute, Thoth updates `binary_sensor.thoth_occupancy`. Use that entity as the trigger in Home Assistant automations for Hue lights or other devices.

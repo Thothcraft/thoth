@@ -24,6 +24,28 @@
         <input type="checkbox" name="portal_upload_allowed" class="mt-1 h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" {% if device_settings.portal_upload_allowed %}checked{% endif %}>
       </label>
 
+      <section class="rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
+        <div class="flex items-start justify-between gap-4">
+          <span>
+            <span class="block text-base font-semibold text-white">Home Assistant occupancy</span>
+            <span class="block text-sm text-slate-400">Publish each completed minute as an occupancy binary sensor through Home Assistant's REST API.</span>
+          </span>
+          <input type="checkbox" name="home_assistant_enabled" class="mt-1 h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" {% if home_assistant.enabled %}checked{% endif %}>
+        </div>
+        <div class="mt-4 grid gap-3 md:grid-cols-2">
+          <label class="text-sm text-slate-300">Home Assistant URL
+            <input name="home_assistant_base_url" value="{{ home_assistant.base_url }}" class="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-white" placeholder="http://127.0.0.1:8123">
+          </label>
+          <label class="text-sm text-slate-300">Entity ID
+            <input name="home_assistant_entity_id" value="{{ home_assistant.entity_id }}" class="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-white" placeholder="binary_sensor.thoth_occupancy">
+          </label>
+        </div>
+        <label class="mt-3 block text-sm text-slate-300">Long-lived access token
+          <input name="home_assistant_token" type="password" class="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-white" placeholder="{{ 'Configured — leave blank to keep it' if home_assistant.configured else 'Create this in your Home Assistant profile' }}" autocomplete="new-password">
+        </label>
+        <div class="mt-3 text-xs text-slate-400">Home Assistant: <a href="http://thoth.local:8123" target="_blank" rel="noreferrer" class="font-semibold text-cyan-300 underline">open onboarding</a>. The token is stored locally and is never returned to the browser.</div>
+      </section>
+
       <label class="block rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
         <span class="block text-base font-semibold text-white">Radar detection threshold</span>
         <span class="mt-1 block text-sm text-slate-400">Required signal above the measured noise floor. Raise it to reject more noise; lower it for weaker or more distant people.</span>
@@ -92,6 +114,10 @@ document.getElementById('settings-form').addEventListener('submit', async (event
   payload.radar_detection_threshold_db = Number(event.target.radar_detection_threshold_db.value);
   payload.auto_occupancy_label_enabled = event.target.auto_occupancy_label_enabled.checked;
   payload.occupancy_threshold_percent = Number(event.target.occupancy_threshold_percent.value);
+  payload.home_assistant_enabled = event.target.home_assistant_enabled.checked;
+  payload.home_assistant_base_url = event.target.home_assistant_base_url.value;
+  payload.home_assistant_entity_id = event.target.home_assistant_entity_id.value;
+  payload.home_assistant_token = event.target.home_assistant_token.value;
 
   const response = await fetch('/settings', {
     method: 'POST',

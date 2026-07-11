@@ -58,6 +58,7 @@ from backend.device_manager import DeviceManager
 from backend.auth_manager import AuthManager
 from backend.terminal_manager import SSHTerminalManager
 from backend.sensor_detection import detect_sensor_inventory
+from backend.home_assistant import load_home_assistant_config, publish_occupancy, save_home_assistant_config
 from backend.capture_manager import (
     list_minutes,
     get_minute,
@@ -784,19 +785,25 @@ def _radar_plot_payload(radar_path: Path, plot: str) -> Dict[str, Any]:
     occupancy['threshold_percent'] = threshold_percent
     occupancy['label'] = 'occupied' if evaluated_frames and detected_frames * 100 >= threshold_percent * evaluated_frames else 'empty'
     payload['occupancy'] = occupancy
-    if settings.get('auto_occupancy_label_enabled', True):
-        label = occupancy.get('label')
-        manifest_path = radar_path.parent / 'manifest.json'
-        if label in {'empty', 'occupied'} and manifest_path.exists():
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    label = occupancy.get('label')
+    manifest_path = radar_path.parent / 'manifest.json'
+    if label in {'empty', 'occupied'} and manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+            if settings.get('auto_occupancy_label_enabled', True):
                 if manifest.get('auto_occupancy_label') != occupancy:
                     manifest['labels'] = [label]
                     manifest['primary_label'] = label
                     manifest['auto_occupancy_label'] = occupancy
                     manifest_path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-            except Exception as exc:
-                logger.warning('Unable to save automatic occupancy label: %s', exc)
+            signature = f"{label}:{detected_frames}:{evaluated_frames}:{occupancy.get('threshold_percent')}"
+            previous_publish = manifest.get('home_assistant') if isinstance(manifest.get('home_assistant'), dict) else {}
+            if previous_publish.get('signature') != signature or not previous_publish.get('success'):
+                publish_result = publish_occupancy(occupancy, radar_path.parent.name)
+                manifest['home_assistant'] = {**publish_result, 'signature': signature, 'updated_at': datetime.utcnow().isoformat()}
+                manifest_path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+        except Exception as exc:
+            logger.warning('Unable to update occupancy integrations: %s', exc)
     return payload
 
 
@@ -1414,6 +1421,12 @@ def settings():
             'occupancy_threshold_percent': payload.get('occupancy_threshold_percent', 50.0),
         }
         saved = device_manager.save_device_settings(updates)
+        save_home_assistant_config({
+            'enabled': str(payload.get('home_assistant_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
+            'base_url': payload.get('home_assistant_base_url'),
+            'entity_id': payload.get('home_assistant_entity_id'),
+            'token': payload.get('home_assistant_token'),
+        })
         if saved.get('auto_occupancy_label_enabled', True):
             _relabel_cached_occupancy(float(saved.get('occupancy_threshold_percent', 50.0)))
         if request.is_json:
@@ -1425,6 +1438,7 @@ def settings():
         'settings.html',
         username=session.get('username'),
         device_settings=device_manager.get_device_settings(),
+        home_assistant=load_home_assistant_config(),
     )
 
 

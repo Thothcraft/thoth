@@ -28,7 +28,7 @@ log "Installing Raspberry Pi system dependencies"
 apt-get update -qq
 apt-get install -y -qq \
     python3-venv python3-pip python3-dev python3-spidev python3-gpiozero \
-    libopencv-dev ffmpeg v4l-utils sox openssh-server avahi-daemon
+    libopencv-dev ffmpeg v4l-utils sox openssh-server avahi-daemon avahi-utils docker.io
 apt-get install -y -qq python3-picamera2 || true
 apt-get install -y -qq python3-rpi.gpio || true
 
@@ -46,6 +46,7 @@ fi
 for group in dialout video render spi gpio; do
     getent group "$group" >/dev/null 2>&1 && usermod -aG "$group" "$SERVICE_USER"
 done
+getent group docker >/dev/null 2>&1 && usermod -aG docker "$SERVICE_USER"
 
 log "Creating Python environment"
 python3 -m venv --system-site-packages "$VENV_DIR"
@@ -57,6 +58,23 @@ python3 -m venv --system-site-packages "$VENV_DIR"
 "$VENV_DIR/bin/python" -c 'import flask, gpiozero, numba, pyfftw, scipy, serial, spidev'
 
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$THOTH_ROOT/data" "$THOTH_ROOT/config" "$THOTH_ROOT/logs"
+install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$THOTH_ROOT/config/homeassistant"
+
+log "Installing Home Assistant Container"
+systemctl enable --now docker
+docker pull ghcr.io/home-assistant/home-assistant:stable
+if docker container inspect homeassistant >/dev/null 2>&1; then
+    docker start homeassistant >/dev/null
+else
+    docker run -d \
+        --name homeassistant \
+        --restart unless-stopped \
+        --privileged \
+        --network host \
+        -e TZ="${TZ:-America/Toronto}" \
+        -v "$THOTH_ROOT/config/homeassistant:/config" \
+        ghcr.io/home-assistant/home-assistant:stable
+fi
 
 log "Installing systemd services"
 cat > /etc/systemd/system/thoth.service <<EOF
@@ -116,6 +134,7 @@ fi
 
 touch /etc/thoth-first-boot-done
 log "Thoth installation complete: http://thoth.local:5000"
+log "Home Assistant onboarding: http://thoth.local:8123"
 if [ ! -e /dev/spidev0.0 ]; then
     log "Reboot once to activate the newly enabled SPI radar interface"
 fi

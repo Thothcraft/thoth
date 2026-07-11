@@ -729,6 +729,9 @@ class DeviceManager:
                         if present and key in {'radar', 'csi', 'video', 'sense_hat'}
                     ),
                     'minute_files': file_count,
+                    'label': summary.get('label'),
+                    'labels': summary.get('labels', []),
+                    'occupancy': summary.get('occupancy'),
                 })
 
             files_list.sort(key=lambda item: str(item.get('modified') or ''), reverse=True)
@@ -749,7 +752,13 @@ class DeviceManager:
         try:
             files = self._get_data_files_list()
             signature = json.dumps(
-                [(item.get('name'), item.get('size'), item.get('modified')) for item in files],
+                [(
+                    item.get('name'),
+                    item.get('size'),
+                    item.get('modified'),
+                    item.get('labels'),
+                    item.get('occupancy'),
+                ) for item in files],
                 sort_keys=True,
             )
             if signature != self._last_file_report_signature or now - self._last_file_report_at >= 60:
