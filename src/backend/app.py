@@ -85,6 +85,19 @@ try:
 except Exception:  # pragma: no cover - import may fail on minimal installs
     CubeProcessor = None
 
+TRACK_EXAMPLE_DIR = MMW_RELEASE / 'example_2_track'
+if str(TRACK_EXAMPLE_DIR) not in sys.path:
+    sys.path.append(str(TRACK_EXAMPLE_DIR))
+
+try:
+    from signal_proc import SigProc
+    from utility.helper import parse_radar_cfg, read_uint12, split_samples
+except Exception:  # pragma: no cover - import may fail on minimal installs
+    SigProc = None
+    parse_radar_cfg = None
+    read_uint12 = None
+    split_samples = None
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -95,13 +108,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-RADAR_PLOTS = ('range-doppler', 'azimuth-range', 'azimuth-doppler')
+RADAR_PLOTS = ('range-doppler', 'azimuth-range', 'azimuth-doppler', 'xy-tracking')
 RADAR_PLOT_AXES = {
     'range-doppler': ('Range', 'Doppler'),
     'azimuth-range': ('Azimuth', 'Range'),
     'azimuth-doppler': ('Azimuth', 'Doppler'),
+    'xy-tracking': ('Y', 'X'),
 }
 RADAR_CONFIG_DIR = MMW_RELEASE / 'radar_config' / 'config_3rx_3m'
+RADAR_TRACKING_CONFIG = TRACK_EXAMPLE_DIR / 'config' / 'processing_config.json'
 CSI_NUMBER_RE = re.compile(r'[-+]?\d+(?:\.\d+)?')
 
 # Initialize Flask app
@@ -567,7 +582,12 @@ def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str
     if total_frames <= 0:
         raise RuntimeError('No radar frames available')
 
+    # These three heatmaps intentionally use the same CubeProcessor parameters,
+    # dimension pairs, reduction, and log scaling as MMW-HAT Example 1.
     mmw_proc = CubeProcessor(setting, num_azimuth_bin=16, num_elevation_bin=16)
+    tracking_proc = None
+    if all((SigProc, parse_radar_cfg, read_uint12, split_samples)) and RADAR_TRACKING_CONFIG.exists():
+        tracking_proc = SigProc(str(RADAR_TRACKING_CONFIG), parse_radar_cfg(setting))
     max_frames = min(60, total_frames)
     sample_indices = {1, total_frames}
     if max_frames > 2:
@@ -576,15 +596,35 @@ def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str
             sample_indices.add(max(1, min(total_frames, target)))
     sample_indices = set(sorted(sample_indices))
     frames_by_plot: Dict[str, List[Dict[str, Any]]] = {plot: [] for plot in RADAR_PLOTS}
+    heatmap_plots = RADAR_PLOTS[:3]
 
     for index, (seq, raw_data) in enumerate(_iter_radar_frames(radar_path), start=1):
+        tracking_result = None
+        if tracking_proc is not None:
+            try:
+                radar_param = tracking_proc.radar_config
+                adc_data = read_uint12(raw_data)
+                split = split_samples(
+                    adc_data,
+                    1,
+                    radar_param['num_chirps_per_frame'],
+                    radar_param['num_samples_per_chirp'],
+                    radar_param['num_antennas'],
+                )
+                tracking_frame = np.transpose(split[0], (2, 0, 1))
+                location, score, gui_plot = tracking_proc.update(tracking_frame)
+                tracking_result = (location, score, gui_plot)
+            except Exception as exc:
+                logger.warning('Radar X-Y tracking failed for frame %s: %s', index, exc)
+                tracking_proc = None
+
         if index not in sample_indices:
             continue
         mmw_proc.process_raw_data(raw_data)
         if mmw_proc.data_cube_fft is None:
             continue
 
-        for plot in RADAR_PLOTS:
+        for plot in heatmap_plots:
             axis_names = RADAR_PLOT_AXES[plot]
             img = mmw_proc.vis_2d(axis_names[0], axis_names[1])
             img = np.log10(np.maximum(img, 1e-9))
@@ -599,6 +639,20 @@ def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str
                 'x': x_values,
                 'y': y_values,
                 'z': img.tolist(),
+            })
+
+        if tracking_result is not None:
+            location, score, gui_plot = tracking_result
+            location_values = np.asarray(location, dtype=float)
+            safe_location = [float(value) if np.isfinite(value) else None for value in location_values]
+            frames_by_plot['xy-tracking'].append({
+                'seq': seq,
+                'index': index,
+                'x': np.asarray(gui_plot['x_axis'], dtype=float).tolist(),
+                'y': np.asarray(gui_plot['y_axis'], dtype=float).tolist(),
+                'z': np.asarray(gui_plot['map'], dtype=float).T.tolist(),
+                'location': safe_location,
+                'score': float(score) if np.isfinite(score) else None,
             })
 
     bundle: Dict[str, Dict[str, Any]] = {}
@@ -622,6 +676,12 @@ def _radar_animation_bundle(path_str: str, mtime_ns: int, size: int) -> Dict[str
             'frame_interval_ms': 120,
             'updated': datetime.utcnow().isoformat(),
         }
+        if plot == 'xy-tracking':
+            bundle[plot]['title'] = 'X-Y Tracking'
+            bundle[plot]['x_label'] = 'X (forward, m)'
+            bundle[plot]['y_label'] = 'Y (lateral, m)'
+            bundle[plot]['location'] = latest.get('location')
+            bundle[plot]['score'] = latest.get('score')
     return bundle
 
 
@@ -1801,6 +1861,48 @@ def upload_capture_minute(minute):
                 errors.append(f"{path.name}: {response.status_code} {detail}".strip())
         except Exception as exc:
             errors.append(f"{path.name}: {exc}")
+
+    # Upload browser-ready products so ResearchPortal does not need the radar
+    # hardware libraries or the original multi-megabyte capture to visualize it.
+    generated = []
+    radar_path = files.get('radar')
+    if radar_path and radar_path.exists():
+        for plot in RADAR_PLOTS:
+            try:
+                generated.append((f'{minute_dir.name}_radar-{plot}.json', _radar_plot_payload(radar_path, plot), f'radar-{plot}'))
+            except Exception as exc:
+                errors.append(f'radar-{plot}: {exc}')
+    csi_path = files.get('csi_timestamped') or files.get('csi_csv') or files.get('csi_serial')
+    if csi_path and csi_path.exists():
+        try:
+            generated.append((f'{minute_dir.name}_csi-plot.json', _csi_plot_payload(csi_path), 'csi-plot'))
+        except Exception as exc:
+            errors.append(f'csi-plot: {exc}')
+    # The minute-named manifest completes the DeviceFile upload request in Brain.
+    generated.append((minute_dir.name, summary, 'capture-manifest'))
+
+    for filename, document, key in generated:
+        try:
+            raw = json.dumps(document, default=str).encode('utf-8')
+            response = requests.post(
+                f"{Config.BRAIN_SERVER_URL}/api/file/upload",
+                json={
+                    'filename': filename,
+                    'content': base64.b64encode(raw).decode('ascii'),
+                    'is_base64': True,
+                    'device_id': device_id,
+                    'content_type': 'application/json',
+                    'metadata': {'source': 'thoth_device', 'minute': minute_dir.name, 'file_kind': key},
+                },
+                headers={'Authorization': f'Bearer {auth_token}', 'Content-Type': 'application/json'},
+                timeout=120,
+            )
+            if response.status_code in (200, 201):
+                uploaded.append({'name': filename, 'bytes': len(raw)})
+            else:
+                errors.append(f'{filename}: {response.status_code} {response.text[:300]}')
+        except Exception as exc:
+            errors.append(f'{filename}: {exc}')
 
     return jsonify({
         'status': 'success' if not errors else 'partial',

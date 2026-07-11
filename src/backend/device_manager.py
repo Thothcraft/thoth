@@ -46,6 +46,8 @@ class DeviceManager:
         self.device_settings = self.load_device_settings()
         self._last_file_report_at = 0.0
         self._last_file_report_signature = None
+        self._uploading_minutes: set[str] = set()
+        self._uploading_minutes_lock = threading.Lock()
 
         # Device status
         self.status = {
@@ -324,6 +326,38 @@ class DeviceManager:
             settings = data.get('capture_settings')
         if isinstance(settings, dict):
             self.save_capture_settings(settings)
+        pending = result.get('pending_uploads')
+        if pending is None and isinstance(data, dict):
+            pending = data.get('pending_uploads')
+        if isinstance(pending, list):
+            for minute in pending:
+                minute = str(minute)
+                with self._uploading_minutes_lock:
+                    if minute in self._uploading_minutes:
+                        continue
+                    self._uploading_minutes.add(minute)
+                threading.Thread(
+                    target=self._upload_requested_minute,
+                    args=(minute,),
+                    name=f"MinuteUpload-{minute}",
+                    daemon=True,
+                ).start()
+
+    def _upload_requested_minute(self, minute: str) -> None:
+        """Ask the local web app to prepare and upload one complete capture."""
+        try:
+            port = int(getattr(self.config, 'PORT', 5000) or 5000)
+            response = requests.post(
+                f"http://127.0.0.1:{port}/api/captures/{minute}/upload",
+                timeout=600,
+            )
+            if response.status_code not in (200, 201):
+                logger.error("Minute upload %s failed: %s %s", minute, response.status_code, response.text[:300])
+        except Exception as exc:
+            logger.error("Minute upload %s failed: %s", minute, exc)
+        finally:
+            with self._uploading_minutes_lock:
+                self._uploading_minutes.discard(minute)
 
     def load_model_registry(self) -> Dict[str, Any]:
         default = {'models': []}
@@ -677,12 +711,15 @@ class DeviceManager:
                     'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
                     'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
                     'type': 'minute',
-                    'data_type': 'minute',
+                    'data_type': 'minute:' + ','.join(
+                        key for key, present in (summary.get('files') or {}).items()
+                        if present and key in {'radar', 'csi', 'video', 'sense_hat'}
+                    ),
                     'minute_files': file_count,
                 })
 
             files_list.sort(key=lambda item: str(item.get('modified') or ''), reverse=True)
-            limit = int(getattr(self.config, 'CAPTURE_FILE_REPORT_LIMIT', 120) or 120)
+            limit = int(getattr(self.config, 'CAPTURE_FILE_REPORT_LIMIT', 300) or 300)
             if limit > 0 and len(files_list) > limit:
                 files_list = files_list[:limit]
 
