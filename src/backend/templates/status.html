@@ -57,7 +57,10 @@
           </div>
           <div class="text-right">
             {% if minute.labels %}
-            <div class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">{{ minute.labels|join(', ') }}</div>
+            <div class="text-right">
+              <div class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">{{ minute.labels|join(', ') }}</div>
+              {% if minute.occupancy and minute.occupancy.evaluated_frames %}<div class="mt-1 text-xs text-slate-500">{{ minute.occupancy.detected_frames }} / {{ minute.occupancy.evaluated_frames }} detected</div>{% endif %}
+            </div>
             {% else %}
             <div class="text-xs text-slate-400">Unlabeled</div>
             {% endif %}

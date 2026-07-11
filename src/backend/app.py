@@ -120,7 +120,7 @@ RADAR_PLOT_AXES = {
 RADAR_CONFIG_DIR = MMW_RELEASE / 'radar_config' / 'config_3rx_3m'
 RADAR_TRACKING_CONFIG = TRACK_EXAMPLE_DIR / 'config' / 'processing_config.json'
 CSI_NUMBER_RE = re.compile(r'[-+]?\d+(?:\.\d+)?')
-RADAR_CACHE_VERSION = 3
+RADAR_CACHE_VERSION = 4
 _radar_cache_lock = threading.RLock()
 
 # Initialize Flask app
@@ -693,11 +693,11 @@ def _radar_animation_bundle(
     bundle: Dict[str, Dict[str, Any]] = {}
     occupancy_ratio = detected_frames / evaluated_frames if evaluated_frames else 0.0
     occupancy = {
-        'label': 'occupied' if occupancy_ratio > 0.5 else 'empty',
+        'label': 'occupied' if detected_frames * 2 >= evaluated_frames else 'empty',
         'detected_frames': detected_frames,
         'evaluated_frames': evaluated_frames,
         'ratio': occupancy_ratio,
-        'rule': 'occupied when more than 50% of radar frames contain a confirmed target',
+        'rule': 'occupied when the detected-frame percentage meets the configured threshold',
     }
     for plot in RADAR_PLOTS:
         frames = frames_by_plot[plot]
@@ -771,8 +771,20 @@ def _radar_plot_payload(radar_path: Path, plot: str) -> Dict[str, Any]:
     payload = bundle.get(plot)
     if not payload:
         raise RuntimeError('No radar frames available')
+    occupancy = payload.get('occupancy') or {}
+    detected_frames = max(0, int(occupancy.get('detected_frames') or 0))
+    evaluated_frames = max(0, int(occupancy.get('evaluated_frames') or 0))
+    occupancy['detected_frames'] = detected_frames
+    occupancy['evaluated_frames'] = evaluated_frames
+    occupancy['ratio'] = detected_frames / evaluated_frames if evaluated_frames else 0.0
+    try:
+        threshold_percent = min(100.0, max(0.0, float(settings.get('occupancy_threshold_percent', 50.0))))
+    except (TypeError, ValueError):
+        threshold_percent = 50.0
+    occupancy['threshold_percent'] = threshold_percent
+    occupancy['label'] = 'occupied' if evaluated_frames and detected_frames * 100 >= threshold_percent * evaluated_frames else 'empty'
+    payload['occupancy'] = occupancy
     if settings.get('auto_occupancy_label_enabled', True):
-        occupancy = payload.get('occupancy') or {}
         label = occupancy.get('label')
         manifest_path = radar_path.parent / 'manifest.json'
         if label in {'empty', 'occupied'} and manifest_path.exists():
@@ -813,6 +825,41 @@ def _prewarm_latest_radar_playback() -> None:
             break
     except Exception as exc:
         logger.warning('Radar playback prewarm failed: %s', exc)
+
+
+def _relabel_cached_occupancy(threshold_percent: float) -> int:
+    """Apply a changed percentage threshold to minutes already evaluated."""
+    updated = 0
+    for summary in list_minutes():
+        minute_dir = get_minute(str(summary.get('minute', '')))
+        if not minute_dir:
+            continue
+        manifest_path = minute_dir / 'manifest.json'
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+            occupancy = manifest.get('auto_occupancy_label')
+            if not isinstance(occupancy, dict):
+                continue
+            previous_threshold = occupancy.get('threshold_percent')
+            detected = max(0, int(occupancy.get('detected_frames') or 0))
+            total = max(0, int(occupancy.get('evaluated_frames') or 0))
+            label = 'occupied' if total and detected * 100 >= threshold_percent * total else 'empty'
+            occupancy.update({
+                'detected_frames': detected,
+                'evaluated_frames': total,
+                'ratio': detected / total if total else 0.0,
+                'threshold_percent': threshold_percent,
+                'label': label,
+            })
+            if manifest.get('labels') != [label] or previous_threshold != threshold_percent:
+                manifest['labels'] = [label]
+                manifest['primary_label'] = label
+                manifest['auto_occupancy_label'] = occupancy
+                manifest_path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+                updated += 1
+        except Exception as exc:
+            logger.warning('Unable to relabel %s: %s', minute_dir.name, exc)
+    return updated
 
 
 def _render_live_radar_png(radar_path: Path, plot: str) -> bytes:
@@ -1364,8 +1411,11 @@ def settings():
             'cloud_sync_allowed': str(payload.get('cloud_sync_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
             'radar_detection_threshold_db': payload.get('radar_detection_threshold_db', 8.0),
             'auto_occupancy_label_enabled': str(payload.get('auto_occupancy_label_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
+            'occupancy_threshold_percent': payload.get('occupancy_threshold_percent', 50.0),
         }
         saved = device_manager.save_device_settings(updates)
+        if saved.get('auto_occupancy_label_enabled', True):
+            _relabel_cached_occupancy(float(saved.get('occupancy_threshold_percent', 50.0)))
         if request.is_json:
             return jsonify({'success': True, 'settings': saved})
         flash('Settings saved', 'success')
@@ -1406,6 +1456,8 @@ def api_settings():
         return jsonify({'success': True, 'settings': device_manager.get_device_settings()})
     payload = request.get_json(silent=True) or {}
     saved = device_manager.save_device_settings(payload)
+    if saved.get('auto_occupancy_label_enabled', True):
+        _relabel_cached_occupancy(float(saved.get('occupancy_threshold_percent', 50.0)))
     return jsonify({'success': True, 'settings': saved})
 
 

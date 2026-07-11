@@ -138,6 +138,22 @@
     const valueLabel = isTracking ? 'Track score' : 'Power';
     const colorbarTitle = isTracking ? 'track history' : 'log power';
 
+    function renderOccupancySummary() {
+      if (!isTracking || !data.occupancy) return;
+      const detected = Number(data.occupancy.detected_frames) || 0;
+      const total = Number(data.occupancy.evaluated_frames) || 0;
+      const percent = total ? Math.round(detected * 1000 / total) / 10 : 0;
+      const threshold = Number(data.occupancy.threshold_percent ?? 50);
+      let summary = host.parentElement?.querySelector('[data-radar-occupancy]');
+      if (!summary && host.parentElement) {
+        summary = document.createElement('div');
+        summary.setAttribute('data-radar-occupancy', 'true');
+        summary.className = 'mt-2 text-xs font-semibold text-slate-600';
+        host.parentElement.appendChild(summary);
+      }
+      if (summary) summary.textContent = `${data.occupancy.label}: ${detected} / ${total} frames detected (${percent}%); occupied at ≥ ${threshold}%`;
+    }
+
     function frameImage(frame) {
       if (Array.isArray(frame?.z)) return frame.z;
       if (!Array.isArray(frame?.z_shape) || !Array.isArray(frame?.z_sparse)) return [];
@@ -186,6 +202,7 @@
       }];
       if (isTracking) staticTraces.push(trackingMarker(data.location, data.score, data.detected, data.snr_db, data.threshold_db));
       await Plotly.newPlot(host, staticTraces, staticLayout, plotConfig());
+      renderOccupancySummary();
       return;
     }
 
@@ -221,6 +238,7 @@
       }
       await Plotly.addFrames(host, frames);
     }
+    renderOccupancySummary();
   }
 
   window.ThothPlayback = {

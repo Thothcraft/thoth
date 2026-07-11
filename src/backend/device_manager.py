@@ -169,6 +169,7 @@ class DeviceManager:
             'auto_registration_enabled': True,
             'radar_detection_threshold_db': 8.0,
             'auto_occupancy_label_enabled': True,
+            'occupancy_threshold_percent': 50.0,
         }
 
     def _coerce_setting_value(self, key: str, value: Any) -> Any:
@@ -177,6 +178,11 @@ class DeviceManager:
                 return min(40.0, max(0.0, float(value)))
             except (TypeError, ValueError):
                 return 8.0
+        if key == 'occupancy_threshold_percent':
+            try:
+                return min(100.0, max(0.0, float(value)))
+            except (TypeError, ValueError):
+                return 50.0
         if key.endswith('_allowed') or key.startswith('auto_'):
             if isinstance(value, bool):
                 return value

@@ -29,6 +29,9 @@
                     {% endfor %}
                 </div>
                 {% endif %}
+                {% if minute_info.occupancy and minute_info.occupancy.evaluated_frames %}
+                <p class="mt-2 text-sm text-slate-600">{{ minute_info.occupancy.detected_frames }} / {{ minute_info.occupancy.evaluated_frames }} radar frames detected ({{ '%.1f'|format(minute_info.occupancy.ratio * 100) }}%).</p>
+                {% endif %}
                 <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
                     <input id="minute-label-input" type="text" placeholder="Comma-separated labels"
                         class="w-full rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-900 outline-none placeholder:text-slate-400 sm:max-w-xl" />

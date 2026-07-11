@@ -411,6 +411,7 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
         "capture_finished": manifest.get("capture_finished") if isinstance(manifest, dict) else None,
         "seconds_recorded": seconds_recorded,
         "labels": labels,
+        "occupancy": manifest.get("auto_occupancy_label") if isinstance(manifest, dict) else None,
         "predictions": bool(files["predictions"] and files["predictions"].exists()),
         "files": {
             "video": bool(files["video"] and files["video"].exists()),

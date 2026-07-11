@@ -163,6 +163,9 @@
                             {% else %}
                                 <span class="text-gray-400">Unlabeled</span>
                             {% endif %}
+                            {% if minute.occupancy and minute.occupancy.evaluated_frames %}
+                                <div class="mt-1 text-xs text-gray-500">{{ minute.occupancy.detected_frames }} / {{ minute.occupancy.evaluated_frames }} frames detected</div>
+                            {% endif %}
                         </td>
                         <td class="py-3 pr-4">
                             <span class="inline-flex items-center text-sm {% if minute.files.video %}text-green-700{% else %}text-gray-400{% endif %}">
@@ -418,13 +421,16 @@ function renderCaptureRow(minute) {
     ? minute.labels.map(escapeHtml).join(', ')
     : '<span class="text-gray-400">Unlabeled</span>';
   const urls = minute.urls || {};
+  const occupancy = minute.occupancy && Number(minute.occupancy.evaluated_frames) > 0
+    ? `<div class="mt-1 text-xs text-gray-500">${Number(minute.occupancy.detected_frames) || 0} / ${Number(minute.occupancy.evaluated_frames)} frames detected</div>`
+    : '';
   const openUrl = urls.open || `/captures/${encodeURIComponent(minute.minute)}`;
   const downloadUrl = urls.download || `/captures/${encodeURIComponent(minute.minute)}/download`;
   return `
     <tr data-minute="${name}" class="${minute.minute === activeMinute ? 'bg-blue-50' : ''}">
       <td class="py-3 pr-4"><input type="checkbox" class="capture-select h-4 w-4" value="${name}" aria-label="Select capture ${name}" ${selectedMinutes.has(minute.minute) ? 'checked' : ''}></td>
       <td class="py-3 pr-4 font-mono text-sm text-gray-900">${name}</td>
-      <td class="py-3 pr-4 text-sm text-gray-700">${labels}</td>
+      <td class="py-3 pr-4 text-sm text-gray-700">${labels}${occupancy}</td>
       <td class="py-3 pr-4">${statusCell(Boolean(minute.files?.video))}</td>
       <td class="py-3 pr-4">${statusCell(Boolean(minute.files?.radar))}</td>
       <td class="py-3 pr-4">${statusCell(Boolean(minute.files?.csi))}</td>
