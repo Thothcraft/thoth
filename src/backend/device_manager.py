@@ -168,6 +168,7 @@ class DeviceManager:
             'cloud_sync_allowed': True,
             'auto_registration_enabled': True,
             'radar_detection_threshold_db': 8.0,
+            'auto_occupancy_label_enabled': True,
         }
 
     def _coerce_setting_value(self, key: str, value: Any) -> Any:

@@ -43,6 +43,13 @@ class SigProc:
         self.x_bin = np.arange(0, self.processing_config["max_x"], self.processing_config["spatial_resolution"])
         self.y_bin = np.arange(-self.processing_config["max_y"], self.processing_config["max_y"],
                                self.processing_config["spatial_resolution"])
+        self.xy_marker_half_width_cells = max(
+            1,
+            int(np.ceil(
+                self.processing_config.get("marker_half_width_m", 0.1)
+                / self.processing_config["spatial_resolution"]
+            )),
+        )
         self.dead_zone = self.processing_config["dead_zone"]
 
         self.detection_num_frames = self.processing_config["detection"]["num_frames"]
@@ -160,7 +167,7 @@ class SigProc:
         }
 
         xy_map = range_angle_map_2_x_y_map_binary(beam_range_map, self.range_bin, self.angle_bin, self.x_bin,
-                                                  self.y_bin, 2)
+                                                  self.y_bin, self.xy_marker_half_width_cells)
         self.xy_map_buffer.append(xy_map)
 
         weights = self.buffer_decay ** np.arange(len(self.xy_map_buffer))

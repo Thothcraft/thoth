@@ -138,6 +138,18 @@
     const valueLabel = isTracking ? 'Track score' : 'Power';
     const colorbarTitle = isTracking ? 'track history' : 'log power';
 
+    function frameImage(frame) {
+      if (Array.isArray(frame?.z)) return frame.z;
+      if (!Array.isArray(frame?.z_shape) || !Array.isArray(frame?.z_sparse)) return [];
+      const rows = Number(frame.z_shape[0]) || 0;
+      const columns = Number(frame.z_shape[1]) || 0;
+      const image = Array.from({ length: rows }, () => Array(columns).fill(0));
+      frame.z_sparse.forEach((cell) => {
+        if (Array.isArray(cell) && image[cell[0]] && cell[1] < columns) image[cell[0]][cell[1]] = cell[2];
+      });
+      return image;
+    }
+
     function trackingMarker(location, score, detected, snrDb, thresholdDb) {
       const valid = detected === true && Array.isArray(location) && Number.isFinite(location[0]) && Number.isFinite(location[1]);
       return {
@@ -182,7 +194,7 @@
         type: 'heatmap',
         x: Array.isArray(frame.x) && frame.x.length ? frame.x : xValues,
         y: Array.isArray(frame.y) && frame.y.length ? frame.y : yValues,
-        z: Array.isArray(frame.z) ? frame.z : [],
+        z: frameImage(frame),
         colorscale: 'Viridis',
         zsmooth: false,
         hoverongaps: false,

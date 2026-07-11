@@ -6,7 +6,8 @@
     "xy_map": 1,
     "max_x": 5,
     "max_y": 5,
-    "spatial_resolution": 0.05,
+    "spatial_resolution": 0.025,
+    "marker_half_width_m": 0.1,
     "dead_zone": 1.0,
     "detection": {
         "num_frames": 5,

@@ -27,6 +27,8 @@ except Exception:  # pragma: no cover - optional on minimal installs
 import requests
 import tempfile
 import zipfile
+import gzip
+import pickle
 from datetime import datetime, timedelta
 from pathlib import Path
 from collections import deque
@@ -118,6 +120,8 @@ RADAR_PLOT_AXES = {
 RADAR_CONFIG_DIR = MMW_RELEASE / 'radar_config' / 'config_3rx_3m'
 RADAR_TRACKING_CONFIG = TRACK_EXAMPLE_DIR / 'config' / 'processing_config.json'
 CSI_NUMBER_RE = re.compile(r'[-+]?\d+(?:\.\d+)?')
+RADAR_CACHE_VERSION = 3
+_radar_cache_lock = threading.RLock()
 
 # Initialize Flask app
 app = Flask(__name__, template_folder='templates', static_folder='static')
@@ -580,6 +584,17 @@ def _radar_animation_bundle(
     if np is None or CubeProcessor is None:
         raise RuntimeError('Radar plotting dependencies are unavailable')
 
+    cache_path = radar_path.parent / (
+        '.radar-playback-v%d-%.1f.pkl.gz' % (RADAR_CACHE_VERSION, detection_threshold_db)
+    )
+    with _radar_cache_lock:
+        if cache_path.exists() and cache_path.stat().st_mtime_ns >= radar_path.stat().st_mtime_ns:
+            try:
+                with gzip.open(cache_path, 'rb') as handle:
+                    return pickle.load(handle)
+            except Exception:
+                cache_path.unlink(missing_ok=True)
+
     setting = _radar_setting()
     if not setting:
         raise RuntimeError('Radar settings not found')
@@ -604,6 +619,8 @@ def _radar_animation_bundle(
     sample_indices = set(sorted(sample_indices))
     frames_by_plot: Dict[str, List[Dict[str, Any]]] = {plot: [] for plot in RADAR_PLOTS}
     heatmap_plots = RADAR_PLOTS[:3]
+    detected_frames = 0
+    evaluated_frames = 0
 
     for index, (seq, raw_data) in enumerate(_iter_radar_frames(radar_path), start=1):
         tracking_result = None
@@ -621,6 +638,9 @@ def _radar_animation_bundle(
                 tracking_frame = np.transpose(split[0], (2, 0, 1))
                 location, score, gui_plot = tracking_proc.update(tracking_frame)
                 tracking_result = (location, score, gui_plot, dict(tracking_proc.last_detection))
+                evaluated_frames += 1
+                if tracking_proc.last_detection.get('detected'):
+                    detected_frames += 1
             except Exception as exc:
                 logger.warning('Radar X-Y tracking failed for frame %s: %s', index, exc)
                 tracking_proc = None
@@ -652,12 +672,15 @@ def _radar_animation_bundle(
             location, score, gui_plot, detection = tracking_result
             location_values = np.asarray(location, dtype=float)
             safe_location = [float(value) if np.isfinite(value) else None for value in location_values]
+            xy_image = np.asarray(gui_plot['map'], dtype=float).T
+            active = np.argwhere(xy_image > 0)
             frames_by_plot['xy-tracking'].append({
                 'seq': seq,
                 'index': index,
                 'x': np.asarray(gui_plot['x_axis'], dtype=float).tolist(),
                 'y': np.asarray(gui_plot['y_axis'], dtype=float).tolist(),
-                'z': np.asarray(gui_plot['map'], dtype=float).T.tolist(),
+                'z_sparse': [[int(row), int(column), float(xy_image[row, column])] for row, column in active],
+                'z_shape': [int(xy_image.shape[0]), int(xy_image.shape[1])],
                 'location': safe_location,
                 'score': float(score) if np.isfinite(score) else None,
                 'detected': bool(detection.get('detected')),
@@ -668,12 +691,26 @@ def _radar_animation_bundle(
             })
 
     bundle: Dict[str, Dict[str, Any]] = {}
+    occupancy_ratio = detected_frames / evaluated_frames if evaluated_frames else 0.0
+    occupancy = {
+        'label': 'occupied' if occupancy_ratio > 0.5 else 'empty',
+        'detected_frames': detected_frames,
+        'evaluated_frames': evaluated_frames,
+        'ratio': occupancy_ratio,
+        'rule': 'occupied when more than 50% of radar frames contain a confirmed target',
+    }
     for plot in RADAR_PLOTS:
         frames = frames_by_plot[plot]
         if not frames:
             continue
         latest = frames[-1]
         axis_names = RADAR_PLOT_AXES[plot]
+        latest_z = latest.get('z')
+        if latest_z is None and latest.get('z_shape'):
+            rows, columns = latest['z_shape']
+            latest_z = [[0.0] * columns for _ in range(rows)]
+            for row, column, value in latest.get('z_sparse', []):
+                latest_z[row][column] = value
         bundle[plot] = {
             'plot': plot,
             'title': f'{axis_names[0]} vs {axis_names[1]}',
@@ -681,12 +718,13 @@ def _radar_animation_bundle(
             'y_label': axis_names[0],
             'x': latest['x'],
             'y': latest['y'],
-            'z': latest['z'],
+            'z': latest_z,
             'frames': frames,
             'frame_count': total_frames,
             'sample_count': len(frames),
             'frame_interval_ms': 120,
             'updated': datetime.utcnow().isoformat(),
+            'occupancy': occupancy,
         }
         if plot == 'xy-tracking':
             bundle[plot]['title'] = 'X-Y Tracking'
@@ -699,6 +737,14 @@ def _radar_animation_bundle(
             bundle[plot]['threshold_db'] = latest.get('threshold_db')
             bundle[plot]['peak_power_db'] = latest.get('peak_power_db')
             bundle[plot]['noise_floor_db'] = latest.get('noise_floor_db')
+    with _radar_cache_lock:
+        try:
+            temporary = cache_path.with_suffix(cache_path.suffix + '.tmp')
+            with gzip.open(temporary, 'wb', compresslevel=3) as handle:
+                pickle.dump(bundle, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            temporary.replace(cache_path)
+        except Exception as exc:
+            logger.warning('Unable to persist radar playback cache: %s', exc)
     return bundle
 
 
@@ -713,16 +759,60 @@ def _radar_plot_payload(radar_path: Path, plot: str) -> Dict[str, Any]:
         detection_threshold_db = min(40.0, max(0.0, float(settings.get('radar_detection_threshold_db', 8.0))))
     except (TypeError, ValueError):
         detection_threshold_db = 8.0
-    bundle = _radar_animation_bundle(
-        str(radar_path),
-        stat.st_mtime_ns,
-        stat.st_size,
-        detection_threshold_db,
-    )
+    # Four plot requests arrive together. Serialize the cache miss so only one
+    # request performs the expensive minute-wide FFT/tracking pass.
+    with _radar_cache_lock:
+        bundle = _radar_animation_bundle(
+            str(radar_path),
+            stat.st_mtime_ns,
+            stat.st_size,
+            detection_threshold_db,
+        )
     payload = bundle.get(plot)
     if not payload:
         raise RuntimeError('No radar frames available')
+    if settings.get('auto_occupancy_label_enabled', True):
+        occupancy = payload.get('occupancy') or {}
+        label = occupancy.get('label')
+        manifest_path = radar_path.parent / 'manifest.json'
+        if label in {'empty', 'occupied'} and manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+                if manifest.get('auto_occupancy_label') != occupancy:
+                    manifest['labels'] = [label]
+                    manifest['primary_label'] = label
+                    manifest['auto_occupancy_label'] = occupancy
+                    manifest_path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+            except Exception as exc:
+                logger.warning('Unable to save automatic occupancy label: %s', exc)
     return payload
+
+
+def _prewarm_latest_radar_playback() -> None:
+    """Process the newest completed minute before a user opens its plots."""
+    if collection_active:
+        return
+    try:
+        settings = device_manager.get_device_settings()
+        threshold = min(40.0, max(0.0, float(settings.get('radar_detection_threshold_db', 8.0))))
+        for summary in list_minutes()[:3]:
+            if not summary.get('capture_finished'):
+                continue
+            minute_dir = get_minute(str(summary.get('minute', '')))
+            if not minute_dir:
+                continue
+            radar_path = capture_files(minute_dir).get('radar')
+            if not radar_path or not radar_path.exists():
+                continue
+            cache_path = radar_path.parent / (
+                '.radar-playback-v%d-%.1f.pkl.gz' % (RADAR_CACHE_VERSION, threshold)
+            )
+            if cache_path.exists() and cache_path.stat().st_mtime_ns >= radar_path.stat().st_mtime_ns:
+                continue
+            _radar_plot_payload(radar_path, 'xy-tracking')
+            break
+    except Exception as exc:
+        logger.warning('Radar playback prewarm failed: %s', exc)
 
 
 def _render_live_radar_png(radar_path: Path, plot: str) -> bytes:
@@ -1016,6 +1106,14 @@ device_scheduler.add_job(
     id='capture_cleanup',
     replace_existing=True
 )
+device_scheduler.add_job(
+    _prewarm_latest_radar_playback,
+    'interval',
+    seconds=20,
+    id='radar_playback_prewarm',
+    max_instances=1,
+    replace_existing=True,
+)
 device_scheduler.start()
 
 # Load registration info if available
@@ -1265,6 +1363,7 @@ def settings():
             'deployment_requests_allowed': str(payload.get('deployment_requests_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
             'cloud_sync_allowed': str(payload.get('cloud_sync_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
             'radar_detection_threshold_db': payload.get('radar_detection_threshold_db', 8.0),
+            'auto_occupancy_label_enabled': str(payload.get('auto_occupancy_label_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
         }
         saved = device_manager.save_device_settings(updates)
         if request.is_json:

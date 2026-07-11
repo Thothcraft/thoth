@@ -35,6 +35,14 @@
 
       <label class="flex items-start justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
         <span>
+          <span class="block text-base font-semibold text-white">Automatic occupancy labels</span>
+          <span class="block text-sm text-slate-400">Label a minute occupied when more than 50% of its radar frames contain a confirmed X-Y target; otherwise label it empty.</span>
+        </span>
+        <input type="checkbox" name="auto_occupancy_label_enabled" class="mt-1 h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" {% if device_settings.auto_occupancy_label_enabled|default(true) %}checked{% endif %}>
+      </label>
+
+      <label class="flex items-start justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
+        <span>
           <span class="block text-base font-semibold text-white">Model deployment requests</span>
           <span class="block text-sm text-slate-400">Allow Brain to queue new model deployments for this device.</span>
         </span>
@@ -73,6 +81,7 @@ document.getElementById('settings-form').addEventListener('submit', async (event
   payload.deployment_requests_allowed = event.target.deployment_requests_allowed.checked;
   payload.cloud_sync_allowed = event.target.cloud_sync_allowed.checked;
   payload.radar_detection_threshold_db = Number(event.target.radar_detection_threshold_db.value);
+  payload.auto_occupancy_label_enabled = event.target.auto_occupancy_label_enabled.checked;
 
   const response = await fetch('/settings', {
     method: 'POST',
