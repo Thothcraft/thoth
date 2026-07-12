@@ -371,9 +371,11 @@ def _file_map(minute_dir: Path) -> Dict[str, Path]:
     csi_csv = files.get("wifi_csi_raw.csv")
     csi_timestamped = files.get("wifi_csi_timestamped.csv")
     csi_serial = files.get("wifi_csi_serial_all.jsonl")
+    xy_tracking = files.get("xy-tracking.json")
     result = {
         "manifest": files.get("manifest.json"),
         "predictions": files.get("predictions.json"),
+        "xy_tracking": xy_tracking,
         "video": files.get("usb_camera.mp4"),
         "video_log": files.get("usb_camera.ffmpeg.log"),
         "sense_hat": files.get("sense_hat.jsonl"),
@@ -388,6 +390,11 @@ def _file_map(minute_dir: Path) -> Dict[str, Path]:
         key=lambda p: p.name,
     )
     result["radar"] = radar_candidates[0] if radar_candidates else None
+    result["radar_bins"] = radar_candidates
+    result["radar_csvs"] = sorted(
+        [item for item in minute_dir.iterdir() if item.is_file() and item.name.startswith("mmw_radar_xy_") and item.suffix == ".csv"],
+        key=lambda p: p.name,
+    )
     return result
 
 
@@ -416,6 +423,7 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
         "files": {
             "video": bool(files["video"] and files["video"].exists()),
             "radar": bool(files["radar"] and files["radar"].exists()),
+            "xy_tracking": bool(files.get("xy_tracking") and files["xy_tracking"].exists()),
             "csi": bool((files["csi_csv"] and files["csi_csv"].exists()) or (files["csi_timestamped"] and files["csi_timestamped"].exists()) or (files["csi_serial"] and files["csi_serial"].exists())),
             "sense_hat": bool(files["sense_hat"] and files["sense_hat"].exists()),
             "manifest": bool(files["manifest"] and files["manifest"].exists()),
@@ -424,6 +432,7 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
         "sizes": {
             "video": files["video"].stat().st_size if files["video"] and files["video"].exists() else 0,
             "radar": files["radar"].stat().st_size if files["radar"] and files["radar"].exists() else 0,
+            "xy_tracking": files["xy_tracking"].stat().st_size if files.get("xy_tracking") and files["xy_tracking"].exists() else 0,
             "csi_csv": files["csi_csv"].stat().st_size if files["csi_csv"] and files["csi_csv"].exists() else 0,
             "csi_timestamped": files["csi_timestamped"].stat().st_size if files["csi_timestamped"] and files["csi_timestamped"].exists() else 0,
             "csi_serial": files["csi_serial"].stat().st_size if files["csi_serial"] and files["csi_serial"].exists() else 0,
@@ -448,18 +457,23 @@ def minute_metrics(minute_dir: Path) -> Dict[str, object]:
     radar_sampled = 0
     radar_shape = None
     radar_fps = None
-    if radar_path and radar_path.exists():
+    radar_paths = files.get("radar_bins") or ([radar_path] if radar_path else [])
+    if radar_paths:
         try:
-            radar_frames = _count_radar_frames(radar_path)
-            try:
-                with open(radar_path, 'rb') as handle:
-                    handle.read(8)
-                    payload_len_bytes = handle.read(4)
-                    if len(payload_len_bytes) == 4:
-                        payload_len = int.from_bytes(payload_len_bytes, byteorder='little', signed=False)
-                        radar_shape = f"{payload_len} bytes/frame"
-            except Exception:
-                radar_shape = None
+            for path in radar_paths:
+                if not path or not path.exists():
+                    continue
+                radar_frames += _count_radar_frames(path)
+                if radar_shape is None:
+                    try:
+                        with open(path, 'rb') as handle:
+                            handle.read(8)
+                            payload_len_bytes = handle.read(4)
+                            if len(payload_len_bytes) == 4:
+                                payload_len = int.from_bytes(payload_len_bytes, byteorder='little', signed=False)
+                                radar_shape = f"{payload_len} bytes/frame"
+                    except Exception:
+                        radar_shape = None
             radar_sampled = radar_frames
             if seconds_recorded and seconds_recorded > 0:
                 radar_fps = radar_frames / seconds_recorded
@@ -497,6 +511,7 @@ def minute_metrics(minute_dir: Path) -> Dict[str, object]:
             "effective_fps": radar_fps,
             "data_shape": radar_shape,
             "file_size": radar_path.stat().st_size if radar_path and radar_path.exists() else 0,
+            "chunk_count": len(radar_paths),
         },
         "manifest": manifest or {},
     }

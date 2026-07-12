@@ -30,7 +30,7 @@
                 </div>
                 {% endif %}
                 {% if minute_info.occupancy and minute_info.occupancy.evaluated_frames %}
-                <p class="mt-2 text-sm text-slate-600">{{ minute_info.occupancy.detected_frames }} / {{ minute_info.occupancy.evaluated_frames }} radar frames detected ({{ '%.1f'|format(minute_info.occupancy.ratio * 100) }}%).</p>
+                <p class="mt-2 text-sm text-slate-600">{{ minute_info.occupancy.detected_frames }} / {{ minute_info.occupancy.evaluated_frames }} tracked frames detected ({{ '%.1f'|format(minute_info.occupancy.ratio * 100) }}%).</p>
                 {% endif %}
                 <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
                     <input id="minute-label-input" type="text" placeholder="Comma-separated labels"
@@ -68,7 +68,7 @@
             </div>
             <div class="text-xs text-slate-500">Minute summary is derived from the manifest and stored data files.</div>
         </div>
-        <div class="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div class="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             <div class="rounded-2xl border border-slate-800 bg-white/5 p-4">
                 <div class="text-xs uppercase tracking-wide text-slate-500">Recorded window</div>
                 <div class="mt-2 text-2xl font-semibold text-white">{{ capture_metrics.seconds_recorded|round(1) if capture_metrics.seconds_recorded else 'N/A' }}s</div>
@@ -85,17 +85,7 @@
                 </div>
             </div>
             <div class="rounded-2xl border border-slate-800 bg-white/5 p-4">
-                <div class="text-xs uppercase tracking-wide text-slate-500">CSI</div>
-                <div class="mt-2 text-lg font-semibold text-white">
-                    {{ capture_metrics.csi.sample_count }} packets
-                    {% if capture_metrics.csi.subcarrier_count %} · {{ capture_metrics.csi.subcarrier_count }} subcarriers{% endif %}
-                </div>
-                <div class="mt-1 text-sm text-slate-400">
-                    {{ capture_metrics.csi.data_shape or 'Unknown shape' }}
-                </div>
-            </div>
-            <div class="rounded-2xl border border-slate-800 bg-white/5 p-4">
-                <div class="text-xs uppercase tracking-wide text-slate-500">Radar</div>
+                <div class="text-xs uppercase tracking-wide text-slate-500">Localization</div>
                 <div class="mt-2 text-lg font-semibold text-white">
                     {{ capture_metrics.radar.frame_count }} frames
                     {% if capture_metrics.radar.effective_fps %} · {{ capture_metrics.radar.effective_fps|round(1) }} fps{% endif %}
@@ -111,8 +101,7 @@
     <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <div class="flex flex-wrap gap-2 border-b border-slate-200 pb-4">
             <button class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50" onclick="showTab('video')">Video</button>
-            <button class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50" onclick="showTab('radar')">Radar</button>
-            <button class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50" onclick="showTab('csi')">CSI</button>
+            <button class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50" onclick="showTab('localization')">Localization</button>
             <button class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50" onclick="showTab('manifest')">Manifest</button>
         </div>
 
@@ -127,10 +116,10 @@
             {% endif %}
         </div>
 
-        <div id="tab-radar" class="tab-panel hidden pt-5">
-            {% if files.radar %}
+        <div id="tab-localization" class="tab-panel hidden pt-5">
+            {% if files.xy_tracking or files.radar %}
             {% if capture_metrics %}
-            <div class="mb-4 grid gap-3 md:grid-cols-3">
+            <div class="mb-4 grid gap-3 md:grid-cols-2">
                 <div class="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
                     <div class="text-xs uppercase tracking-wide text-slate-500">Recorded window</div>
                     <div class="mt-1 font-semibold text-slate-950">{{ capture_metrics.seconds_recorded|round(1) if capture_metrics.seconds_recorded else 'N/A' }}s</div>
@@ -139,59 +128,15 @@
                     <div class="text-xs uppercase tracking-wide text-slate-500">Frames</div>
                     <div class="mt-1 font-semibold text-slate-950">{{ capture_metrics.radar.frame_count }}</div>
                 </div>
-                <div class="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-                    <div class="text-xs uppercase tracking-wide text-slate-500">Data shape</div>
-                    <div class="mt-1 font-semibold text-slate-950">{{ capture_metrics.radar.data_shape or 'Unknown' }}</div>
-                </div>
             </div>
             {% endif %}
-            <div class="grid gap-4 xl:grid-cols-2">
-                <div class="rounded-2xl border border-slate-200 p-3">
-                    <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Range / Doppler</div>
-                    <div id="capture-radar-range-doppler" class="h-[420px]" data-url="{{ radar_data_urls[0] }}"></div>
-                </div>
-                <div class="rounded-2xl border border-slate-200 p-3">
-                    <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Azimuth / Range</div>
-                    <div id="capture-radar-azimuth-range" class="h-[420px]" data-url="{{ radar_data_urls[1] }}"></div>
-                </div>
-                <div class="rounded-2xl border border-slate-200 p-3">
-                    <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Azimuth / Doppler</div>
-                    <div id="capture-radar-azimuth-doppler" class="h-[420px]" data-url="{{ radar_data_urls[2] }}"></div>
-                </div>
-                <div class="rounded-2xl border border-slate-200 p-3">
-                    <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">X / Y Tracking</div>
-                    <div id="capture-radar-xy-tracking" class="h-[420px]" data-url="{{ radar_data_urls[3] }}"></div>
-                </div>
+            <div class="rounded-2xl border border-slate-200 p-3">
+                <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">X / Y localization</div>
+                <div id="capture-xy-tracking" class="h-[560px]" data-url="{{ xy_tracking_url }}"></div>
             </div>
             {% else %}
-            <p class="text-sm text-slate-500">No radar file found.</p>
+            <p class="text-sm text-slate-500">No localization file found.</p>
             {% endif %}
-        </div>
-
-        <div id="tab-csi" class="tab-panel hidden pt-5">
-            <div class="space-y-4">
-                {% if files.csi %}
-                {% if capture_metrics %}
-                <div class="grid gap-3 md:grid-cols-3">
-                    <div class="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-                        <div class="text-xs uppercase tracking-wide text-slate-500">Packets</div>
-                        <div class="mt-1 font-semibold text-slate-950">{{ capture_metrics.csi.sample_count }}</div>
-                    </div>
-                    <div class="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-                        <div class="text-xs uppercase tracking-wide text-slate-500">Subcarriers</div>
-                        <div class="mt-1 font-semibold text-slate-950">{{ capture_metrics.csi.subcarrier_count or 'Unknown' }}</div>
-                    </div>
-                    <div class="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-                        <div class="text-xs uppercase tracking-wide text-slate-500">Effective rate</div>
-                        <div class="mt-1 font-semibold text-slate-950">{{ capture_metrics.csi.effective_rate_hz|round(1) if capture_metrics.csi.effective_rate_hz else 'N/A' }} Hz</div>
-                    </div>
-                </div>
-                {% endif %}
-                <div id="capture-csi-chart" class="h-[520px]" data-url="{{ csi_data_url }}"></div>
-                {% else %}
-                <p class="text-sm text-slate-500">No CSI files found.</p>
-                {% endif %}
-            </div>
         </div>
 
         <div id="tab-manifest" class="tab-panel hidden pt-5">
@@ -203,13 +148,7 @@
 
 {% block scripts %}
 <script>
-const radarTargets = [
-  ['capture-radar-range-doppler', {{ radar_data_urls[0]|tojson if radar_data_urls|length > 0 else 'null' }}],
-  ['capture-radar-azimuth-range', {{ radar_data_urls[1]|tojson if radar_data_urls|length > 1 else 'null' }}],
-  ['capture-radar-azimuth-doppler', {{ radar_data_urls[2]|tojson if radar_data_urls|length > 2 else 'null' }}],
-  ['capture-radar-xy-tracking', {{ radar_data_urls[3]|tojson if radar_data_urls|length > 3 else 'null' }}],
-];
-const csiTarget = ['capture-csi-chart', {{ csi_data_url|tojson }}];
+const xyTarget = ['capture-xy-tracking', {{ xy_tracking_url|tojson }}];
 
 function showTab(name) {
     document.querySelectorAll('.tab-panel').forEach(el => el.classList.add('hidden'));
@@ -271,50 +210,27 @@ async function fetchJson(url) {
   return response.json();
 }
 
-async function renderCsi() {
-  const [id, url] = csiTarget;
-  const host = document.getElementById(id);
-  if (!host || !url || !window.ThothPlayback) return;
-  try {
-    const payload = await fetchJson(url);
-    await ThothPlayback.renderAnimatedLine(host, payload, {
-      title: 'Average CSI magnitude',
-      xLabel: 'Packet',
-      yLabel: 'Magnitude',
-      uirevision: 'capture-csi',
-    });
-  } catch (error) {
-    host.innerHTML = `<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">${String(error).replace(/[<>&]/g, '')}</div>`;
-  }
-}
-
-async function renderRadar() {
-  if (!window.ThothPlayback) return;
-  await Promise.all(radarTargets.map(async ([id, url]) => {
-    const host = document.getElementById(id);
-    if (!host || !url) return;
-    try {
-      const payload = await fetchJson(url);
-      await ThothPlayback.renderAnimatedHeatmap(host, payload, {
-        title: payload?.data?.title || 'Radar',
-        xLabel: payload?.data?.x_label || 'X',
-        yLabel: payload?.data?.y_label || 'Y',
-        uirevision: 'capture-radar',
-      });
-    } catch (error) {
-      host.innerHTML = `<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">${String(error).replace(/[<>&]/g, '')}</div>`;
-    }
-  }));
-}
-
 function initTabs() {
   showTab('video');
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
   initTabs();
-  await renderCsi();
-  await renderRadar();
+  if (!window.ThothPlayback) return;
+  const [id, url] = xyTarget;
+  const host = document.getElementById(id);
+  if (!host || !url) return;
+  try {
+    const payload = await fetchJson(url);
+    await ThothPlayback.renderAnimatedHeatmap(host, payload, {
+      title: payload?.title || 'X/Y localization',
+      xLabel: payload?.x_label || 'X',
+      yLabel: payload?.y_label || 'Y',
+      uirevision: 'capture-xy',
+    });
+  } catch (error) {
+    host.innerHTML = `<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">${String(error).replace(/[<>&]/g, '')}</div>`;
+  }
 });
 </script>
 {% endblock %}

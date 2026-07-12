@@ -112,12 +112,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-RADAR_PLOTS = ('range-doppler', 'azimuth-range', 'azimuth-doppler', 'xy-tracking')
+RADAR_PLOTS = ('xy-tracking',)
 RADAR_PLOT_AXES = {
-    'range-doppler': ('Range', 'Doppler'),
-    'azimuth-range': ('Azimuth', 'Range'),
-    'azimuth-doppler': ('Azimuth', 'Doppler'),
-    'xy-tracking': ('Y', 'X'),
+    'xy-tracking': ('X', 'Y'),
 }
 RADAR_CONFIG_DIR = MMW_RELEASE / 'radar_config' / 'config_3rx_3m'
 RADAR_TRACKING_CONFIG = TRACK_EXAMPLE_DIR / 'config' / 'processing_config.json'
@@ -1616,7 +1613,7 @@ def capture_detail(minute):
         files=files,
         capture_metrics=metrics,
         video_url=video_preview,
-        radar_data_urls=[url_for('api_capture_radar_data', minute=minute_dir.name, plot=plot) for plot in RADAR_PLOTS],
+        xy_tracking_url=url_for('api_capture_radar_data', minute=minute_dir.name, plot='xy-tracking'),
         csi_data_url=url_for('api_capture_csi_data', minute=minute_dir.name),
         radar_preview=radar_preview,
         csi_preview=csi_preview,
@@ -1872,6 +1869,7 @@ def api_capture_file(minute, kind):
     mapping = {
         'video': files.get('video'),
         'radar': files.get('radar'),
+        'xy_tracking': files.get('xy_tracking'),
         'csi_csv': files.get('csi_csv'),
         'csi_timestamped': files.get('csi_timestamped'),
         'csi_serial': files.get('csi_serial'),
@@ -1975,14 +1973,17 @@ def api_capture_radar_data(minute, plot):
         abort(404, description=f'Unsupported radar plot kind: {plot}')
 
     files = capture_files(minute_dir)
-    radar_path = files.get('radar')
-    if not radar_path or not radar_path.exists():
-        abort(404, description='No radar data available')
-
     try:
-        payload = _radar_plot_payload(radar_path, plot)
+        xy_payload_path = minute_dir / 'xy-tracking.json'
+        if xy_payload_path.exists():
+            payload = json.loads(xy_payload_path.read_text(encoding='utf-8'))
+        else:
+            radar_path = files.get('radar')
+            if not radar_path or not radar_path.exists():
+                abort(404, description='No xy localization data available')
+            payload = _radar_plot_payload(radar_path, plot)
     except Exception as exc:
-        logger.exception(f"Failed to build radar data {plot}: {exc}")
+        logger.exception(f"Failed to build xy data {plot}: {exc}")
         abort(500, description=str(exc))
 
     payload['metadata'] = minute_metrics(minute_dir)
@@ -2014,7 +2015,7 @@ def upload_capture_minute(minute):
     import base64
 
     for key, path in files.items():
-        if not path or not path.exists():
+        if not isinstance(path, Path) or not path.exists():
             continue
         if key in {'video_log'} and path.stat().st_size == 0:
             skipped.append(path.name)
@@ -2063,47 +2064,28 @@ def upload_capture_minute(minute):
         except Exception as exc:
             errors.append(f"{path.name}: {exc}")
 
-    # Upload browser-ready products so ResearchPortal does not need the radar
-    # hardware libraries or the original multi-megabyte capture to visualize it.
-    generated = []
-    radar_path = files.get('radar')
-    if radar_path and radar_path.exists():
-        for plot in RADAR_PLOTS:
-            try:
-                generated.append((f'{minute_dir.name}_radar-{plot}.json', _radar_plot_payload(radar_path, plot), f'radar-{plot}'))
-            except Exception as exc:
-                errors.append(f'radar-{plot}: {exc}')
-    csi_path = files.get('csi_timestamped') or files.get('csi_csv') or files.get('csi_serial')
-    if csi_path and csi_path.exists():
-        try:
-            generated.append((f'{minute_dir.name}_csi-plot.json', _csi_plot_payload(csi_path), 'csi-plot'))
-        except Exception as exc:
-            errors.append(f'csi-plot: {exc}')
     # The minute-named manifest completes the DeviceFile upload request in Brain.
-    generated.append((minute_dir.name, summary, 'capture-manifest'))
-
-    for filename, document, key in generated:
-        try:
-            raw = json.dumps(document, default=str).encode('utf-8')
-            response = requests.post(
-                f"{Config.BRAIN_SERVER_URL}/api/file/upload",
-                json={
-                    'filename': filename,
-                    'content': base64.b64encode(raw).decode('ascii'),
-                    'is_base64': True,
-                    'device_id': device_id,
-                    'content_type': 'application/json',
-                    'metadata': {'source': 'thoth_device', 'minute': minute_dir.name, 'file_kind': key},
-                },
-                headers={'Authorization': f'Bearer {auth_token}', 'Content-Type': 'application/json'},
-                timeout=120,
-            )
-            if response.status_code in (200, 201):
-                uploaded.append({'name': filename, 'bytes': len(raw)})
-            else:
-                errors.append(f'{filename}: {response.status_code} {response.text[:300]}')
-        except Exception as exc:
-            errors.append(f'{filename}: {exc}')
+    try:
+        raw = json.dumps(summary, default=str).encode('utf-8')
+        response = requests.post(
+            f"{Config.BRAIN_SERVER_URL}/api/file/upload",
+            json={
+                'filename': minute_dir.name,
+                'content': base64.b64encode(raw).decode('ascii'),
+                'is_base64': True,
+                'device_id': device_id,
+                'content_type': 'application/json',
+                'metadata': {'source': 'thoth_device', 'minute': minute_dir.name, 'file_kind': 'capture-manifest'},
+            },
+            headers={'Authorization': f'Bearer {auth_token}', 'Content-Type': 'application/json'},
+            timeout=120,
+        )
+        if response.status_code in (200, 201):
+            uploaded.append({'name': minute_dir.name, 'bytes': len(raw)})
+        else:
+            errors.append(f'{minute_dir.name}: {response.status_code} {response.text[:300]}')
+    except Exception as exc:
+        errors.append(f'{minute_dir.name}: {exc}')
 
     return jsonify({
         'status': 'success' if not errors else 'partial',
@@ -2136,7 +2118,7 @@ def live_capture_stream(kind):
         video_url=url_for('api_live_capture_video'),
         video_frame_url=url_for('api_live_capture_video_frame'),
         csi_data_url=url_for('api_live_capture_csi_data'),
-        radar_data_urls=[url_for('api_live_capture_radar_data', plot=plot) for plot in RADAR_PLOTS],
+        xy_tracking_url=url_for('api_live_capture_radar_data', plot='xy-tracking'),
         has_video=has_video,
         has_csi=has_csi,
         has_radar=has_radar,
@@ -2229,14 +2211,17 @@ def api_live_capture_radar_data(plot):
     if not minute_dir:
         abort(404, description='No live capture minute available')
 
-    radar_path = files.get('radar')
-    if not radar_path or not radar_path.exists():
-        abort(404, description='No radar data available')
-
     try:
-        payload = _radar_plot_payload(radar_path, plot)
+        xy_payload_path = minute_dir / 'xy-tracking.json'
+        if xy_payload_path.exists():
+            payload = json.loads(xy_payload_path.read_text(encoding='utf-8'))
+        else:
+            radar_path = files.get('radar')
+            if not radar_path or not radar_path.exists():
+                abort(404, description='No xy localization data available')
+            payload = _radar_plot_payload(radar_path, plot)
     except Exception as exc:
-        logger.exception(f"Failed to build live radar data {plot}: {exc}")
+        logger.exception(f"Failed to build live xy data {plot}: {exc}")
         abort(500, description=str(exc))
 
     payload['metadata'] = minute_metrics(minute_dir)

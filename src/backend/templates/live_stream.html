@@ -8,7 +8,7 @@
 {% endblock %}
 
 {% block content %}
-{% set kind_label = 'Video' if kind == 'video' else 'CSI' if kind == 'csi' else 'Radar' %}
+{% set kind_label = 'Video' if kind == 'video' else 'Localization' %}
 <div class="space-y-6">
     <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -53,37 +53,15 @@
                 </div>
             </div>
         </div>
-        {% elif kind == 'csi' %}
-        <div class="space-y-3">
-            <div class="flex items-center justify-between text-sm text-slate-600">
-                <span>Average CSI magnitude</span>
-                <span id="csi-updated">Waiting</span>
-            </div>
-            <div id="live-csi-chart" class="h-[520px]"></div>
-        </div>
         {% else %}
         <div class="space-y-4">
             <div class="flex items-center justify-between text-sm text-slate-600">
-                <span>Range, Doppler, and azimuth views</span>
-                <span id="radar-updated">Waiting</span>
+                <span>X / Y localization</span>
+                <span id="localization-updated">Waiting</span>
             </div>
-            <div class="grid gap-4 xl:grid-cols-2">
-                <div class="rounded-2xl border border-slate-200 p-3">
-                    <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Range / Doppler</div>
-                    <div id="live-radar-range-doppler" class="h-[420px]"></div>
-                </div>
-                <div class="rounded-2xl border border-slate-200 p-3">
-                    <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Azimuth / Range</div>
-                    <div id="live-radar-azimuth-range" class="h-[420px]"></div>
-                </div>
-                <div class="rounded-2xl border border-slate-200 p-3">
-                    <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Azimuth / Doppler</div>
-                    <div id="live-radar-azimuth-doppler" class="h-[420px]"></div>
-                </div>
-                <div class="rounded-2xl border border-slate-200 p-3">
-                    <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">X / Y Tracking</div>
-                    <div id="live-radar-xy-tracking" class="h-[420px]"></div>
-                </div>
+            <div class="rounded-2xl border border-slate-200 p-3">
+                <div class="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">X / Y localization</div>
+                <div id="live-xy-tracking" class="h-[560px]"></div>
             </div>
         </div>
         {% endif %}
@@ -98,7 +76,7 @@
             </div>
             <div class="text-xs text-slate-500">Updates with the active minute and reflects the current capture window.</div>
         </div>
-        <div class="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div class="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             <div class="rounded-2xl border border-slate-800 bg-white/5 p-4">
                 <div class="text-xs uppercase tracking-wide text-slate-500">Recorded window</div>
                 <div class="mt-2 text-2xl font-semibold text-white">{{ live_metrics.seconds_recorded|round(1) if live_metrics.seconds_recorded else 'N/A' }}s</div>
@@ -112,12 +90,7 @@
                 <div class="mt-1 text-sm text-slate-400">{{ live_metrics.video.data_shape or 'Unknown resolution' }}</div>
             </div>
             <div class="rounded-2xl border border-slate-800 bg-white/5 p-4">
-                <div class="text-xs uppercase tracking-wide text-slate-500">CSI</div>
-                <div class="mt-2 text-lg font-semibold text-white">{{ live_metrics.csi.sample_count }} packets</div>
-                <div class="mt-1 text-sm text-slate-400">{{ live_metrics.csi.data_shape or 'Unknown shape' }}</div>
-            </div>
-            <div class="rounded-2xl border border-slate-800 bg-white/5 p-4">
-                <div class="text-xs uppercase tracking-wide text-slate-500">Radar</div>
+                <div class="text-xs uppercase tracking-wide text-slate-500">Localization</div>
                 <div class="mt-2 text-lg font-semibold text-white">{{ live_metrics.radar.frame_count }} frames</div>
                 <div class="mt-1 text-sm text-slate-400">{{ live_metrics.radar.data_shape or 'Unknown shape' }}</div>
             </div>
@@ -130,8 +103,7 @@
 {% block scripts %}
 <script>
 const kind = {{ kind|tojson }};
-const csiDataUrl = {{ csi_data_url|tojson }};
-const radarDataUrls = {{ radar_data_urls|tojson }};
+const xyTrackingUrl = {{ xy_tracking_url|tojson }};
 const videoFrame = document.getElementById('live-video-frame');
 const videoReload = document.getElementById('reload-video');
 
@@ -141,56 +113,6 @@ async function loadJson(url) {
     throw new Error(await response.text());
   }
   return response.json();
-}
-
-async function renderCsi() {
-  const host = document.getElementById('live-csi-chart');
-  const status = document.getElementById('csi-updated');
-  if (!host || !window.ThothPlayback) return;
-  try {
-    const payload = await loadJson(csiDataUrl);
-    await ThothPlayback.renderAnimatedLine(host, payload, {
-      title: 'Average CSI magnitude',
-      xLabel: 'Packet',
-      yLabel: 'Magnitude',
-      uirevision: 'live-csi',
-    });
-    if (status) status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
-  } catch (error) {
-    if (status) status.textContent = 'CSI unavailable';
-    host.innerHTML = `<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">${String(error).replace(/[<>&]/g, '')}</div>`;
-  }
-}
-
-async function renderRadar() {
-  const plots = [
-    ['live-radar-range-doppler', radarDataUrls[0]],
-    ['live-radar-azimuth-range', radarDataUrls[1]],
-    ['live-radar-azimuth-doppler', radarDataUrls[2]],
-    ['live-radar-xy-tracking', radarDataUrls[3]],
-  ];
-  const status = document.getElementById('radar-updated');
-  if (!window.ThothPlayback) return;
-  try {
-    await Promise.all(plots.map(async ([id, url]) => {
-      const host = document.getElementById(id);
-      if (!host) return;
-      const payload = await loadJson(url);
-      await ThothPlayback.renderAnimatedHeatmap(host, payload, {
-        title: payload?.data?.title || 'Radar',
-        xLabel: payload?.data?.x_label || 'X',
-        yLabel: payload?.data?.y_label || 'Y',
-        uirevision: 'live-radar',
-      });
-    }));
-    if (status) status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
-  } catch (error) {
-    if (status) status.textContent = 'Radar unavailable';
-    for (const [id] of plots) {
-      const host = document.getElementById(id);
-      if (host) host.innerHTML = `<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">${String(error).replace(/[<>&]/g, '')}</div>`;
-    }
-  }
 }
 
 function refreshVideo() {
@@ -205,12 +127,34 @@ if (videoReload) {
 
 if (kind === 'video') {
   setInterval(refreshVideo, 1500);
-} else if (kind === 'csi') {
-  renderCsi();
-  setInterval(renderCsi, 5000);
-} else if (kind === 'radar') {
-  renderRadar();
-  setInterval(renderRadar, 5000);
+} else {
+  const host = document.getElementById('live-xy-tracking');
+  const status = document.getElementById('localization-updated');
+  if (host && window.ThothPlayback) {
+    loadJson(xyTrackingUrl).then((payload) => {
+      return ThothPlayback.renderAnimatedHeatmap(host, payload, {
+        title: payload?.title || 'X/Y localization',
+        xLabel: payload?.x_label || 'X',
+        yLabel: payload?.y_label || 'Y',
+        uirevision: 'live-xy',
+      });
+    }).then(() => {
+      if (status) status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    }).catch((error) => {
+      if (status) status.textContent = 'Localization unavailable';
+      host.innerHTML = `<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">${String(error).replace(/[<>&]/g, '')}</div>`;
+    });
+    setInterval(() => {
+      loadJson(xyTrackingUrl).then((payload) => {
+        return ThothPlayback.renderAnimatedHeatmap(host, payload, {
+          title: payload?.title || 'X/Y localization',
+          xLabel: payload?.x_label || 'X',
+          yLabel: payload?.y_label || 'Y',
+          uirevision: 'live-xy',
+        });
+      }).catch(() => {});
+    }, 5000);
+  }
 }
 </script>
 {% endblock %}

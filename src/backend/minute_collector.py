@@ -21,8 +21,10 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from backend.config import Config  # type: ignore
+    from backend.radar_analysis import analyze_radar_chunk, compile_minute_xy_payload, load_room_config  # type: ignore
 else:
     from .config import Config
+    from .radar_analysis import analyze_radar_chunk, compile_minute_xy_payload, load_room_config
 
 THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / "WS" / "MMW-HAT" / "MMW-HAT-Release"
@@ -51,6 +53,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-radar", action="store_true", help="Skip mmWave radar capture.")
     parser.add_argument("--no-csi", action="store_true", help="Skip ESP32 CSI serial capture.")
     parser.add_argument("--no-sensehat", action="store_true", help="Skip Sense HAT capture.")
+    parser.add_argument(
+        "--chunk-seconds",
+        type=float,
+        default=10.0,
+        help="Radar capture and analysis chunk size in seconds.",
+    )
     parser.add_argument(
         "--label",
         action="append",
@@ -467,7 +475,10 @@ def main() -> int:
     csi_thread: threading.Thread | None = None
     sense_stop = threading.Event()
     sense_thread: threading.Thread | None = None
-    radar = None
+    radar_threads: list[threading.Thread] = []
+    radar_chunk_results: list[dict[str, Any]] = []
+    room_config = load_room_config()
+    chunk_seconds = max(1.0, float(args.chunk_seconds))
 
     try:
         if not args.no_csi and csi_port is not None:
@@ -527,19 +538,75 @@ def main() -> int:
             }
 
         if not args.no_radar:
-            radar_prefix = output_dir / "mmw_radar_raw"
-            radar_started = iso_now()
-            try:
-                radar = start_radar_capture(radar_prefix)
-                manifest["outputs"]["radar"] = {
-                    "path_prefix": str(radar_prefix),
-                    "type": "bin",
-                    "config_dir": str(RADAR_CFG),
+            manifest["outputs"]["radar"] = {
+                "type": "chunked-bin+csv",
+                "config_dir": str(RADAR_CFG),
+                "chunk_seconds": chunk_seconds,
+                "chunks": [],
+                "note": "Radar is captured and analyzed in 10-second windows so each chunk gets its own .bin and .csv pair.",
+            }
+            chunk_index = 0
+            while True:
+                remaining = stop_at - time.monotonic()
+                if remaining <= 0:
+                    break
+                current_chunk_seconds = min(chunk_seconds, remaining)
+                radar_prefix = output_dir / f"mmw_radar_raw_{chunk_index:02d}"
+                radar_started = iso_now()
+                radar = None
+                try:
+                    radar = start_radar_capture(radar_prefix)
+                    chunk_stop = time.monotonic() + current_chunk_seconds
+                    while True:
+                        remaining_chunk = chunk_stop - time.monotonic()
+                        if remaining_chunk <= 0:
+                            break
+                        time.sleep(min(remaining_chunk, 0.25))
+                except Exception as exc:
+                    manifest["warnings"].append(f"Radar chunk {chunk_index} failed to start: {exc}")
+                finally:
+                    stop_radar_capture(radar)
+
+                radar_files = sorted(output_dir.glob(f"mmw_radar_raw_{chunk_index:02d}_*.bin"))
+                if not radar_files:
+                    chunk_index += 1
+                    continue
+                radar_path = radar_files[-1]
+                csv_path = output_dir / f"mmw_radar_xy_{chunk_index:02d}.csv"
+                chunk_entry: dict[str, Any] = {
+                    "chunk_index": chunk_index,
+                    "bin_path": str(radar_path),
+                    "csv_path": str(csv_path),
                     "started": radar_started,
-                    "note": "Driver appends wall-clock timestamp and .bin extension to path_prefix.",
+                    "chunk_seconds": current_chunk_seconds,
+                    "status": "analyzing",
                 }
-            except Exception as exc:
-                manifest["warnings"].append(f"Radar unavailable for this minute: {exc}")
+
+                def _analyze(
+                    entry: dict[str, Any] = chunk_entry,
+                    idx: int = chunk_index,
+                    duration: float = current_chunk_seconds,
+                    bin_file: Path = radar_path,
+                    csv_file: Path = csv_path,
+                    room_snapshot: dict[str, Any] = room_config,
+                ) -> None:
+                    try:
+                        entry["result"] = analyze_radar_chunk(
+                            bin_file,
+                            csv_file,
+                            chunk_index=idx,
+                            chunk_seconds=duration,
+                            room=room_snapshot,
+                        )
+                    except Exception as exc:
+                        entry["error"] = str(exc)
+
+                thread = threading.Thread(target=_analyze, name=f"RadarChunk-{chunk_index}", daemon=True)
+                thread.start()
+                radar_threads.append(thread)
+                radar_chunk_results.append(chunk_entry)
+                manifest["outputs"]["radar"]["chunks"].append(chunk_entry)
+                chunk_index += 1
 
         while True:
             remaining = stop_at - time.monotonic()
@@ -552,13 +619,83 @@ def main() -> int:
     except Exception as exc:
         manifest["errors"].append(str(exc))
     finally:
-        stop_radar_capture(radar)
         csi_stop.set()
         if csi_thread is not None:
             csi_thread.join(timeout=5)
         sense_stop.set()
         if sense_thread is not None:
             sense_thread.join(timeout=5)
+        for thread in radar_threads:
+            thread.join(timeout=10)
+        completed_chunks: list[dict[str, Any]] = []
+        for chunk in radar_chunk_results:
+            if not isinstance(chunk, dict):
+                continue
+            result = chunk.pop("result", None)
+            error = chunk.pop("error", None)
+            if isinstance(result, dict):
+                completed_chunks.append(result)
+                chunk.update({
+                    "status": "complete",
+                    "detected_frames": result.get("occupancy", {}).get("detected_frames", 0),
+                    "evaluated_frames": result.get("occupancy", {}).get("evaluated_frames", 0),
+                    "occupied": result.get("occupancy", {}).get("label") == "occupied",
+                    "location": result.get("location"),
+                    "score": result.get("score"),
+                    "targets": result.get("targets", []),
+                    "finished": iso_now(),
+                })
+            elif error:
+                chunk.update({
+                    "status": "error",
+                    "error": error,
+                    "finished": iso_now(),
+                })
+
+        if completed_chunks:
+            xy_payload = compile_minute_xy_payload(completed_chunks)
+            xy_payload_path = output_dir / "xy-tracking.json"
+            with open(xy_payload_path, "w", encoding="utf-8") as fd:
+                json.dump(xy_payload, fd, indent=2)
+            manifest["outputs"]["xy_tracking"] = {
+                "path": str(xy_payload_path),
+                "type": "json",
+                "chunk_count": len(completed_chunks),
+            }
+            manifest["outputs"]["predictions"] = {
+                "path": str(output_dir / "predictions.json"),
+                "type": "json",
+                "chunk_count": len(completed_chunks),
+            }
+            predictions_path = output_dir / "predictions.json"
+            prediction_payload = {
+                "generated_at": iso_now(),
+                "chunk_seconds": chunk_seconds,
+                "labels": preset_labels,
+                "timeline": [
+                    {
+                        "model_name": "xy-tracking",
+                        "chunk_index": chunk.get("chunk_index"),
+                        "chunk_seconds": chunk.get("chunk_seconds"),
+                        "prediction": chunk.get("occupancy", {}).get("label"),
+                        "occupied": chunk.get("occupancy", {}).get("label") == "occupied",
+                        "location": chunk.get("location"),
+                        "score": chunk.get("score"),
+                        "target_count": len(chunk.get("targets") or []),
+                        "targets": chunk.get("targets") or [],
+                        "detected_frames": chunk.get("occupancy", {}).get("detected_frames", 0),
+                        "evaluated_frames": chunk.get("occupancy", {}).get("evaluated_frames", 0),
+                        "ratio": chunk.get("occupancy", {}).get("ratio", 0.0),
+                        "bin_path": chunk.get("bin_path"),
+                        "csv_path": chunk.get("csv_path"),
+                    }
+                    for chunk in completed_chunks
+                ],
+                "summary": xy_payload.get("occupancy", {}),
+            }
+            with open(predictions_path, "w", encoding="utf-8") as fd:
+                json.dump(prediction_payload, fd, indent=2)
+
         video_returncode = stop_video_capture(video_proc)
         if video_returncode is not None:
             manifest["outputs"].setdefault("video", {})["ffmpeg_returncode"] = video_returncode
@@ -569,6 +706,9 @@ def main() -> int:
         radar_files = sorted(str(path) for path in output_dir.glob("mmw_radar_raw_*.bin"))
         if radar_files:
             manifest["outputs"].setdefault("radar", {})["files"] = radar_files
+        radar_csv_files = sorted(str(path) for path in output_dir.glob("mmw_radar_xy_*.csv"))
+        if radar_csv_files:
+            manifest["outputs"].setdefault("radar", {})["csv_files"] = radar_csv_files
 
         wifi_csi = manifest["outputs"].get("wifi_csi")
         if isinstance(wifi_csi, dict):
