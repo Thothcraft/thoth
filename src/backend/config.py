@@ -53,7 +53,6 @@ class Config:
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     DATA_DIR = os.path.join(BASE_DIR, 'data')
     CAPTURE_DATA_DIR = os.getenv('CAPTURE_DATA_DIR', os.path.join(BASE_DIR, 'data'))
-    MODELS_DIR = os.getenv('THOTH_MODELS_DIR', os.path.join(BASE_DIR, 'models'))
     LEGACY_CONFIG_DIR = os.path.join(DATA_DIR, 'config')
     LEGACY_DEVICE_ID_FILE = os.path.join(DATA_DIR, 'device_id.txt')
     CAPTURE_KEEP_MINUTES = int(os.getenv('CAPTURE_KEEP_MINUTES', 300))

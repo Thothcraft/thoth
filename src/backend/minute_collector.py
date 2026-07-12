@@ -21,10 +21,8 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from backend.config import Config  # type: ignore
-    from backend.model_inference import predict_minute  # type: ignore
 else:
     from .config import Config
-    from .model_inference import predict_minute
 
 THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / "WS" / "MMW-HAT" / "MMW-HAT-Release"
@@ -592,26 +590,6 @@ def main() -> int:
         manifest["capture_finished"] = iso_now()
         manifest["host"] = os.uname().nodename
         manifest["status"] = "success" if not manifest["errors"] else "partial" if manifest["warnings"] else "error"
-
-        try:
-            predict_minute(output_dir, labels=preset_labels)
-        except Exception as exc:
-            manifest["warnings"].append(f"Model prediction failed for this minute: {exc}")
-            with open(output_dir / "predictions.json", "w", encoding="utf-8") as fd:
-                json.dump(
-                    {
-                        "minute": folder_name,
-                        "generated_at": iso_now(),
-                        "source": "src/backend/minute_collector.py",
-                        "deployed_models": [],
-                        "timeline": [],
-                        "labels": preset_labels,
-                        "status": "error",
-                        "error": str(exc),
-                    },
-                    fd,
-                    indent=2,
-                )
 
         manifest["status"] = "success" if not manifest["errors"] else "partial" if manifest["warnings"] else "error"
         manifest_file = output_dir / "manifest.json"

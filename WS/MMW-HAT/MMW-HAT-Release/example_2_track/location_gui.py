@@ -37,6 +37,7 @@ class Worker(QtCore.QObject):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
+        self._update_count = 0
 
         # Initialize device using the config
         radar = RadarDev(9575, radar_config_fn)
@@ -51,6 +52,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # PyQtGraph Image Plot
         self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setAspectLocked(True)
         self.image_item = pg.ImageItem()
         self.plot_widget.addItem(self.image_item)
         layout.addWidget(self.plot_widget)
@@ -65,6 +67,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.thread.start()
 
     def update_gui(self, image_data, x_ticks, y_ticks, location):
+        self._update_count += 1
+        if self._update_count == 1:
+            print(
+                f"First radar frame received: image_shape={image_data.shape} "
+                f"x_range=({float(x_ticks.min()):.2f},{float(x_ticks.max()):.2f}) "
+                f"y_range=({float(y_ticks.min()):.2f},{float(y_ticks.max()):.2f})",
+                flush=True,
+            )
 
         # Update the image plot, swap x-y axis for better plot
         image_data = image_data.T
@@ -89,6 +99,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.plot_widget.getPlotItem().getAxis('bottom').setTicks([x_tick_values])
         self.plot_widget.getPlotItem().getAxis('left').setTicks([y_tick_values])
+        self.image_item.setRect(
+            QtCore.QRectF(
+                float(y_ticks.min()),
+                float(x_ticks.min()),
+                float(y_ticks.max() - y_ticks.min()) if len(y_ticks) > 1 else 1.0,
+                float(x_ticks.max() - x_ticks.min()) if len(x_ticks) > 1 else 1.0,
+            )
+        )
+        self.plot_widget.autoRange()
 
 
 # Run the application

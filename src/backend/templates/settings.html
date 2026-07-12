@@ -74,14 +74,6 @@
 
       <label class="flex items-start justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
         <span>
-          <span class="block text-base font-semibold text-white">Model deployment requests</span>
-          <span class="block text-sm text-slate-400">Allow Brain to queue new model deployments for this device.</span>
-        </span>
-        <input type="checkbox" name="deployment_requests_allowed" class="mt-1 h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" {% if device_settings.deployment_requests_allowed %}checked{% endif %}>
-      </label>
-
-      <label class="flex items-start justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
-        <span>
           <span class="block text-base font-semibold text-white">Cloud sync</span>
           <span class="block text-sm text-slate-400">Allow the device to push minute folders to Brain automatically.</span>
         </span>

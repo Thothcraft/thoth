@@ -1,0 +1,13 @@
+{
+    "width_m": 3.73,
+    "depth_m": 5.0,
+    "height_m": 2.5,
+    "sensor_wall": "Back",
+    "sensor_position_m": 2.02,
+    "sensor_height_m": 1.0,
+    "floor_anchored_targets": true,
+    "max_object_height_m": 2.2,
+    "max_object_width_m": 0.95,
+    "max_object_depth_m": 0.8,
+    "max_lying_length_m": 2.2
+}

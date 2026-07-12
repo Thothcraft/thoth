@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Thoth Presence</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #070c0e; color: #e8f0f1; overflow: hidden; }
+    .shell { display: grid; grid-template-columns: minmax(0,1fr) 278px; height: 100vh; min-height: 420px; }
+    .stage { position: relative; min-width: 0; }
+    canvas { width: 100%; height: 100%; display: block; cursor: grab; }
+    canvas.dragging { cursor: grabbing; }
+    .hud { position: absolute; left: 18px; top: 16px; pointer-events: none; }
+    .eyebrow { color: #789097; font-size: 11px; font-weight: 700; letter-spacing: .16em; }
+    .headline { margin-top: 5px; font-size: 24px; font-weight: 650; }
+    .status { margin-top: 7px; color: #95a8ae; font-size: 13px; }
+    .live { color: #5ee0cf; }
+    aside { overflow: auto; border-left: 1px solid #243137; background: #101719; padding: 18px; }
+    h2 { margin: 0 0 13px; font-size: 12px; color: #80949a; letter-spacing: .14em; }
+    .field { display: grid; grid-template-columns: 1fr 92px; align-items: center; gap: 10px; margin: 8px 0; font-size: 12px; color: #aebdc1; }
+    input, select { width: 100%; border: 1px solid #2b3a40; border-radius: 7px; background: #0a1114; color: #edf4f5; padding: 7px; }
+    button { width: 100%; margin-top: 12px; border: 0; border-radius: 8px; padding: 9px; background: #277f7a; color: white; font-weight: 650; cursor: pointer; }
+    .hint { margin: 13px 0 20px; color: #71858b; font-size: 11px; line-height: 1.5; }
+    .targets { border-top: 1px solid #253136; padding-top: 14px; }
+    .target { display: grid; grid-template-columns: 1fr auto; gap: 4px; padding: 9px 0; border-bottom: 1px solid #202a2e; font-size: 12px; }
+    .target span { color: #7f949a; }
+    @media (max-width: 760px) { .shell { grid-template-columns: 1fr; } aside { display: none; } }
+  </style>
+</head>
+<body>
+<main class="shell">
+  <section class="stage">
+    <canvas id="scene"></canvas>
+    <div class="hud">
+      <div class="eyebrow">LIVE SPATIAL PRESENCE</div>
+      <div class="headline"><span id="count">0</span> detected</div>
+      <div id="status" class="status">Waiting for sensor state</div>
+    </div>
+  </section>
+  <aside>
+    <h2>ROOM GEOMETRY</h2>
+    <div class="field"><label>Width</label><input data-key="width_m" type="number" min="1" max="20" step="0.1"></div>
+    <div class="field"><label>Depth</label><input data-key="depth_m" type="number" min="1" max="20" step="0.1"></div>
+    <div class="field"><label>Height</label><input data-key="height_m" type="number" min="1.5" max="8" step="0.1"></div>
+    <div class="field"><label>Sensor wall</label><select data-key="sensor_wall"><option>Back</option><option>Front</option><option>Left</option><option>Right</option></select></div>
+    <div class="field"><label>Wall position</label><input data-key="sensor_position_m" type="number" min="0" max="20" step="0.1"></div>
+    <div class="field"><label>Mount height</label><input data-key="sensor_height_m" type="number" min="0.1" max="8" step="0.1"></div>
+    <button id="save">Save geometry</button>
+    <p class="hint">Drag the white point to move the sensor. Drag amber points to resize the room. The cyan 40° × 65° FoV is independent of room boundaries.</p>
+    <div class="targets"><h2>OCCUPANTS</h2><div id="targets"></div></div>
+  </aside>
+</main>
+<script>
+const canvas = document.getElementById('scene');
+const ctx = canvas.getContext('2d');
+const fields = [...document.querySelectorAll('[data-key]')];
+let state = {room:{width_m:5,depth_m:5,height_m:2.7,sensor_wall:'Back',sensor_position_m:2.5,sensor_height_m:1.4},targets:[],shadow:[],fov:{horizontal_deg:40,vertical_deg:65,range_m:15}};
+let handles = {}; let dragging = null; let lastPointer = null; let initialized = false;
+
+function resize(){ const dpr=Math.min(devicePixelRatio||1,2); const r=canvas.getBoundingClientRect(); canvas.width=r.width*dpr; canvas.height=r.height*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); draw(); }
+function scale(){ const r=canvas.getBoundingClientRect(), room=state.room; return Math.min(r.width/(room.width_m+room.depth_m+3), r.height/(room.height_m+(.5*(room.width_m+room.depth_m))+2)); }
+function project(p){ const r=canvas.getBoundingClientRect(), room=state.room, s=scale(); const x=p[0]-room.width_m/2, y=p[1]-room.depth_m/2, z=p[2]; return [r.width*.47+(x-y)*s, r.height*.74+(x+y)*s*.42-z*s]; }
+function sensorPose(){ const r=state.room,p=r.sensor_position_m,h=r.sensor_height_m; if(r.sensor_wall==='Back')return [[p,0,h],[1,0,0],[0,1,0]]; if(r.sensor_wall==='Front')return [[p,r.depth_m,h],[-1,0,0],[0,-1,0]]; if(r.sensor_wall==='Left')return [[0,p,h],[0,-1,0],[1,0,0]]; return [[r.width_m,p,h],[0,1,0],[-1,0,0]]; }
+function localVector(v){ const [,lat,fwd]=sensorPose(); return [lat[0]*v[0]+fwd[0]*v[1],lat[1]*v[0]+fwd[1]*v[1],v[2]]; }
+function line(a,b,color,width=1){ const p=project(a),q=project(b); ctx.beginPath();ctx.moveTo(...p);ctx.lineTo(...q);ctx.strokeStyle=color;ctx.lineWidth=width;ctx.stroke(); }
+function roomVertices(){ const r=state.room,w=r.width_m,d=r.depth_m,h=r.height_m; return [[0,0,0],[w,0,0],[w,d,0],[0,d,0],[0,0,h],[w,0,h],[w,d,h],[0,d,h]]; }
+function drawBox(center,size,color){ const lo=[center[0]-size[0]/2,center[1]-size[1]/2,center[2]-size[2]/2], hi=[center[0]+size[0]/2,center[1]+size[1]/2,center[2]+size[2]/2]; const v=[[lo[0],lo[1],lo[2]],[hi[0],lo[1],lo[2]],[hi[0],hi[1],lo[2]],[lo[0],hi[1],lo[2]],[lo[0],lo[1],hi[2]],[hi[0],lo[1],hi[2]],[hi[0],hi[1],hi[2]],[lo[0],hi[1],hi[2]]]; [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]].forEach(e=>line(v[e[0]],v[e[1]],color,1.7)); }
+function draw(){ const r=canvas.getBoundingClientRect();ctx.clearRect(0,0,r.width,r.height); const v=roomVertices(); [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]].forEach(e=>line(v[e[0]],v[e[1]],'rgba(135,157,164,.42)'));
+  const [origin]=sensorPose(), fov=state.fov||{}, range=fov.range_m||15, corners=[]; for(const az of [-20,20])for(const el of [-32.5,32.5]){const ar=az*Math.PI/180,er=el*Math.PI/180,h=Math.cos(er),vec=localVector([h*Math.sin(ar),h*Math.cos(ar),Math.sin(er)]);corners.push(origin.map((x,i)=>x+vec[i]*range));}
+  [corners[0],corners[2],corners[3],corners[1]].forEach(c=>line(origin,c,'rgba(79,213,205,.48)',1.2)); [0,1,3,2].forEach((n,i,a)=>line(corners[n],corners[a[(i+1)%4]],'rgba(79,213,205,.36)'));
+  for(const p of state.shadow||[]){const q=project(p);ctx.beginPath();ctx.arc(q[0],q[1],3,0,Math.PI*2);ctx.fillStyle='rgba(93,219,207,.13)';ctx.fill();}
+  for(const t of state.targets||[]){drawBox(t.position,t.size,t.presence_mode==='static'?'rgba(255,190,92,.88)':'rgba(91,224,207,.92)');const q=project([t.position[0],t.position[1],t.position[2]+t.size[2]/2]);ctx.fillStyle='#e8f2f3';ctx.font='12px system-ui';ctx.fillText(`T${t.id} · ${t.pose}`,q[0]+6,q[1]-5);}
+  handles={sensor:project(origin),width:project([state.room.width_m,state.room.depth_m*.5,.08]),depth:project([state.room.width_m*.5,state.room.depth_m,.08]),height:project([state.room.width_m*.5,state.room.depth_m*.5,state.room.height_m])}; for(const [name,p] of Object.entries(handles)){ctx.beginPath();ctx.arc(p[0],p[1],name==='sensor'?7:6,0,Math.PI*2);ctx.fillStyle=name==='sensor'?'#edf8f8':'#f2a93b';ctx.fill();ctx.strokeStyle='#071012';ctx.stroke();}
+}
+function syncFields(){ for(const el of fields){ if(document.activeElement!==el && state.room[el.dataset.key]!==undefined)el.value=state.room[el.dataset.key]; } }
+async function poll(){try{const res=await fetch('/api/radar/occupancy',{cache:'no-store'});state=await res.json();syncFields();document.getElementById('count').textContent=state.target_count||0;document.getElementById('status').innerHTML=state.stale?'Sensor state is stale':state.occupied?'<span class="live">Presence confirmed</span>':'Listening for presence';document.getElementById('targets').innerHTML=(state.targets||[]).map(t=>`<div class="target"><b>T${t.id} · ${t.pose}</b><span>${t.range_m.toFixed(2)} m</span><span>${t.presence_mode}</span><span>${t.size.map(v=>v.toFixed(2)).join(' × ')}</span></div>`).join('')||'<p class="hint">No confirmed occupants.</p>';draw();}catch(e){document.getElementById('status').textContent='Device unavailable';}setTimeout(poll,300);}
+async function save(){const body={};for(const el of fields)body[el.dataset.key]=el.tagName==='SELECT'?el.value:Number(el.value);const res=await fetch('/api/radar/room',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await res.json();if(data.room){state.room=data.room;syncFields();draw();}}
+document.getElementById('save').onclick=save;
+canvas.addEventListener('pointerdown',e=>{const p=[e.offsetX,e.offsetY];let best=16;for(const [name,q] of Object.entries(handles)){const d=Math.hypot(p[0]-q[0],p[1]-q[1]);if(d<best){dragging=name;best=d;}}if(dragging){lastPointer=p;canvas.setPointerCapture(e.pointerId);canvas.classList.add('dragging');}});
+canvas.addEventListener('pointermove',e=>{if(!dragging)return;const p=[e.offsetX,e.offsetY],dx=(p[0]-lastPointer[0])/scale(),dy=(p[1]-lastPointer[1])/scale();lastPointer=p;if(dragging==='width')state.room.width_m=Math.max(1,state.room.width_m+dx);else if(dragging==='depth')state.room.depth_m=Math.max(1,state.room.depth_m-dx);else if(dragging==='height')state.room.height_m=Math.max(1.5,state.room.height_m-dy);else{const max=state.room.sensor_wall==='Back'||state.room.sensor_wall==='Front'?state.room.width_m:state.room.depth_m;state.room.sensor_position_m=Math.max(0,Math.min(max,state.room.sensor_position_m+dx));state.room.sensor_height_m=Math.max(.1,Math.min(state.room.height_m,state.room.sensor_height_m-dy));}syncFields();draw();});
+canvas.addEventListener('pointerup',()=>{if(dragging)save();dragging=null;canvas.classList.remove('dragging');});
+window.addEventListener('resize',resize);resize();poll();
+</script>
+</body>
+</html>

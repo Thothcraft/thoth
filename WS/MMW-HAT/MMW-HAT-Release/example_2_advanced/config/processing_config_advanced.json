@@ -1,0 +1,45 @@
+{
+    "num_azimuth_beams": 81,
+    "num_elevation_beams": 81,
+    "max_azimuth_deg": 20.0,
+    "max_elevation_deg": 32.5,
+    "center_frequency_hz": 59000000000,
+    "max_range_m": 4.8,
+    "dead_zone": 0.5,
+    "detection": {
+        "threshold_db": 3.0,
+        "cfar_training_range": 17,
+        "cfar_training_angle": 17,
+        "cfar_guard_range": 5,
+        "cfar_guard_angle": 7,
+        "max_candidates": 8,
+        "max_targets": 4,
+        "min_peak_separation_m": 0.75,
+        "min_peak_separation_deg": 18.0,
+        "person_merge_distance_m": 1.5,
+        "extent_drop_db": 6.0
+    },
+    "motion_shadow": {
+        "floor_percentile": 60.0,
+        "peak_percentile": 99.5,
+        "display_threshold": 0.36,
+        "max_points_per_frame": 180,
+        "persistence_s": 1.5
+    },
+    "object_cluster": {
+        "intensity_threshold": 0.45,
+        "min_cells": 4,
+        "min_integrated_intensity": 2.0
+    },
+    "tracking": {
+        "confirmation_hits": 2,
+        "tentative_max_misses": 2,
+        "max_misses": 70,
+        "association_distance_m": 1.8,
+        "track_merge_distance_m": 2.0,
+        "static_support_threshold_db": 1.5,
+        "static_reference_tolerance_db": 4.0,
+        "alpha": 0.28,
+        "beta": 0.045
+    }
+}

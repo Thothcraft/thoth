@@ -66,7 +66,6 @@ from backend.capture_manager import (
     current_minute,
     minute_summary,
     minute_metrics,
-    collect_prediction_timelines,
     cleanup_old_minutes,
     zip_minute_folder,
     update_minute_labels,
@@ -75,6 +74,8 @@ from backend.capture_manager import (
 
 THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / 'WS' / 'MMW-HAT' / 'MMW-HAT-Release'
+RADAR_OCCUPANCY_STATE = THOTH_ROOT / 'config' / 'radar_occupancy.json'
+RADAR_ROOM_CONFIG = MMW_RELEASE / 'example_2_advanced' / 'config' / 'room_config.json'
 if str(MMW_RELEASE) not in sys.path:
     sys.path.append(str(MMW_RELEASE))
 
@@ -1404,6 +1405,76 @@ def status():
         return redirect(url_for('index'))
 
 
+def _read_json_file(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        with path.open('r') as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else default.copy()
+    except (OSError, ValueError):
+        return default.copy()
+
+
+def _write_json_file(path: Path, value: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + '.tmp')
+    with temporary.open('w') as handle:
+        json.dump(value, handle, indent=4)
+        handle.write('\n')
+    temporary.replace(path)
+
+
+@app.route('/presence')
+def presence_view():
+    """Live browser visualization shared by the device and Research Portal."""
+    return render_template('presence.html')
+
+
+@app.route('/api/radar/occupancy', methods=['GET'])
+def api_radar_occupancy():
+    state = _read_json_file(RADAR_OCCUPANCY_STATE, {
+        'updated_at': 0,
+        'occupied': False,
+        'target_count': 0,
+        'targets': [],
+        'shadow': [],
+    })
+    room = _read_json_file(RADAR_ROOM_CONFIG, {})
+    state['room'] = room or state.get('room', {})
+    state['stale'] = time.time() - float(state.get('updated_at') or 0) > 3.0
+    return jsonify(state)
+
+
+@app.route('/api/radar/room', methods=['GET', 'POST'])
+def api_radar_room():
+    room = _read_json_file(RADAR_ROOM_CONFIG, {})
+    if request.method == 'GET':
+        return jsonify({'success': True, 'room': room})
+    payload = request.get_json(silent=True) or {}
+    numeric_fields = {
+        'width_m': (1.0, 20.0),
+        'depth_m': (1.0, 20.0),
+        'height_m': (1.5, 8.0),
+        'sensor_position_m': (0.0, 20.0),
+        'sensor_height_m': (0.1, 8.0),
+        'max_object_height_m': (0.5, 3.0),
+        'max_object_width_m': (0.2, 3.0),
+        'max_object_depth_m': (0.15, 3.0),
+        'max_lying_length_m': (0.8, 3.0),
+    }
+    for field, (minimum, maximum) in numeric_fields.items():
+        if field in payload:
+            room[field] = max(minimum, min(maximum, float(payload[field])))
+    wall = str(payload.get('sensor_wall', room.get('sensor_wall', 'Back'))).title()
+    room['sensor_wall'] = wall if wall in {'Back', 'Front', 'Left', 'Right'} else 'Back'
+    if 'floor_anchored_targets' in payload:
+        room['floor_anchored_targets'] = bool(payload['floor_anchored_targets'])
+    wall_length = room.get('width_m', 5.0) if room['sensor_wall'] in {'Back', 'Front'} else room.get('depth_m', 5.0)
+    room['sensor_position_m'] = min(float(room.get('sensor_position_m', 0)), wall_length)
+    room['sensor_height_m'] = min(float(room.get('sensor_height_m', 1.4)), float(room.get('height_m', 2.7)))
+    _write_json_file(RADAR_ROOM_CONFIG, room)
+    return jsonify({'success': True, 'room': room})
+
+
 @app.route('/settings', methods=['GET', 'POST'])
 def settings():
     """Device settings page."""
@@ -1414,7 +1485,6 @@ def settings():
         payload = request.get_json(silent=True) or request.form
         updates = {
             'portal_upload_allowed': str(payload.get('portal_upload_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
-            'deployment_requests_allowed': str(payload.get('deployment_requests_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
             'cloud_sync_allowed': str(payload.get('cloud_sync_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
             'radar_detection_threshold_db': payload.get('radar_detection_threshold_db', 8.0),
             'auto_occupancy_label_enabled': str(payload.get('auto_occupancy_label_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
@@ -1442,26 +1512,6 @@ def settings():
     )
 
 
-@app.route('/models')
-def models():
-    """Device model management page."""
-    if 'username' not in session:
-        return redirect(url_for('login', next=url_for('models')))
-
-    pending = device_manager.list_pending_deployments()
-    running = device_manager.get_running_models()
-    timelines = collect_prediction_timelines()
-
-    return render_template(
-        'models.html',
-        username=session.get('username'),
-        pending_deployments=pending,
-        running_models=running,
-        prediction_timelines=timelines,
-        device_settings=device_manager.get_device_settings(),
-    )
-
-
 @app.route('/api/settings', methods=['GET', 'PATCH'])
 def api_settings():
     if 'username' not in session:
@@ -1474,48 +1524,6 @@ def api_settings():
         _relabel_cached_occupancy(float(saved.get('occupancy_threshold_percent', 50.0)))
     return jsonify({'success': True, 'settings': saved})
 
-
-@app.route('/api/models/deployments/pending', methods=['GET'])
-def api_pending_model_deployments():
-    if 'username' not in session:
-        return jsonify({'success': False, 'message': 'Authentication required'}), 401
-    return jsonify({'success': True, 'deployments': device_manager.list_pending_deployments()})
-
-
-@app.route('/api/models/prediction-timelines', methods=['GET'])
-def api_model_prediction_timelines():
-    if 'username' not in session:
-        return jsonify({'success': False, 'message': 'Authentication required'}), 401
-    timelines = collect_prediction_timelines()
-    return jsonify({
-        'success': True,
-        'timelines': timelines,
-        'model_count': len(timelines),
-    })
-
-
-@app.route('/api/models/deployments/<deployment_id>/accept', methods=['POST'])
-def api_accept_model_deployment(deployment_id: str):
-    if 'username' not in session:
-        return jsonify({'success': False, 'message': 'Authentication required'}), 401
-    deployment = next((item for item in device_manager.list_pending_deployments() if item.get('deployment_id') == deployment_id), None)
-    if not deployment:
-        return jsonify({'success': False, 'message': 'Deployment not found'}), 404
-    if not device_manager.acknowledge_deployment(deployment, accepted=True):
-        return jsonify({'success': False, 'message': 'Failed to accept deployment'}), 500
-    return jsonify({'success': True, 'message': 'Deployment accepted'})
-
-
-@app.route('/api/models/deployments/<deployment_id>/decline', methods=['POST'])
-def api_decline_model_deployment(deployment_id: str):
-    if 'username' not in session:
-        return jsonify({'success': False, 'message': 'Authentication required'}), 401
-    deployment = next((item for item in device_manager.list_pending_deployments() if item.get('deployment_id') == deployment_id), None)
-    if not deployment:
-        return jsonify({'success': False, 'message': 'Deployment not found'}), 404
-    if not device_manager.acknowledge_deployment(deployment, accepted=False):
-        return jsonify({'success': False, 'message': 'Failed to decline deployment'}), 500
-    return jsonify({'success': True, 'message': 'Deployment declined'})
 
 @app.route('/captures')
 def captures():

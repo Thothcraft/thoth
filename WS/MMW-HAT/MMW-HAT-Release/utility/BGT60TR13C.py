@@ -29,9 +29,10 @@ class BGT60TR13C:
             self.__spi.open(spi_bus, spi_dev)
             self.__spi.max_speed_hz = spi_speed
             self.__spi.mode = 0
-            self.__rst = DigitalOutputDevice(rst_pin)
-            self.__irq = DigitalInputDevice(irq_pin, pull_up=False, bounce_time=0.001)
-            self.hard_reset()
+            self.__rst = self._claim_output_gpio(rst_pin, [17, 27, 22], "reset")
+            self.__irq = self._claim_input_gpio(irq_pin, [24, 23, 18], "irq")
+            if self.__rst is not None:
+                self.hard_reset()
         except Exception:
             self.close()
             raise
@@ -235,6 +236,9 @@ class BGT60TR13C:
             return RET_VAL_OK
 
     def hard_reset(self):
+        if self.__rst is None:
+            logging.info("Skipping hard reset because reset GPIO is unavailable.")
+            return
         self.__rst.on()
         time.sleep(0.01)
         self.__rst.off()
@@ -285,7 +289,7 @@ class BGT60TR13C:
         logging.debug("Data collection thread started.")
         while not self.__data_collection_stop_event.is_set():
             time.sleep(0.001)
-            while self.__irq.value==1:
+            while self.__irq is not None and self.__irq.value == 1:
                 fifo_data = self.__get_fifo_data(self.__num_sampler_per_burst)
                 if fifo_data is None:
                     break
@@ -311,6 +315,39 @@ class BGT60TR13C:
                 except queue.Full:
                     pass
         logging.debug("Data collection thread stopped.")
+
+    @staticmethod
+    def _try_claim_gpio(claim_fn, pins, label):
+        last_exc = None
+        for pin in [pins[0]] + [candidate for candidate in pins[1:] if candidate != pins[0]]:
+            try:
+                return claim_fn(pin), pin
+            except Exception as exc:
+                last_exc = exc
+                logging.warning("Unable to claim %s GPIO %s: %s", label, pin, exc)
+        if last_exc is not None:
+            logging.warning("No %s GPIO could be claimed; continuing without %s pin.", label, label)
+        return None, None
+
+    def _claim_output_gpio(self, preferred_pin, fallback_pins, label):
+        pins = [preferred_pin, *fallback_pins]
+        device, pin = self._try_claim_gpio(lambda p: DigitalOutputDevice(p), pins, label)
+        if device is None:
+            return None
+        logging.info("Using %s GPIO %s for %s", label, pin, label)
+        return device
+
+    def _claim_input_gpio(self, preferred_pin, fallback_pins, label):
+        pins = [preferred_pin, *fallback_pins]
+        device, pin = self._try_claim_gpio(
+            lambda p: DigitalInputDevice(p, pull_up=False, bounce_time=0.001),
+            pins,
+            label,
+        )
+        if device is None:
+            return None
+        logging.info("Using %s GPIO %s for %s", label, pin, label)
+        return device
 
     def __del__(self):
         try:
