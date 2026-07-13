@@ -483,6 +483,14 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
             "location": location,
             "score": prediction.get("score") if prediction else None,
             "ratio": prediction.get("ratio") if prediction else None,
+            "detected_frames": (
+                prediction.get("detected_frames") if prediction
+                else manifest_chunk.get("detected_frames")
+            ),
+            "evaluated_frames": (
+                prediction.get("evaluated_frames") if prediction
+                else manifest_chunk.get("evaluated_frames")
+            ),
             "error": manifest_chunk.get("error"),
         })
     storage_percent = min(100.0, (stored_chunks / expected_chunks) * 100.0) if expected_chunks else 0.0

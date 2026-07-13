@@ -163,32 +163,14 @@
                             {% else %}
                                 <span class="text-gray-400">Unlabeled</span>
                             {% endif %}
-                            {% if minute.occupancy and minute.occupancy.evaluated_frames %}
-                                <div class="mt-1 text-xs text-gray-500">{{ minute.occupancy.detected_frames }} / {{ minute.occupancy.evaluated_frames }} frames detected</div>
-                            {% endif %}
                             {% if minute.progress %}
-                                <div class="mt-2 space-y-1.5">
-                                    <div class="flex items-center justify-between gap-3 text-[11px] uppercase tracking-wide text-gray-400">
-                                        <span>Storage</span>
-                                        <span>{{ minute.progress.storage_percent|round(0) }}%</span>
-                                    </div>
-                                    <div class="h-2 overflow-hidden rounded-full bg-gray-100">
-                                        <div class="h-full rounded-full bg-cyan-500" style="width: {{ minute.progress.storage_percent|round(2) }}%"></div>
-                                    </div>
-                                    <div class="flex items-center justify-between gap-3 text-[11px] uppercase tracking-wide text-gray-400">
-                                        <span>Predictions</span>
-                                        <span>{{ minute.progress.prediction_percent|round(0) }}%</span>
-                                    </div>
-                                    <div class="h-2 overflow-hidden rounded-full bg-gray-100">
-                                        <div class="h-full rounded-full bg-emerald-500" style="width: {{ minute.progress.prediction_percent|round(2) }}%"></div>
-                                    </div>
-                                    <div class="flex items-start gap-1 pt-1">
+                                <div class="mt-3 flex items-start gap-1" aria-label="Chunk timeline">
                                         {% for chunk in minute.progress.chunks %}
-                                        <div class="min-w-0 flex-1 text-center" title="Chunk {{ chunk.index + 1 }}{% if chunk.ratio is defined and chunk.ratio is not none %}; ratio {{ (chunk.ratio * 100)|round(1) }}%{% endif %}{% if chunk.error is defined and chunk.error %}; {{ chunk.error }}{% endif %}">
-                                            <div role="img" tabindex="0" title="Chunk {{ chunk.index + 1 }}{% if chunk.ratio is defined and chunk.ratio is not none %}; ratio {{ (chunk.ratio * 100)|round(1) }}%{% endif %}{% if chunk.error is defined and chunk.error %}; {{ chunk.error }}{% endif %}" aria-label="Chunk {{ chunk.index + 1 }} status indicator" class="mx-auto h-2.5 w-2.5 rounded-full {% if chunk.state == 'occupied' %}bg-emerald-500{% elif chunk.state == 'empty' %}bg-red-500{% elif chunk.state == 'collecting' %}animate-pulse bg-blue-500{% elif chunk.state in ['stored', 'analyzing'] %}animate-pulse bg-cyan-500{% elif chunk.state == 'error' %}bg-amber-500{% else %}bg-slate-300{% endif %}"></div>
+                                        {% set chunk_detail %}Chunk {{ chunk.index + 1 }}; {{ chunk.prediction if chunk.prediction else chunk.state }}{% if chunk.detected_frames is defined and chunk.detected_frames is not none and chunk.evaluated_frames is defined and chunk.evaluated_frames is not none %}; {{ chunk.detected_frames }} / {{ chunk.evaluated_frames }} frames{% endif %}{% if chunk.ratio is defined and chunk.ratio is not none %}; ratio {{ (chunk.ratio * 100)|round(1) }}%{% endif %}{% if chunk.error is defined and chunk.error %}; {{ chunk.error }}{% endif %}{% endset %}
+                                        <div class="min-w-0 flex-1 text-center" title="{{ chunk_detail|trim }}">
+                                            <div role="img" tabindex="0" title="{{ chunk_detail|trim }}" aria-label="{{ chunk_detail|trim }}" class="mx-auto h-2.5 w-2.5 rounded-full {% if chunk.state == 'occupied' %}bg-emerald-500{% elif chunk.state == 'empty' %}bg-red-500{% elif chunk.state == 'collecting' %}animate-pulse bg-blue-500{% elif chunk.state in ['stored', 'analyzing'] %}animate-pulse bg-cyan-500{% elif chunk.state == 'error' %}bg-amber-500{% else %}bg-slate-300{% endif %}"></div>
                                         </div>
                                         {% endfor %}
-                                    </div>
                                 </div>
                             {% endif %}
                         </td>
@@ -446,13 +428,11 @@ function renderCaptureRow(minute) {
     ? minute.labels.map(escapeHtml).join(', ')
     : '<span class="text-gray-400">Unlabeled</span>';
   const urls = minute.urls || {};
-  const occupancy = minute.occupancy && Number(minute.occupancy.evaluated_frames) > 0
-    ? `<div class="mt-1 text-xs text-gray-500">${Number(minute.occupancy.detected_frames) || 0} / ${Number(minute.occupancy.evaluated_frames)} frames detected</div>`
-    : '';
+  const occupancy = '';
   const openUrl = urls.open || `/captures/${encodeURIComponent(minute.minute)}`;
   const downloadUrl = urls.download || `/captures/${encodeURIComponent(minute.minute)}/download`;
   const progress = minute.progress;
-  const progressHtml = progress ? `<div class="mt-2 space-y-1.5"><div class="flex justify-between text-[11px] uppercase tracking-wide text-gray-400"><span>Storage</span><span>${Math.round(progress.storage_percent || 0)}%</span></div><div class="h-2 overflow-hidden rounded-full bg-gray-100"><div class="h-full rounded-full bg-cyan-500" style="width:${Number(progress.storage_percent) || 0}%"></div></div><div class="flex justify-between text-[11px] uppercase tracking-wide text-gray-400"><span>Predictions</span><span>${Math.round(progress.prediction_percent || 0)}%</span></div><div class="h-2 overflow-hidden rounded-full bg-gray-100"><div class="h-full rounded-full bg-emerald-500" style="width:${Number(progress.prediction_percent) || 0}%"></div></div><div class="flex items-start gap-1 pt-1">${(progress.chunks || []).slice(0, 6).map((chunk) => { const color = chunk.state === 'occupied' ? 'bg-emerald-500' : chunk.state === 'empty' ? 'bg-red-500' : chunk.state === 'collecting' ? 'animate-pulse bg-blue-500' : ['stored', 'analyzing'].includes(chunk.state) ? 'animate-pulse bg-cyan-500' : chunk.state === 'error' ? 'bg-amber-500' : 'bg-slate-300'; const detail = 'Chunk ' + (chunk.index + 1) + (chunk.ratio == null ? '' : '; ratio ' + (Number(chunk.ratio) * 100).toFixed(1) + '%') + (chunk.error ? '; ' + chunk.error : ''); return `<div class="min-w-0 flex-1 text-center" title="${detail}"><div role="img" tabindex="0" title="${detail}" aria-label="Chunk ${chunk.index + 1} status indicator" class="mx-auto h-2.5 w-2.5 rounded-full ${color}"></div></div>`; }).join('')}</div></div>` : '';
+  const progressHtml = progress ? `<div class="mt-3 flex items-start gap-1" aria-label="Chunk timeline">${(progress.chunks || []).slice(0, 6).map((chunk) => { const color = chunk.state === 'occupied' ? 'bg-emerald-500' : chunk.state === 'empty' ? 'bg-red-500' : chunk.state === 'collecting' ? 'animate-pulse bg-blue-500' : ['stored', 'analyzing'].includes(chunk.state) ? 'animate-pulse bg-cyan-500' : chunk.state === 'error' ? 'bg-amber-500' : 'bg-slate-300'; const frames = chunk.detected_frames == null || chunk.evaluated_frames == null ? '' : `; ${Number(chunk.detected_frames) || 0} / ${Number(chunk.evaluated_frames) || 0} frames`; const detail = 'Chunk ' + (chunk.index + 1) + '; ' + (chunk.prediction || chunk.state || 'waiting') + frames + (chunk.ratio == null ? '' : '; ratio ' + (Number(chunk.ratio) * 100).toFixed(1) + '%') + (chunk.error ? '; ' + chunk.error : ''); return `<div class="min-w-0 flex-1 text-center" title="${detail}"><div role="img" tabindex="0" title="${detail}" aria-label="${detail}" class="mx-auto h-2.5 w-2.5 rounded-full ${color}"></div></div>`; }).join('')}</div>` : '';
   return `
     <tr data-minute="${name}" class="${minute.minute === activeMinute ? 'bg-blue-50' : ''}">
       <td class="py-3 pr-4"><input type="checkbox" class="capture-select h-4 w-4" value="${name}" aria-label="Select capture ${name}" ${selectedMinutes.has(minute.minute) ? 'checked' : ''}></td>

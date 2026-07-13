@@ -816,6 +816,7 @@ class DeviceManager:
                     'label': summary.get('label'),
                     'labels': summary.get('labels', []),
                     'occupancy': summary.get('occupancy'),
+                    'progress': summary.get('progress'),
                 })
 
             files_list.sort(key=lambda item: str(item.get('modified') or ''), reverse=True)
@@ -842,6 +843,7 @@ class DeviceManager:
                     item.get('modified'),
                     item.get('labels'),
                     item.get('occupancy'),
+                    item.get('progress'),
                 ) for item in files],
                 sort_keys=True,
             )

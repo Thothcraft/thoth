@@ -2124,12 +2124,12 @@ def upload_capture_minute(minute):
     import base64
 
     all_files = sorted(path for path in minute_dir.iterdir() if path.is_file() and not path.name.endswith('.tmp'))
-    if request.args.get('incremental') in {'1', 'true', 'yes'}:
-        chunk_index = request.args.get('chunk')
-        live_names = {'manifest.json', 'predictions.json', 'xy-tracking.json'}
-        if chunk_index and chunk_index.isdigit():
-            live_names.add(f'mmw_radar_xy_{int(chunk_index):02d}.csv')
-            live_names.update(path.name for path in all_files if path.name.startswith(f'mmw_radar_raw_{int(chunk_index):02d}_'))
+    incremental = request.args.get('incremental') in {'1', 'true', 'yes'}
+    if incremental:
+        # Live synchronization is intentionally metadata-only. Raw radar, CSV,
+        # visualization, and video assets remain local until a full upload is
+        # explicitly requested from Thoth or ResearchPortal.
+        live_names = {'manifest.json', 'predictions.json'}
         all_files = [path for path in all_files if path.name in live_names]
 
     for path in all_files:
@@ -2181,6 +2181,7 @@ def upload_capture_minute(minute):
                     'relative_path': summary.get('relative_path'),
                     'file_kind': key,
                     'size_bytes': path.stat().st_size,
+                    'timeline_only': incremental,
                 },
             }
             response = requests.post(f"{Config.BRAIN_SERVER_URL}/api/file/upload", json=payload, headers=headers, timeout=120)
@@ -2194,28 +2195,35 @@ def upload_capture_minute(minute):
         except Exception as exc:
             errors.append(f"{path.name}: {exc}")
 
-    # The minute-named manifest completes the DeviceFile upload request in Brain.
-    try:
-        raw = json.dumps(summary, default=str).encode('utf-8')
-        response = requests.post(
-            f"{Config.BRAIN_SERVER_URL}/api/file/upload",
-            json={
-                'filename': minute_dir.name,
-                'content': base64.b64encode(raw).decode('ascii'),
-                'is_base64': True,
-                'device_id': device_id,
-                'content_type': 'application/json',
-                'metadata': {'source': 'thoth_device', 'minute': minute_dir.name, 'file_kind': 'capture-manifest'},
-            },
-            headers={'Authorization': f'Bearer {auth_token}', 'Content-Type': 'application/json'},
-            timeout=120,
-        )
-        if response.status_code in (200, 201):
-            uploaded.append({'name': minute_dir.name, 'bytes': len(raw)})
-        else:
-            errors.append(f'{minute_dir.name}: {response.status_code} {response.text[:300]}')
-    except Exception as exc:
-        errors.append(f'{minute_dir.name}: {exc}')
+    if incremental:
+        # Push the changed six-dot state immediately without marking the full
+        # minute as uploaded in Brain.
+        if not device_manager.update_status({'collection_active': True}):
+            errors.append('timeline heartbeat failed')
+    else:
+        # The minute-named manifest completes an explicit full-upload request
+        # and is the only operation that marks the minute as cloud uploaded.
+        try:
+            raw = json.dumps(summary, default=str).encode('utf-8')
+            response = requests.post(
+                f"{Config.BRAIN_SERVER_URL}/api/file/upload",
+                json={
+                    'filename': minute_dir.name,
+                    'content': base64.b64encode(raw).decode('ascii'),
+                    'is_base64': True,
+                    'device_id': device_id,
+                    'content_type': 'application/json',
+                    'metadata': {'source': 'thoth_device', 'minute': minute_dir.name, 'file_kind': 'capture-manifest'},
+                },
+                headers={'Authorization': f'Bearer {auth_token}', 'Content-Type': 'application/json'},
+                timeout=120,
+            )
+            if response.status_code in (200, 201):
+                uploaded.append({'name': minute_dir.name, 'bytes': len(raw)})
+            else:
+                errors.append(f'{minute_dir.name}: {response.status_code} {response.text[:300]}')
+        except Exception as exc:
+            errors.append(f'{minute_dir.name}: {exc}')
 
     return jsonify({
         'status': 'success' if not errors else 'partial',
