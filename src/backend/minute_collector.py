@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -118,6 +119,13 @@ def sleep_until(target: dt.datetime) -> None:
 
 def iso_now() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+
+def write_json_atomic(path: Path, payload: object) -> None:
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    with open(temporary, "w", encoding="utf-8") as fd:
+        json.dump(payload, fd, indent=2)
+    temporary.replace(path)
 
 
 def find_camera(requested: str | None) -> str | None:
@@ -481,7 +489,70 @@ def main() -> int:
     sense_thread: threading.Thread | None = None
     radar_threads: list[threading.Thread] = []
     radar_chunk_results: list[dict[str, Any]] = []
+    publish_lock = threading.Lock()
     room_config = load_room_config()
+
+    def write_live_manifest() -> None:
+        snapshot = dict(manifest)
+        snapshot["capture_started"] = capture_started
+        snapshot["status"] = "collecting"
+        outputs = dict(manifest.get("outputs") or {})
+        radar_output = outputs.get("radar")
+        if isinstance(radar_output, dict):
+            radar_snapshot = dict(radar_output)
+            radar_snapshot["chunks"] = [
+                {key: value for key, value in entry.items() if key != "result"}
+                for entry in (radar_output.get("chunks") or [])
+            ]
+            outputs["radar"] = radar_snapshot
+        snapshot["outputs"] = outputs
+        write_json_atomic(output_dir / "manifest.json", snapshot)
+
+    def publish_radar_results() -> None:
+        with publish_lock:
+            completed = [entry["result"] for entry in radar_chunk_results if isinstance(entry.get("result"), dict)]
+            if not completed:
+                return
+            xy_payload = compile_minute_xy_payload(completed)
+            timeline = [
+                {
+                    "model_name": "xy-tracking",
+                    "chunk_index": chunk.get("chunk_index"),
+                    "chunk_seconds": chunk.get("chunk_seconds"),
+                    "prediction": chunk.get("occupancy", {}).get("label"),
+                    "occupied": chunk.get("occupancy", {}).get("label") == "occupied",
+                    "location": chunk.get("location"),
+                    "score": chunk.get("score"),
+                    "target_count": len(chunk.get("targets") or []),
+                    "targets": chunk.get("targets") or [],
+                    "detected_frames": chunk.get("occupancy", {}).get("detected_frames", 0),
+                    "evaluated_frames": chunk.get("occupancy", {}).get("evaluated_frames", 0),
+                    "ratio": chunk.get("occupancy", {}).get("ratio", 0.0),
+                    "bin_path": chunk.get("bin_path"),
+                    "csv_path": chunk.get("csv_path"),
+                }
+                for chunk in sorted(completed, key=lambda item: int(item.get("chunk_index", 0)))
+            ]
+            write_json_atomic(output_dir / "xy-tracking.json", xy_payload)
+            write_json_atomic(output_dir / "predictions.json", {
+                "generated_at": iso_now(),
+                "chunk_seconds": chunk_seconds,
+                "labels": preset_labels,
+                "timeline": timeline,
+                "summary": xy_payload.get("occupancy", {}),
+            })
+            write_live_manifest()
+
+    def upload_live_chunk(index: int) -> None:
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:5000/api/captures/{folder_name}/upload?incremental=1&chunk={index}",
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=120):
+                pass
+        except Exception as exc:
+            print(f"Live chunk {index} upload deferred: {exc}", file=sys.stderr)
 
     try:
         if not args.no_csi and csi_port is not None:
@@ -548,6 +619,8 @@ def main() -> int:
                 "chunks": [],
                 "note": "Radar is captured and analyzed in 10-second windows so each chunk gets its own .bin and .csv pair.",
             }
+            with publish_lock:
+                write_live_manifest()
             chunk_index = 0
             while True:
                 remaining = stop_at - time.monotonic()
@@ -601,14 +674,29 @@ def main() -> int:
                             chunk_seconds=duration,
                             room=room_snapshot,
                         )
+                        result = entry["result"]
+                        entry.update({
+                            "status": "complete",
+                            "detected_frames": result.get("occupancy", {}).get("detected_frames", 0),
+                            "evaluated_frames": result.get("occupancy", {}).get("evaluated_frames", 0),
+                            "occupied": result.get("occupancy", {}).get("label") == "occupied",
+                            "location": result.get("location"),
+                            "score": result.get("score"),
+                            "finished": iso_now(),
+                        })
+                        publish_radar_results()
+                        threading.Thread(target=upload_live_chunk, args=(idx,), name=f"RadarUpload-{idx}", daemon=True).start()
                     except Exception as exc:
                         entry["error"] = str(exc)
+                        entry.update({"status": "error", "finished": iso_now()})
 
                 thread = threading.Thread(target=_analyze, name=f"RadarChunk-{chunk_index}", daemon=True)
-                thread.start()
-                radar_threads.append(thread)
                 radar_chunk_results.append(chunk_entry)
                 manifest["outputs"]["radar"]["chunks"].append(chunk_entry)
+                with publish_lock:
+                    write_live_manifest()
+                thread.start()
+                radar_threads.append(thread)
                 chunk_index += 1
 
         while True:

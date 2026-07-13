@@ -438,6 +438,46 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
 
     stored_chunks = min(len(radar_bins), len(radar_csvs)) if radar_bins or radar_csvs else 0
     analyzed_chunks = len((predictions or {}).get("timeline") or [])
+    prediction_entries = {
+        int(entry.get("chunk_index")): entry
+        for entry in ((predictions or {}).get("timeline") or [])
+        if isinstance(entry, dict) and str(entry.get("chunk_index", "")).isdigit()
+    }
+    manifest_chunks = {}
+    if isinstance(manifest, dict):
+        radar_output = (manifest.get("outputs") or {}).get("radar") if isinstance(manifest.get("outputs"), dict) else None
+        if isinstance(radar_output, dict):
+            manifest_chunks = {
+                int(entry.get("chunk_index")): entry
+                for entry in (radar_output.get("chunks") or [])
+                if isinstance(entry, dict) and str(entry.get("chunk_index", "")).isdigit()
+            }
+    chunks = []
+    for index in range(expected_chunks):
+        prediction = prediction_entries.get(index)
+        location = prediction.get("location") if prediction else None
+        if isinstance(location, (list, tuple)) and len(location) >= 2:
+            location = {"x": location[0], "y": location[1]}
+        recorded = index < stored_chunks
+        manifest_chunk = manifest_chunks.get(index) or {}
+        state = "waiting"
+        if manifest_chunk.get("status") == "error":
+            state = "error"
+        elif prediction:
+            state = "occupied" if prediction.get("occupied") is True else "empty"
+        elif recorded:
+            state = "analyzing"
+        chunks.append({
+            "index": index,
+            "state": state,
+            "stored": recorded,
+            "analyzed": prediction is not None,
+            "prediction": prediction.get("prediction") if prediction else None,
+            "occupied": prediction.get("occupied") if prediction else None,
+            "location": location,
+            "score": prediction.get("score") if prediction else None,
+            "error": manifest_chunk.get("error"),
+        })
     storage_percent = min(100.0, (stored_chunks / expected_chunks) * 100.0) if expected_chunks else 0.0
     prediction_percent = min(100.0, (analyzed_chunks / expected_chunks) * 100.0) if expected_chunks else 0.0
 
@@ -448,6 +488,7 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
         "storage_percent": storage_percent,
         "prediction_percent": prediction_percent,
         "chunk_seconds": _manifest_chunk_seconds(manifest),
+        "chunks": chunks,
     }
 
 
@@ -609,7 +650,11 @@ def current_minute() -> Optional[Path]:
 
 
 def capture_files(minute_dir: Path) -> Dict[str, Optional[Path]]:
-    return _file_map(minute_dir)
+    return {
+        key: value
+        for key, value in _file_map(minute_dir).items()
+        if isinstance(value, Path) or value is None
+    }
 
 
 def preview_text(path: Optional[Path], limit: int = 20000) -> str:

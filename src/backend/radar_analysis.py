@@ -16,7 +16,7 @@ THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / "WS" / "MMW-HAT" / "MMW-HAT-Release"
 TRACK_EXAMPLE_DIR = MMW_RELEASE / "example_2_advanced"
 ROOM_CONFIG = TRACK_EXAMPLE_DIR / "config" / "room_config.json"
-PROCESSING_CONFIG = TRACK_EXAMPLE_DIR / "config" / "processing_config.json"
+PROCESSING_CONFIG = TRACK_EXAMPLE_DIR / "config" / "processing_config_advanced.json"
 RADAR_CONFIG_DIR = MMW_RELEASE / "radar_config" / "config_3rx_3m"
 
 for path in (MMW_RELEASE, TRACK_EXAMPLE_DIR):
@@ -25,13 +25,14 @@ for path in (MMW_RELEASE, TRACK_EXAMPLE_DIR):
 
 try:  # pragma: no cover - import availability depends on device packages
     from signal_proc import SigProc
-    from utility.helper import calculate_frame_size, find_register_config_in_directory, find_setting_in_directory, parse_full_frame, read_uint12, split_samples
+    from utility.helper import calculate_frame_size, find_register_config_in_directory, find_setting_in_directory, parse_full_frame, parse_radar_cfg, read_uint12, split_samples
 except Exception:  # pragma: no cover
     SigProc = None  # type: ignore[assignment]
     calculate_frame_size = None  # type: ignore[assignment]
     find_register_config_in_directory = None  # type: ignore[assignment]
     find_setting_in_directory = None  # type: ignore[assignment]
     parse_full_frame = None  # type: ignore[assignment]
+    parse_radar_cfg = None  # type: ignore[assignment]
     read_uint12 = None  # type: ignore[assignment]
     split_samples = None  # type: ignore[assignment]
 
@@ -74,7 +75,10 @@ def load_radar_config() -> Dict[str, Any]:
         return {}
     try:
         setting_file = find_setting_in_directory(str(RADAR_CONFIG_DIR))
-        return load_json(Path(setting_file))
+        setting = load_json(Path(setting_file))
+        if parse_radar_cfg is None:
+            return setting
+        return parse_radar_cfg(setting)
     except Exception:
         return {}
 

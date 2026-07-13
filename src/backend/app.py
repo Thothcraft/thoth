@@ -2068,7 +2068,6 @@ def upload_capture_minute(minute):
     if not minute_dir:
         return jsonify({'status': 'error', 'message': 'Minute folder not found'}), 404
 
-    files = capture_files(minute_dir)
     summary = minute_summary(minute_dir)
     device_id = getattr(device_manager, 'device_id', None)
     uploaded = []
@@ -2076,12 +2075,33 @@ def upload_capture_minute(minute):
     skipped = []
     import base64
 
-    for key, path in files.items():
-        if not isinstance(path, Path) or not path.exists():
-            continue
-        if key in {'video_log'} and path.stat().st_size == 0:
+    all_files = sorted(path for path in minute_dir.iterdir() if path.is_file() and not path.name.endswith('.tmp'))
+    if request.args.get('incremental') in {'1', 'true', 'yes'}:
+        chunk_index = request.args.get('chunk')
+        live_names = {'manifest.json', 'predictions.json', 'xy-tracking.json'}
+        if chunk_index and chunk_index.isdigit():
+            live_names.add(f'mmw_radar_xy_{int(chunk_index):02d}.csv')
+            live_names.update(path.name for path in all_files if path.name.startswith(f'mmw_radar_raw_{int(chunk_index):02d}_'))
+        all_files = [path for path in all_files if path.name in live_names]
+
+    for path in all_files:
+        if path.name == 'usb_camera.ffmpeg.log' and path.stat().st_size == 0:
             skipped.append(path.name)
             continue
+        if path.name == 'xy-tracking.json':
+            key = 'xy-tracking'
+        elif path.name == 'predictions.json':
+            key = 'predictions'
+        elif path.name == 'manifest.json':
+            key = 'manifest'
+        elif path.name.startswith('mmw_radar_raw_'):
+            key = 'radar-bin'
+        elif path.name.startswith('mmw_radar_xy_'):
+            key = 'radar-csv'
+        elif path.name == 'usb_camera.mp4':
+            key = 'video'
+        else:
+            key = path.stem
         try:
             with open(path, 'rb') as handle:
                 content = base64.b64encode(handle.read()).decode('utf-8')
