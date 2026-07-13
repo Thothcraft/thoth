@@ -93,6 +93,32 @@ def _manifest_seconds(manifest: Optional[Dict[str, object]]) -> Optional[float]:
     return None
 
 
+def _manifest_chunk_seconds(manifest: Optional[Dict[str, object]]) -> Optional[float]:
+    if not isinstance(manifest, dict):
+        return None
+    try:
+        value = float(manifest.get("chunk_seconds") or 0.0)
+        return value if value > 0 else None
+    except Exception:
+        return None
+
+
+def _manifest_expected_chunks(manifest: Optional[Dict[str, object]], seconds_recorded: Optional[float]) -> Optional[int]:
+    if not isinstance(manifest, dict):
+        return None
+    try:
+        value = int(manifest.get("expected_chunks") or 0)
+        if value > 0:
+            return value
+    except Exception:
+        pass
+
+    chunk_seconds = _manifest_chunk_seconds(manifest)
+    if chunk_seconds and seconds_recorded and seconds_recorded > 0:
+        return max(1, int(math.ceil(seconds_recorded / chunk_seconds)))
+    return None
+
+
 def _split_csv_line(line: str) -> List[str]:
     cells: List[str] = []
     current: List[str] = []
@@ -398,11 +424,39 @@ def _file_map(minute_dir: Path) -> Dict[str, Path]:
     return result
 
 
+def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Optional[Path]], seconds_recorded: Optional[float]) -> Dict[str, object]:
+    radar_bins = files.get("radar_bins") or []
+    radar_csvs = files.get("radar_csvs") or []
+    predictions_path = files.get("predictions")
+    predictions: Optional[Dict[str, object]] = None
+    if predictions_path and predictions_path.exists():
+        predictions = read_prediction_file(predictions_path.parent)
+
+    expected_chunks = _manifest_expected_chunks(manifest, seconds_recorded)
+    if not expected_chunks:
+        expected_chunks = max(len(radar_bins), len(radar_csvs), len((predictions or {}).get("timeline") or []), 1)
+
+    stored_chunks = min(len(radar_bins), len(radar_csvs)) if radar_bins or radar_csvs else 0
+    analyzed_chunks = len((predictions or {}).get("timeline") or [])
+    storage_percent = min(100.0, (stored_chunks / expected_chunks) * 100.0) if expected_chunks else 0.0
+    prediction_percent = min(100.0, (analyzed_chunks / expected_chunks) * 100.0) if expected_chunks else 0.0
+
+    return {
+        "expected_chunks": expected_chunks,
+        "stored_chunks": stored_chunks,
+        "analyzed_chunks": analyzed_chunks,
+        "storage_percent": storage_percent,
+        "prediction_percent": prediction_percent,
+        "chunk_seconds": _manifest_chunk_seconds(manifest),
+    }
+
+
 def minute_summary(minute_dir: Path) -> Dict[str, object]:
     files = _file_map(minute_dir)
     stat = minute_dir.stat()
     manifest = _load_manifest(minute_dir)
     seconds_recorded = _manifest_seconds(manifest)
+    progress = _minute_progress(manifest, files, seconds_recorded)
     folder_label = _label_for_minute_dir(minute_dir)
     manifest_labels = list(manifest.get("labels") or []) if isinstance(manifest, dict) else []
     labels = manifest_labels or ([folder_label] if folder_label else [])
@@ -417,6 +471,9 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
         "capture_started": manifest.get("capture_started") if isinstance(manifest, dict) else None,
         "capture_finished": manifest.get("capture_finished") if isinstance(manifest, dict) else None,
         "seconds_recorded": seconds_recorded,
+        "chunk_seconds": progress.get("chunk_seconds"),
+        "expected_chunks": progress.get("expected_chunks"),
+        "progress": progress,
         "labels": labels,
         "occupancy": manifest.get("auto_occupancy_label") if isinstance(manifest, dict) else None,
         "predictions": bool(files["predictions"] and files["predictions"].exists()),
@@ -447,6 +504,7 @@ def minute_metrics(minute_dir: Path) -> Dict[str, object]:
     files = _file_map(minute_dir)
     manifest = _load_manifest(minute_dir)
     seconds_recorded = _manifest_seconds(manifest)
+    progress = _minute_progress(manifest, files, seconds_recorded)
 
     video_meta = _probe_video_metadata(files.get("video"))
     csi_path = files.get("csi_timestamped") or files.get("csi_csv") or files.get("csi_serial")
@@ -512,6 +570,10 @@ def minute_metrics(minute_dir: Path) -> Dict[str, object]:
             "data_shape": radar_shape,
             "file_size": radar_path.stat().st_size if radar_path and radar_path.exists() else 0,
             "chunk_count": len(radar_paths),
+            "chunk_seconds": progress.get("chunk_seconds"),
+            "expected_chunks": progress.get("expected_chunks"),
+            "storage_percent": progress.get("storage_percent"),
+            "prediction_percent": progress.get("prediction_percent"),
         },
         "manifest": manifest or {},
     }

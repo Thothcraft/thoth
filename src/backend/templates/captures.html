@@ -100,7 +100,7 @@
                     <div id="stat-csi" class="mt-1 text-lg font-semibold text-gray-950">--</div>
                 </div>
                 <div class="border border-gray-300 p-3">
-                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">Localization rate</div>
+                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">Radar rate</div>
                     <div id="stat-radar" class="mt-1 text-lg font-semibold text-gray-950">--</div>
                 </div>
                 <div class="border border-gray-300 p-3">
@@ -144,7 +144,7 @@
                         <th class="py-3 pr-4">Minute</th>
                         <th class="py-3 pr-4">Label</th>
                         <th class="py-3 pr-4">Video</th>
-                        <th class="py-3 pr-4">Localization</th>
+                        <th class="py-3 pr-4">Radar</th>
                         <th class="py-3 pr-4">CSI</th>
                         <th class="py-3 pr-4">Updated</th>
                         <th class="py-3 pr-4"></th>
@@ -165,6 +165,24 @@
                             {% endif %}
                             {% if minute.occupancy and minute.occupancy.evaluated_frames %}
                                 <div class="mt-1 text-xs text-gray-500">{{ minute.occupancy.detected_frames }} / {{ minute.occupancy.evaluated_frames }} frames detected</div>
+                            {% endif %}
+                            {% if minute.progress %}
+                                <div class="mt-2 space-y-1.5">
+                                    <div class="flex items-center justify-between gap-3 text-[11px] uppercase tracking-wide text-gray-400">
+                                        <span>Storage</span>
+                                        <span>{{ minute.progress.storage_percent|round(0) }}%</span>
+                                    </div>
+                                    <div class="h-2 overflow-hidden rounded-full bg-gray-100">
+                                        <div class="h-full rounded-full bg-cyan-500" style="width: {{ minute.progress.storage_percent|round(2) }}%"></div>
+                                    </div>
+                                    <div class="flex items-center justify-between gap-3 text-[11px] uppercase tracking-wide text-gray-400">
+                                        <span>Predictions</span>
+                                        <span>{{ minute.progress.prediction_percent|round(0) }}%</span>
+                                    </div>
+                                    <div class="h-2 overflow-hidden rounded-full bg-gray-100">
+                                        <div class="h-full rounded-full bg-emerald-500" style="width: {{ minute.progress.prediction_percent|round(2) }}%"></div>
+                                    </div>
+                                </div>
                             {% endif %}
                         </td>
                         <td class="py-3 pr-4">
@@ -651,7 +669,7 @@ document.getElementById('prediction-modal')?.addEventListener('click', (event) =
 });
 refreshStats();
 refreshCaptures();
-window.setInterval(refreshStats, 5000);
-window.setInterval(refreshCaptures, 7000);
+window.setInterval(refreshStats, 2500);
+window.setInterval(refreshCaptures, 3500);
 </script>
 {% endblock %}

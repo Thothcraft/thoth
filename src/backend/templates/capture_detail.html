@@ -32,6 +32,24 @@
                 {% if minute_info.occupancy and minute_info.occupancy.evaluated_frames %}
                 <p class="mt-2 text-sm text-slate-600">{{ minute_info.occupancy.detected_frames }} / {{ minute_info.occupancy.evaluated_frames }} tracked frames detected ({{ '%.1f'|format(minute_info.occupancy.ratio * 100) }}%).</p>
                 {% endif %}
+                {% if minute_info.progress %}
+                <div class="mt-4 max-w-xl space-y-2">
+                    <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-500">
+                        <span>Storage</span>
+                        <span>{{ minute_info.progress.storage_percent|round(0) }}%</span>
+                    </div>
+                    <div class="h-2 overflow-hidden rounded-full bg-slate-100">
+                        <div class="h-full rounded-full bg-cyan-500" style="width: {{ minute_info.progress.storage_percent|round(2) }}%"></div>
+                    </div>
+                    <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-500">
+                        <span>Predictions</span>
+                        <span>{{ minute_info.progress.prediction_percent|round(0) }}%</span>
+                    </div>
+                    <div class="h-2 overflow-hidden rounded-full bg-slate-100">
+                        <div class="h-full rounded-full bg-emerald-500" style="width: {{ minute_info.progress.prediction_percent|round(2) }}%"></div>
+                    </div>
+                </div>
+                {% endif %}
                 <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
                     <input id="minute-label-input" type="text" placeholder="Comma-separated labels"
                         class="w-full rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-900 outline-none placeholder:text-slate-400 sm:max-w-xl" />
@@ -220,17 +238,29 @@ document.addEventListener('DOMContentLoaded', async () => {
   const [id, url] = xyTarget;
   const host = document.getElementById(id);
   if (!host || !url) return;
-  try {
+  const activeMinute = {{ 'true' if minute == active_minute else 'false' }};
+  let timer = null;
+  const render = async () => {
     const payload = await fetchJson(url);
+    const data = payload?.data || {};
     await ThothPlayback.renderAnimatedHeatmap(host, payload, {
-      title: payload?.title || 'X/Y localization',
-      xLabel: payload?.x_label || 'X',
-      yLabel: payload?.y_label || 'Y',
+      title: data?.title || payload?.title || 'X/Y localization',
+      xLabel: data?.x_label || payload?.x_label || 'X',
+      yLabel: data?.y_label || payload?.y_label || 'Y',
       uirevision: 'capture-xy',
     });
+  };
+  try {
+    await render();
+    if (activeMinute) {
+      timer = window.setInterval(render, 2500);
+    }
   } catch (error) {
     host.innerHTML = `<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">${String(error).replace(/[<>&]/g, '')}</div>`;
   }
+  window.addEventListener('beforeunload', () => {
+    if (timer) window.clearInterval(timer);
+  });
 });
 </script>
 {% endblock %}

@@ -899,6 +899,75 @@ def _cached_radar_plot_path(radar_path: Path, plot: str, cache_name: str) -> Pat
     return cache_path
 
 
+def _blank_xy_payload(title: str = 'X-Y localization') -> Dict[str, Any]:
+    return {
+        'plot': 'xy-tracking',
+        'title': title,
+        'x_label': 'X (m)',
+        'y_label': 'Y (m)',
+        'x': [0.0, 1.0],
+        'y': [0.0, 1.0],
+        'z': [[0.0, 0.0], [0.0, 0.0]],
+        'frames': [],
+        'frame_count': 0,
+        'sample_count': 0,
+        'frame_interval_ms': 1000,
+        'updated': datetime.utcnow().isoformat(),
+        'occupancy': {
+            'label': 'empty',
+            'detected_frames': 0,
+            'evaluated_frames': 0,
+            'ratio': 0.0,
+            'threshold_percent': 50.0,
+        },
+        'location': [0.0, 0.0],
+        'score': 0.0,
+        'detected': False,
+        'snr_db': 0.0,
+        'threshold_db': 0.0,
+        'peak_power_db': 0.0,
+        'noise_floor_db': 0.0,
+        'targets': [],
+        'motion_points': 0,
+    }
+
+
+def _load_xy_tracking_payload(minute_dir: Path, files: Dict[str, Optional[Path]]) -> Dict[str, Any]:
+    xy_payload_path = minute_dir / 'xy-tracking.json'
+    if xy_payload_path.exists():
+        try:
+            payload = json.loads(xy_payload_path.read_text(encoding='utf-8'))
+            if isinstance(payload, dict):
+                return payload
+        except Exception as exc:
+            logger.warning('Unable to read xy tracking payload for %s: %s', minute_dir.name, exc)
+
+    chunk_payloads: list[Dict[str, Any]] = []
+    for radar_path in reversed(files.get('radar_bins') or []):
+        if not radar_path or not radar_path.exists():
+            continue
+        try:
+            payload = _radar_plot_payload(radar_path, 'xy-tracking')
+            if isinstance(payload, dict):
+                chunk_payloads.append(payload)
+        except Exception as exc:
+            logger.debug('Skipping incomplete radar chunk %s: %s', radar_path.name, exc)
+            continue
+        if chunk_payloads:
+            break
+
+    if chunk_payloads:
+        try:
+            from backend.radar_analysis import compile_minute_xy_payload
+            combined = compile_minute_xy_payload(chunk_payloads)
+            if isinstance(combined, dict):
+                return combined
+        except Exception as exc:
+            logger.warning('Unable to combine xy tracking chunks for %s: %s', minute_dir.name, exc)
+
+    return _blank_xy_payload()
+
+
 def get_capture_overview() -> Dict[str, Any]:
     """Summarize the capture directory."""
     minutes = list_minutes()
@@ -1972,16 +2041,9 @@ def api_capture_radar_data(minute, plot):
     if plot not in RADAR_PLOTS:
         abort(404, description=f'Unsupported radar plot kind: {plot}')
 
-    files = capture_files(minute_dir)
     try:
-        xy_payload_path = minute_dir / 'xy-tracking.json'
-        if xy_payload_path.exists():
-            payload = json.loads(xy_payload_path.read_text(encoding='utf-8'))
-        else:
-            radar_path = files.get('radar')
-            if not radar_path or not radar_path.exists():
-                abort(404, description='No xy localization data available')
-            payload = _radar_plot_payload(radar_path, plot)
+        files = capture_files(minute_dir)
+        payload = _load_xy_tracking_payload(minute_dir, files)
     except Exception as exc:
         logger.exception(f"Failed to build xy data {plot}: {exc}")
         abort(500, description=str(exc))
@@ -2212,14 +2274,7 @@ def api_live_capture_radar_data(plot):
         abort(404, description='No live capture minute available')
 
     try:
-        xy_payload_path = minute_dir / 'xy-tracking.json'
-        if xy_payload_path.exists():
-            payload = json.loads(xy_payload_path.read_text(encoding='utf-8'))
-        else:
-            radar_path = files.get('radar')
-            if not radar_path or not radar_path.exists():
-                abort(404, description='No xy localization data available')
-            payload = _radar_plot_payload(radar_path, plot)
+        payload = _load_xy_tracking_payload(minute_dir, files)
     except Exception as exc:
         logger.exception(f"Failed to build live xy data {plot}: {exc}")
         abort(500, description=str(exc))

@@ -61,10 +61,28 @@
             <div class="font-mono text-sm font-semibold text-slate-950">{{ minute.relative_path or minute.minute }}</div>
             <div class="mt-1 flex flex-wrap gap-2 text-xs text-slate-500">
               <span>Video data {{ 'saved' if minute.files.video else 'missing' }}</span>
-              <span>Localization data {{ 'saved' if minute.files.radar else 'missing' }}</span>
+              <span>Radar data {{ 'saved' if minute.files.radar else 'missing' }}</span>
               <span>CSI data {{ 'saved' if minute.files.csi else 'missing' }}</span>
               <span>Sense HAT data {{ 'saved' if minute.files.sense_hat else 'missing' }}</span>
             </div>
+            {% if minute.progress %}
+            <div class="mt-2 w-full max-w-md">
+              <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
+                <span>Storage</span>
+                <span>{{ minute.progress.storage_percent|round(0) }}%</span>
+              </div>
+              <div class="mt-1 h-2 overflow-hidden rounded-full bg-slate-100">
+                <div class="h-full rounded-full bg-cyan-500" style="width: {{ minute.progress.storage_percent|round(2) }}%"></div>
+              </div>
+              <div class="mt-2 flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
+                <span>Predictions</span>
+                <span>{{ minute.progress.prediction_percent|round(0) }}%</span>
+              </div>
+              <div class="mt-1 h-2 overflow-hidden rounded-full bg-slate-100">
+                <div class="h-full rounded-full bg-emerald-500" style="width: {{ minute.progress.prediction_percent|round(2) }}%"></div>
+              </div>
+            </div>
+            {% endif %}
           </div>
           <div class="text-right">
             {% if minute.labels %}

@@ -8,6 +8,7 @@ import csv
 import datetime as dt
 import glob
 import json
+import math
 import os
 import shutil
 import signal
@@ -432,6 +433,7 @@ def chown_to_invoking_user(path: Path) -> None:
 def main() -> int:
     args = parse_args()
     preset_labels = normalize_labels(args.label or [])
+    chunk_seconds = max(1.0, float(args.chunk_seconds))
     target_start = minute_start(args.start_now)
     folder_name = target_start.strftime("%Y%m%d_%H%M")
     output_dir = output_dir_for_minute(folder_name, preset_labels)
@@ -441,6 +443,8 @@ def main() -> int:
         "folder_minute": folder_name,
         "scheduled_start": target_start.isoformat(timespec="seconds"),
         "duration_seconds": args.duration,
+        "chunk_seconds": chunk_seconds,
+        "expected_chunks": max(1, int(math.ceil(args.duration / chunk_seconds))),
         "labels": preset_labels,
         "outputs": {},
         "errors": [],
@@ -478,7 +482,6 @@ def main() -> int:
     radar_threads: list[threading.Thread] = []
     radar_chunk_results: list[dict[str, Any]] = []
     room_config = load_room_config()
-    chunk_seconds = max(1.0, float(args.chunk_seconds))
 
     try:
         if not args.no_csi and csi_port is not None:
