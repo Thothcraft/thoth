@@ -717,7 +717,8 @@ def main() -> int:
         if sense_thread is not None:
             sense_thread.join(timeout=5)
         for thread in radar_threads:
-            thread.join(timeout=10)
+            # A minute is not complete until every captured chunk has its CSV and prediction.
+            thread.join()
         completed_chunks: list[dict[str, Any]] = []
         for chunk in radar_chunk_results:
             if not isinstance(chunk, dict):
