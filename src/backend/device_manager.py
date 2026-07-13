@@ -14,7 +14,7 @@ import time
 import threading
 import base64
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Any, Tuple, List
 
@@ -48,6 +48,8 @@ class DeviceManager:
         self._last_file_report_signature = None
         self._uploading_minutes: set[str] = set()
         self._uploading_minutes_lock = threading.Lock()
+        self._settings_sync_pending = False
+        self._settings_sync_error: Optional[str] = None
 
         # Device status
         self.status = {
@@ -161,15 +163,29 @@ class DeviceManager:
     def _capture_settings_path(self) -> Path:
         return self._config_dir() / 'capture_settings.json'
 
+    @staticmethod
+    def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+        """Durably replace a JSON settings file or raise the write failure."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f'.{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
+        try:
+            with open(temporary, 'w', encoding='utf-8') as handle:
+                json.dump(payload, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def _default_device_settings(self) -> Dict[str, Any]:
         return {
             'portal_upload_allowed': True,
             'deployment_requests_allowed': True,
             'cloud_sync_allowed': True,
             'auto_registration_enabled': True,
-            'radar_detection_threshold_db': 8.0,
-            'auto_occupancy_label_enabled': True,
-            'occupancy_threshold_percent': 50.0,
         }
 
     def _coerce_setting_value(self, key: str, value: Any) -> Any:
@@ -215,19 +231,27 @@ class DeviceManager:
         return settings
 
     def save_device_settings(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        processing_keys = {
+            'radar_detection_threshold_db',
+            'occupancy_threshold_percent',
+            'auto_occupancy_label_enabled',
+        }
+        capture_updates = {key: value for key, value in (updates or {}).items() if key in processing_keys}
+        device_updates = {key: value for key, value in (updates or {}).items() if key not in processing_keys}
         settings = self.load_device_settings()
-        settings.update({k: self._coerce_setting_value(k, v) for k, v in (updates or {}).items()})
-        try:
-            path = self._settings_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, 'w', encoding='utf-8') as handle:
-                json.dump(settings, handle, indent=2)
-            self.device_settings = settings
-            if self.registered and self.auth_token:
-                self.update_status({'online': True, 'hardware_info': self._build_hardware_info()})
-        except Exception as e:
-            logger.error(f"Error saving device settings: {e}")
-        return settings
+        settings.update({k: self._coerce_setting_value(k, v) for k, v in device_updates.items()})
+        self._write_json_atomic(self._settings_path(), settings)
+        self.device_settings = settings
+        if capture_updates:
+            self.save_capture_settings(capture_updates, local_change=True)
+        if self.registered and self.auth_token:
+            synchronized = self.update_status({'online': True, 'hardware_info': self._build_hardware_info()})
+            self._settings_sync_pending = not synchronized
+            self._settings_sync_error = None if synchronized else 'Brain synchronization failed; the local change will retry on heartbeat.'
+        else:
+            self._settings_sync_pending = True
+            self._settings_sync_error = None
+        return self.get_device_settings()
 
     def _build_hardware_info(self) -> Dict[str, Any]:
         import platform
@@ -273,7 +297,13 @@ class DeviceManager:
         return hardware_info
 
     def get_device_settings(self) -> Dict[str, Any]:
-        return self.load_device_settings()
+        return {
+            **self.load_device_settings(),
+            **self.load_capture_settings(),
+            'sync_pending': self._settings_sync_pending,
+            'sync_status': 'pending' if self._settings_sync_pending else 'saved',
+            'sync_error': self._settings_sync_error,
+        }
 
     def default_capture_settings(self) -> Dict[str, Any]:
         return {
@@ -284,6 +314,11 @@ class DeviceManager:
                 'esp32_csi': True,
                 'sense_hat': True,
             },
+            'radar_detection_threshold_db': 8.0,
+            'occupancy_threshold_percent': 50.0,
+            'auto_occupancy_label_enabled': True,
+            'revision': 0,
+            'updated_at': None,
         }
 
     def normalize_capture_settings(self, settings: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -303,7 +338,26 @@ class DeviceManager:
         for key in sensors:
             if key in raw_sensors:
                 sensors[key] = bool(raw_sensors.get(key))
-        return {'labels': labels, 'sensors': sensors}
+        try:
+            revision = max(0, int(source.get('revision') or 0))
+        except (TypeError, ValueError):
+            revision = 0
+        updated_at = source.get('updated_at')
+        return {
+            'labels': labels,
+            'sensors': sensors,
+            'radar_detection_threshold_db': self._coerce_setting_value(
+                'radar_detection_threshold_db', source.get('radar_detection_threshold_db', 8.0)
+            ),
+            'occupancy_threshold_percent': self._coerce_setting_value(
+                'occupancy_threshold_percent', source.get('occupancy_threshold_percent', 50.0)
+            ),
+            'auto_occupancy_label_enabled': self._coerce_setting_value(
+                'auto_occupancy_label_enabled', source.get('auto_occupancy_label_enabled', True)
+            ),
+            'revision': revision,
+            'updated_at': str(updated_at) if updated_at else None,
+        }
 
     def load_capture_settings(self) -> Dict[str, Any]:
         try:
@@ -312,23 +366,41 @@ class DeviceManager:
             source = path if path.exists() else legacy_path
             if source.exists():
                 loaded = json.loads(source.read_text(encoding='utf-8'))
+                # Migrate processing controls from the legacy device settings file.
+                legacy_device_settings = self.load_device_settings()
+                for key in ('radar_detection_threshold_db', 'occupancy_threshold_percent', 'auto_occupancy_label_enabled'):
+                    if key not in loaded and key in legacy_device_settings:
+                        loaded[key] = legacy_device_settings[key]
                 if source != path:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(json.dumps(loaded, indent=2), encoding='utf-8')
+                    self._write_json_atomic(path, self.normalize_capture_settings(loaded))
                 return self.normalize_capture_settings(loaded)
         except Exception as e:
             logger.error(f"Error loading capture settings: {e}")
         return self.default_capture_settings()
 
-    def save_capture_settings(self, settings: Dict[str, Any] | None) -> Dict[str, Any]:
-        normalized = self.normalize_capture_settings(settings)
-        try:
-            path = self._capture_settings_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(normalized, indent=2), encoding='utf-8')
-        except Exception as e:
-            logger.error(f"Error saving capture settings: {e}")
+    def save_capture_settings(self, settings: Dict[str, Any] | None, *, local_change: bool = True) -> Dict[str, Any]:
+        current = self.load_capture_settings()
+        normalized = self.normalize_capture_settings({**current, **(settings or {})})
+        if local_change:
+            normalized['revision'] = max(int(current.get('revision') or 0), int(normalized.get('revision') or 0)) + 1
+            normalized['updated_at'] = datetime.now(timezone.utc).isoformat()
+            self._settings_sync_pending = True
+        self._write_json_atomic(self._capture_settings_path(), normalized)
         return normalized
+
+    def save_and_sync_capture_settings(self, settings: Dict[str, Any] | None) -> Dict[str, Any]:
+        """Persist locally first, then attempt a device-authenticated Brain sync."""
+        saved = self.save_capture_settings(settings, local_change=True)
+        if self.registered and self.auth_token:
+            synchronized = self.update_status({'online': True, 'hardware_info': self._build_hardware_info()})
+            self._settings_sync_pending = not synchronized
+            self._settings_sync_error = None if synchronized else 'Brain synchronization failed; the local change will retry on heartbeat.'
+        return {
+            **self.load_capture_settings(),
+            'sync_pending': self._settings_sync_pending,
+            'sync_status': 'pending' if self._settings_sync_pending else 'saved',
+            'sync_error': self._settings_sync_error,
+        }
 
     def _apply_response_settings(self, result: Dict[str, Any]) -> None:
         if not isinstance(result, dict):
@@ -338,7 +410,19 @@ class DeviceManager:
         if settings is None and isinstance(data, dict):
             settings = data.get('capture_settings')
         if isinstance(settings, dict):
-            self.save_capture_settings(settings)
+            local = self.load_capture_settings()
+            remote = self.normalize_capture_settings(settings)
+            local_revision = int(local.get('revision') or 0)
+            remote_revision = int(remote.get('revision') or 0)
+            local_key = (local_revision, str(local.get('updated_at') or ''))
+            remote_key = (remote_revision, str(remote.get('updated_at') or ''))
+            if remote_key > local_key:
+                self.save_capture_settings(remote, local_change=False)
+                self._settings_sync_pending = False
+                self._settings_sync_error = None
+            elif remote_key == local_key:
+                self._settings_sync_pending = False
+                self._settings_sync_error = None
         pending = result.get('pending_uploads')
         if pending is None and isinstance(data, dict):
             pending = data.get('pending_uploads')

@@ -1,11 +1,16 @@
-"""Publish completed-minute occupancy to Home Assistant's REST API."""
+"""Non-blocking per-chunk occupancy publishing for Home Assistant."""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import queue
+import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 
 import requests
 
@@ -20,6 +25,32 @@ DEFAULTS: Dict[str, Any] = {
     "token": "",
     "entity_id": "binary_sensor.thoth_occupancy",
 }
+_status_lock = threading.Lock()
+_last_status: Dict[str, Any] = {"status": "unknown", "updated_at": None}
+
+
+def _record_status(result: Dict[str, Any]) -> Dict[str, Any]:
+    with _status_lock:
+        _last_status.clear()
+        _last_status.update(result)
+        _last_status["updated_at"] = datetime.now(timezone.utc).isoformat()
+    return result
+
+
+def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def load_home_assistant_config(include_token: bool = False) -> Dict[str, Any]:
@@ -28,10 +59,12 @@ def load_home_assistant_config(include_token: bool = False) -> Dict[str, Any]:
         if CONFIG_PATH.exists():
             loaded = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
-                config.update(loaded)
+                config.update({key: loaded[key] for key in DEFAULTS if key in loaded})
     except Exception as exc:
         logger.warning("Unable to load Home Assistant settings: %s", exc)
     config["configured"] = bool(config.get("token"))
+    with _status_lock:
+        config["connection_status"] = dict(_last_status)
     if not include_token:
         config.pop("token", None)
     return config
@@ -41,51 +74,168 @@ def save_home_assistant_config(updates: Dict[str, Any]) -> Dict[str, Any]:
     config = load_home_assistant_config(include_token=True)
     if "enabled" in updates:
         config["enabled"] = bool(updates["enabled"])
-    if updates.get("base_url"):
-        config["base_url"] = str(updates["base_url"]).strip().rstrip("/")
-    if updates.get("entity_id"):
-        entity_id = str(updates["entity_id"]).strip().lower()
-        config["entity_id"] = entity_id if entity_id.startswith("binary_sensor.") else f"binary_sensor.{entity_id}"
+    if updates.get("base_url") is not None:
+        base_url = str(updates.get("base_url") or "").strip().rstrip("/")
+        if base_url:
+            config["base_url"] = base_url
+    if updates.get("entity_id") is not None:
+        entity_id = str(updates.get("entity_id") or "").strip().lower()
+        if entity_id:
+            config["entity_id"] = entity_id if entity_id.startswith("binary_sensor.") else f"binary_sensor.{entity_id}"
+    # An empty browser field deliberately preserves the locally stored secret.
     if updates.get("token"):
         config["token"] = str(updates["token"]).strip()
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps({key: config[key] for key in DEFAULTS}, indent=2), encoding="utf-8")
+    _write_json_atomic(CONFIG_PATH, {key: config[key] for key in DEFAULTS})
     return load_home_assistant_config()
 
 
-def publish_occupancy(occupancy: Dict[str, Any], minute: str) -> Dict[str, Any]:
-    config = load_home_assistant_config(include_token=True)
-    if not config.get("enabled"):
-        return {"success": False, "status": "disabled"}
-    if not config.get("token"):
-        return {"success": False, "status": "not_configured"}
-
+def _occupancy_payload(
+    occupancy: Dict[str, Any],
+    minute: str,
+    *,
+    chunk_index: Optional[int] = None,
+    location: Any = None,
+    confidence: Any = None,
+    timestamp: Optional[str] = None,
+) -> Dict[str, Any]:
     detected = max(0, int(occupancy.get("detected_frames") or 0))
     total = max(0, int(occupancy.get("evaluated_frames") or 0))
+    ratio = float(occupancy.get("ratio") or (detected / total if total else 0.0))
     label = str(occupancy.get("label") or "empty")
-    entity_id = str(config["entity_id"])
-    payload = {
+    coordinates = location
+    if isinstance(location, (list, tuple)):
+        coordinates = {"x": location[0] if len(location) > 0 else None, "y": location[1] if len(location) > 1 else None}
+    return {
         "state": "on" if label == "occupied" else "off",
         "attributes": {
             "friendly_name": "Thoth Occupancy",
             "device_class": "occupancy",
             "label": label,
             "capture_minute": minute,
+            "chunk_index": chunk_index,
             "detected_frames": detected,
             "evaluated_frames": total,
-            "detected_percent": round(detected * 100 / total, 2) if total else 0.0,
-            "threshold_percent": occupancy.get("threshold_percent", 50.0),
+            "ratio": ratio,
+            "detected_percent": round(ratio * 100, 2),
+            "threshold_percent": float(occupancy.get("threshold_percent", 50.0)),
+            "coordinates": coordinates,
+            "confidence": confidence,
+            "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
         },
     }
+
+
+def publish_occupancy(
+    occupancy: Dict[str, Any],
+    minute: str,
+    *,
+    chunk_index: Optional[int] = None,
+    location: Any = None,
+    confidence: Any = None,
+    timestamp: Optional[str] = None,
+    timeout: float = 5.0,
+) -> Dict[str, Any]:
+    config = load_home_assistant_config(include_token=True)
+    if not config.get("enabled"):
+        return _record_status({"success": False, "status": "disabled"})
+    if not config.get("token"):
+        return _record_status({"success": False, "status": "not_configured"})
+
+    payload = _occupancy_payload(
+        occupancy, minute, chunk_index=chunk_index, location=location,
+        confidence=confidence, timestamp=timestamp,
+    )
+    entity_id = str(config["entity_id"])
     try:
         response = requests.post(
             f"{config['base_url']}/api/states/{entity_id}",
             json=payload,
             headers={"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"},
-            timeout=10,
+            timeout=timeout,
         )
         response.raise_for_status()
-        return {"success": True, "status": "published", "entity_id": entity_id, "state": payload["state"]}
+        return _record_status({
+            "success": True,
+            "status": "published",
+            "entity_id": entity_id,
+            "state": payload["state"],
+            "published_at": datetime.now(timezone.utc).isoformat(),
+        })
     except Exception as exc:
         logger.warning("Home Assistant occupancy publish failed: %s", exc)
-        return {"success": False, "status": "error", "error": str(exc)}
+        return _record_status({"success": False, "status": "error", "error": str(exc)})
+
+
+def test_home_assistant_connection(timeout: float = 5.0) -> Dict[str, Any]:
+    config = load_home_assistant_config(include_token=True)
+    if not config.get("token"):
+        return _record_status({"success": False, "status": "not_configured", "message": "A Home Assistant token is required."})
+    try:
+        response = requests.get(
+            f"{config['base_url']}/api/",
+            headers={"Authorization": f"Bearer {config['token']}"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return _record_status({"success": True, "status": "connected", "base_url": config["base_url"]})
+    except Exception as exc:
+        return _record_status({"success": False, "status": "error", "message": str(exc)})
+
+
+PublishCallback = Callable[[Dict[str, Any]], None]
+
+
+class HomeAssistantPublisher:
+    """A single bounded publisher worker; capture and analysis never wait on HTTP."""
+
+    def __init__(self, max_queue: int = 12, retry_delays: tuple[float, ...] = (0.5, 1.0, 2.0)):
+        self._queue: queue.Queue[Optional[tuple[Dict[str, Any], str, Dict[str, Any], Optional[PublishCallback]]]] = queue.Queue(maxsize=max_queue)
+        self._retry_delays = retry_delays
+        self._thread = threading.Thread(target=self._run, name="HomeAssistantPublisher", daemon=True)
+        self._thread.start()
+
+    def submit(self, occupancy: Dict[str, Any], minute: str, callback: Optional[PublishCallback] = None, **metadata: Any) -> bool:
+        try:
+            self._queue.put_nowait((dict(occupancy), minute, metadata, callback))
+            return True
+        except queue.Full:
+            result = {"success": False, "status": "queue_full", "error": "Home Assistant publisher queue is full"}
+            if callback:
+                callback(result)
+            return False
+
+    def _run(self) -> None:
+        while True:
+            job = self._queue.get()
+            try:
+                if job is None:
+                    return
+                occupancy, minute, metadata, callback = job
+                result = publish_occupancy(occupancy, minute, **metadata)
+                for delay in self._retry_delays:
+                    if result.get("success") or result.get("status") in {"disabled", "not_configured"}:
+                        break
+                    time.sleep(delay)
+                    result = publish_occupancy(occupancy, minute, **metadata)
+                if callback:
+                    try:
+                        callback(result)
+                    except Exception:
+                        logger.exception("Home Assistant publish callback failed")
+            finally:
+                self._queue.task_done()
+
+    def drain(self) -> None:
+        self._queue.join()
+
+
+_publisher: Optional[HomeAssistantPublisher] = None
+_publisher_lock = threading.Lock()
+
+
+def get_home_assistant_publisher() -> HomeAssistantPublisher:
+    global _publisher
+    with _publisher_lock:
+        if _publisher is None:
+            _publisher = HomeAssistantPublisher()
+        return _publisher

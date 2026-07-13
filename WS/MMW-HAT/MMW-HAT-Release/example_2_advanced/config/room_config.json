@@ -5,7 +5,7 @@
     "sensor_wall": "Back",
     "sensor_position_m": 2.02,
     "sensor_height_m": 1.0,
-    "floor_anchored_targets": true,
+    "floor_anchored_targets": false,
     "max_object_height_m": 2.2,
     "max_object_width_m": 0.95,
     "max_object_depth_m": 0.8,

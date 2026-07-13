@@ -84,4 +84,4 @@ The Pi can advertise `thoth.local`, but it cannot force every client network sta
 1. Open `http://thoth.local:8123` and complete Home Assistant onboarding.
 2. In Home Assistant, open your profile, create a long-lived access token, then paste it into Thoth **Settings → Home Assistant occupancy**.
 3. Home Assistant normally discovers a Hue Bridge automatically. Go to **Settings → Devices & services**, choose the discovered Hue integration, press the bridge button when prompted, and submit. If it is not discovered, choose **Add integration → Philips Hue** and enter the bridge IP.
-4. After each evaluated capture minute, Thoth updates `binary_sensor.thoth_occupancy`. Use that entity as the trigger in Home Assistant automations for Hue lights or other devices.
+4. After each evaluated 10-second radar chunk, Thoth updates `binary_sensor.thoth_occupancy`. Use that entity as the trigger in Home Assistant automations for Hue lights or other devices.

@@ -50,10 +50,8 @@
                     </div>
                     <div id="chunk-timeline" class="flex items-start gap-2 pt-2" aria-label="Chunk prediction timeline">
                         {% for chunk in minute_info.progress.chunks %}
-                        <div class="min-w-0 flex-1 text-center" title="Chunk {{ chunk.index + 1 }}: {{ chunk.state }}{% if chunk.location %} at {{ chunk.location.x|round(2) }}, {{ chunk.location.y|round(2) }} m{% endif %}">
-                            <div class="mx-auto h-3 w-3 rounded-full ring-2 ring-white {% if chunk.state == 'occupied' %}bg-emerald-500{% elif chunk.state == 'empty' %}bg-red-500{% elif chunk.state == 'analyzing' %}animate-pulse bg-cyan-500{% elif chunk.state == 'error' %}bg-amber-500{% else %}bg-slate-200{% endif %}"></div>
-                            <div class="mt-1 truncate text-[9px] font-semibold uppercase text-slate-600">{{ chunk.state }}</div>
-                            <div class="mt-1 text-[9px] text-slate-400">{{ ((chunk.index * minute_info.progress.chunk_seconds)|round(0)|int) if minute_info.progress.chunk_seconds else chunk.index + 1 }}{% if minute_info.progress.chunk_seconds %}s{% endif %}</div>
+                        <div class="min-w-0 flex-1 text-center" title="Chunk {{ chunk.index + 1 }}{% if chunk.ratio is defined and chunk.ratio is not none %}; ratio {{ (chunk.ratio * 100)|round(1) }}%{% endif %}{% if chunk.location is defined and chunk.location %}; coordinates {{ chunk.location.x|round(2) }}, {{ chunk.location.y|round(2) }} m{% endif %}{% if chunk.error is defined and chunk.error %}; {{ chunk.error }}{% endif %}">
+                            <div role="img" tabindex="0" title="Chunk {{ chunk.index + 1 }}{% if chunk.ratio is defined and chunk.ratio is not none %}; ratio {{ (chunk.ratio * 100)|round(1) }}%{% endif %}{% if chunk.location is defined and chunk.location %}; coordinates {{ chunk.location.x|round(2) }}, {{ chunk.location.y|round(2) }} m{% endif %}{% if chunk.error is defined and chunk.error %}; {{ chunk.error }}{% endif %}" aria-label="Chunk {{ chunk.index + 1 }} status indicator" class="mx-auto h-3 w-3 rounded-full ring-2 ring-white {% if chunk.state == 'occupied' %}bg-emerald-500{% elif chunk.state == 'empty' %}bg-red-500{% elif chunk.state == 'collecting' %}animate-pulse bg-blue-500{% elif chunk.state in ['stored', 'analyzing'] %}animate-pulse bg-cyan-500{% elif chunk.state == 'error' %}bg-amber-500{% else %}bg-slate-300{% endif %}"></div>
                         </div>
                         {% endfor %}
                     </div>
@@ -264,11 +262,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const progress = response?.capture?.progress;
     const timeline = document.getElementById('chunk-timeline');
     if (!progress || !timeline) return;
-    const colors = { occupied: 'bg-emerald-500', empty: 'bg-red-500', analyzing: 'animate-pulse bg-cyan-500', error: 'bg-amber-500', waiting: 'bg-slate-200' };
-    timeline.innerHTML = (progress.chunks || []).map((chunk) => {
-      const offset = progress.chunk_seconds ? `${Math.round(chunk.index * progress.chunk_seconds)}s` : String(chunk.index + 1);
+    const colors = { occupied: 'bg-emerald-500', empty: 'bg-red-500', collecting: 'animate-pulse bg-blue-500', stored: 'animate-pulse bg-cyan-500', analyzing: 'animate-pulse bg-cyan-500', error: 'bg-amber-500', waiting: 'bg-slate-300' };
+    timeline.innerHTML = (progress.chunks || []).slice(0, 6).map((chunk) => {
       const location = chunk.location ? ` at ${Number(chunk.location.x).toFixed(2)}, ${Number(chunk.location.y).toFixed(2)} m` : '';
-      return `<div class="min-w-0 flex-1 text-center" title="Chunk ${chunk.index + 1}: ${chunk.state}${location}"><div class="mx-auto h-3 w-3 rounded-full ring-2 ring-white ${colors[chunk.state] || colors.waiting}"></div><div class="mt-1 truncate text-[9px] font-semibold uppercase text-slate-600">${chunk.state}</div><div class="mt-1 text-[9px] text-slate-400">${offset}</div></div>`;
+      const detail = `Chunk ${chunk.index + 1}${chunk.ratio == null ? '' : `; ratio ${(Number(chunk.ratio) * 100).toFixed(1)}%`}${location}${chunk.error ? `; ${chunk.error}` : ''}`;
+      return `<div class="min-w-0 flex-1 text-center" title="${detail}"><div role="img" tabindex="0" title="${detail}" aria-label="Chunk ${chunk.index + 1} status indicator" class="mx-auto h-3 w-3 rounded-full ring-2 ring-white ${colors[chunk.state] || colors.waiting}"></div></div>`;
     }).join('');
   };
   try {

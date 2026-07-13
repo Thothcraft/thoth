@@ -4,50 +4,50 @@
 
 {% block content %}
 <div class="space-y-6">
-  <section class="rounded-2xl bg-slate-950 px-6 py-6 text-white shadow-lg">
+  <section class="rounded-2xl border border-slate-300 bg-white px-6 py-6 text-slate-950 shadow-sm">
     <div class="max-w-3xl">
-      <div class="text-xs uppercase tracking-[0.28em] text-slate-400">Settings</div>
+      <div class="text-xs uppercase tracking-[0.28em] text-slate-500">Settings</div>
       <h1 class="mt-2 text-3xl font-semibold">Device control</h1>
-      <p class="mt-2 text-sm leading-6 text-slate-300">
+      <p class="mt-2 text-sm leading-6 text-slate-600">
         These toggles control how the device exposes data and accepts work from the Research Portal.
       </p>
     </div>
   </section>
 
-  <section class="rounded-2xl border border-slate-800 bg-slate-900 p-5 text-slate-100 shadow-xl shadow-black/10">
+  <section class="rounded-2xl border border-slate-300 bg-white p-5 text-slate-950 shadow-sm">
     <form id="settings-form" class="space-y-4">
-      <label class="flex items-start justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
+      <label class="flex items-start justify-between gap-4 rounded-xl border border-slate-300 bg-slate-50 p-4">
         <span>
-          <span class="block text-base font-semibold text-white">Portal uploads</span>
-          <span class="block text-sm text-slate-400">Allow Research Portal to request uploads from this device.</span>
+          <span class="block text-base font-semibold text-slate-950">Portal uploads</span>
+          <span class="block text-sm text-slate-600">Allow Research Portal to request uploads from this device.</span>
         </span>
         <input type="checkbox" name="portal_upload_allowed" class="mt-1 h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" {% if device_settings.portal_upload_allowed %}checked{% endif %}>
       </label>
 
-      <section class="rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
+      <section class="rounded-xl border border-slate-300 bg-slate-50 p-4">
         <div class="flex items-start justify-between gap-4">
           <span>
-            <span class="block text-base font-semibold text-white">Home Assistant occupancy</span>
-            <span class="block text-sm text-slate-400">Publish each completed minute as an occupancy binary sensor through Home Assistant's REST API.</span>
+            <span class="block text-base font-semibold text-slate-950">Home Assistant occupancy</span>
+            <span class="block text-sm text-slate-600">Publish every completed 10-second chunk as an occupancy binary sensor.</span>
           </span>
           <input type="checkbox" name="home_assistant_enabled" class="mt-1 h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" {% if home_assistant.enabled %}checked{% endif %}>
         </div>
         <div class="mt-4 grid gap-3 md:grid-cols-2">
-          <label class="text-sm text-slate-300">Home Assistant URL
-            <input name="home_assistant_base_url" value="{{ home_assistant.base_url }}" class="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-white" placeholder="http://127.0.0.1:8123">
+          <label class="text-sm text-slate-700">Home Assistant URL
+            <input name="home_assistant_base_url" value="{{ home_assistant.base_url }}" class="mt-1 w-full rounded-lg border border-slate-400 bg-white px-3 py-2 text-slate-950" placeholder="http://127.0.0.1:8123">
           </label>
-          <label class="text-sm text-slate-300">Entity ID
-            <input name="home_assistant_entity_id" value="{{ home_assistant.entity_id }}" class="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-white" placeholder="binary_sensor.thoth_occupancy">
+          <label class="text-sm text-slate-700">Entity ID
+            <input name="home_assistant_entity_id" value="{{ home_assistant.entity_id }}" class="mt-1 w-full rounded-lg border border-slate-400 bg-white px-3 py-2 text-slate-950" placeholder="binary_sensor.thoth_occupancy">
           </label>
         </div>
-        <label class="mt-3 block text-sm text-slate-300">Long-lived access token
-          <input name="home_assistant_token" type="password" class="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-white" placeholder="{{ 'Configured — leave blank to keep it' if home_assistant.configured else 'Create this in your Home Assistant profile' }}" autocomplete="new-password">
+        <label class="mt-3 block text-sm text-slate-700">Long-lived access token
+          <input name="home_assistant_token" type="password" class="mt-1 w-full rounded-lg border border-slate-400 bg-white px-3 py-2 text-slate-950" placeholder="{{ 'Configured — leave blank to keep it' if home_assistant.configured else 'Create this in your Home Assistant profile' }}" autocomplete="new-password">
         </label>
-        <div class="mt-3 text-xs text-slate-400">Home Assistant: <a href="http://thoth.local:8123" target="_blank" rel="noreferrer" class="font-semibold text-cyan-300 underline">open onboarding</a>. The token is stored locally and is never returned to the browser.</div>
+        <div class="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-600"><button id="test-home-assistant" type="button" class="rounded-lg border border-slate-400 bg-white px-3 py-2 font-semibold text-slate-900">Test connection</button><span id="home-assistant-status">{{ home_assistant.connection_status.status|replace('_', ' ')|title if home_assistant.connection_status.status != 'unknown' else ('Configured' if home_assistant.configured else 'Not configured') }}</span><span>The token stays local and is never returned.</span></div>
       </section>
 
-      <label class="block rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
-        <span class="block text-base font-semibold text-white">Radar detection threshold</span>
+      <label class="block rounded-xl border border-slate-300 bg-slate-50 p-4">
+        <span class="block text-base font-semibold text-slate-950">Radar detection threshold</span>
         <span class="mt-1 block text-sm text-slate-400">Required signal above the measured noise floor. Raise it to reject more noise; lower it for weaker or more distant people.</span>
         <span class="mt-4 flex items-center gap-3">
           <input type="range" name="radar_detection_threshold_db" min="0" max="24" step="0.5" value="{{ device_settings.radar_detection_threshold_db|default(8.0) }}" class="h-2 flex-1 accent-cyan-400" oninput="document.getElementById('radar-threshold-value').textContent = Number(this.value).toFixed(1) + ' dB'">
@@ -55,26 +55,26 @@
         </span>
       </label>
 
-      <label class="flex items-start justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
+      <label class="flex items-start justify-between gap-4 rounded-xl border border-slate-300 bg-slate-50 p-4">
         <span>
-          <span class="block text-base font-semibold text-white">Automatic occupancy labels</span>
+          <span class="block text-base font-semibold text-slate-950">Automatic occupancy labels</span>
           <span class="block text-sm text-slate-400">Automatically label each minute using the detected-frame percentage threshold below.</span>
         </span>
         <input type="checkbox" name="auto_occupancy_label_enabled" class="mt-1 h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" {% if device_settings.auto_occupancy_label_enabled|default(true) %}checked{% endif %}>
       </label>
 
-      <label class="block rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
-        <span class="block text-base font-semibold text-white">Occupied frame threshold</span>
-        <span class="mt-1 block text-sm text-slate-400">A minute is occupied when its detected-frame percentage is greater than or equal to this value.</span>
+      <label class="block rounded-xl border border-slate-300 bg-slate-50 p-4">
+        <span class="block text-base font-semibold text-slate-950">Occupied frame threshold</span>
+        <span class="mt-1 block text-sm text-slate-600">Each chunk is occupied when its detected-frame percentage is greater than or equal to this value.</span>
         <span class="mt-4 flex items-center gap-3">
           <input type="range" name="occupancy_threshold_percent" min="0" max="100" step="1" value="{{ device_settings.occupancy_threshold_percent|default(50.0) }}" class="h-2 flex-1 accent-cyan-400" oninput="document.getElementById('occupancy-threshold-value').textContent = Number(this.value).toFixed(0) + '%'">
           <output id="occupancy-threshold-value" class="w-20 text-right font-mono text-sm text-cyan-300">{{ '%.0f'|format(device_settings.occupancy_threshold_percent|default(50.0)|float) }}%</output>
         </span>
       </label>
 
-      <label class="flex items-start justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
+      <label class="flex items-start justify-between gap-4 rounded-xl border border-slate-300 bg-slate-50 p-4">
         <span>
-          <span class="block text-base font-semibold text-white">Cloud sync</span>
+          <span class="block text-base font-semibold text-slate-950">Cloud sync</span>
           <span class="block text-sm text-slate-400">Allow the device to push minute folders to Brain automatically.</span>
         </span>
         <input type="checkbox" name="cloud_sync_allowed" class="mt-1 h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" {% if device_settings.cloud_sync_allowed %}checked{% endif %}>
@@ -88,6 +88,7 @@
         <a href="{{ url_for('status') }}" class="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800">
           Back to dashboard
         </a>
+        <span id="save-status" class="self-center text-sm font-semibold text-slate-600" aria-live="polite"></span>
       </div>
     </form>
   </section>
@@ -101,7 +102,6 @@ document.getElementById('settings-form').addEventListener('submit', async (event
   const form = new FormData(event.target);
   const payload = Object.fromEntries(form.entries());
   payload.portal_upload_allowed = event.target.portal_upload_allowed.checked;
-  payload.deployment_requests_allowed = event.target.deployment_requests_allowed.checked;
   payload.cloud_sync_allowed = event.target.cloud_sync_allowed.checked;
   payload.radar_detection_threshold_db = Number(event.target.radar_detection_threshold_db.value);
   payload.auto_occupancy_label_enabled = event.target.auto_occupancy_label_enabled.checked;
@@ -111,17 +111,44 @@ document.getElementById('settings-form').addEventListener('submit', async (event
   payload.home_assistant_entity_id = event.target.home_assistant_entity_id.value;
   payload.home_assistant_token = event.target.home_assistant_token.value;
 
-  const response = await fetch('/settings', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(payload),
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    showAlert(data.error || 'Failed to save settings', 'error');
-    return;
+  const saveStatus = document.getElementById('save-status');
+  saveStatus.textContent = 'Saving…';
+  try {
+    const response = await fetch('/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || 'Failed to save settings');
+    const canonical = data.settings || {};
+    event.target.portal_upload_allowed.checked = canonical.portal_upload_allowed !== false;
+    event.target.cloud_sync_allowed.checked = canonical.cloud_sync_allowed !== false;
+    event.target.auto_occupancy_label_enabled.checked = canonical.auto_occupancy_label_enabled !== false;
+    event.target.radar_detection_threshold_db.value = canonical.radar_detection_threshold_db ?? 8;
+    event.target.occupancy_threshold_percent.value = canonical.occupancy_threshold_percent ?? 50;
+    document.getElementById('radar-threshold-value').textContent = Number(event.target.radar_detection_threshold_db.value).toFixed(1) + ' dB';
+    document.getElementById('occupancy-threshold-value').textContent = Number(event.target.occupancy_threshold_percent.value).toFixed(0) + '%';
+    event.target.home_assistant_token.value = '';
+    saveStatus.textContent = canonical.sync_pending ? 'Sync pending' : 'Saved';
+    showAlert(saveStatus.textContent, 'success');
+  } catch (error) {
+    saveStatus.textContent = error.message;
+    showAlert(error.message, 'error');
   }
-  showAlert('Settings saved', 'success');
+});
+
+document.getElementById('test-home-assistant').addEventListener('click', async () => {
+  const status = document.getElementById('home-assistant-status');
+  status.textContent = 'Testing…';
+  try {
+    const response = await fetch('/api/settings/home-assistant/test', {method: 'POST'});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || 'Connection failed');
+    status.textContent = 'Connected';
+  } catch (error) {
+    status.textContent = error.message;
+  }
 });
 </script>
 {% endblock %}

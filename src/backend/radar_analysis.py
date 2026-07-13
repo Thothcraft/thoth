@@ -7,7 +7,8 @@ import json
 import math
 import struct
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -121,6 +122,196 @@ def iter_radar_frames(bin_path: Path) -> Iterable[tuple[int, np.ndarray]]:
             continue
 
 
+def decode_radar_frame(full_frame: bytes, radar_cfg: Optional[Dict[str, Any]] = None) -> Optional[tuple[int, np.ndarray]]:
+    """Decode one frame obtained directly from BGT60TR13C.frame_buffer."""
+    if parse_full_frame is None or read_uint12 is None or split_samples is None:
+        return None
+    config = radar_cfg or load_radar_config()
+    try:
+        parsed = parse_full_frame(full_frame)
+        if not parsed:
+            return None
+        _version, seq, _data_len, frame_bytes = parsed
+        adc_data = read_uint12(frame_bytes)
+        split = split_samples(
+            adc_data,
+            1,
+            int(config["num_chirps_per_frame"]),
+            int(config["num_samples_per_chirp"]),
+            int(config["num_antennas"]),
+        )
+        return int(seq), np.transpose(split[0, :, :, :], (2, 0, 1))
+    except Exception:
+        return None
+
+
+def create_signal_processor() -> Any:
+    if SigProc is None:
+        raise RuntimeError("Radar tracking dependencies are unavailable.")
+    radar_config = load_radar_config()
+    if not radar_config:
+        raise RuntimeError("Radar configuration could not be loaded.")
+    return SigProc(str(PROCESSING_CONFIG), radar_config)
+
+
+def occupancy_label(detected_frames: int, evaluated_frames: int, threshold_percent: float) -> str:
+    threshold = min(100.0, max(0.0, float(threshold_percent)))
+    return "occupied" if evaluated_frames > 0 and detected_frames * 100.0 >= threshold * evaluated_frames else "empty"
+
+
+class StreamingChunkAnalyzer:
+    """Incrementally analyze live frames while retaining one tracker across chunks."""
+
+    FIELDNAMES = [
+        "chunk_index", "frame_index", "seq", "detected", "target_count", "occupied",
+        "primary_target_id", "x_m", "y_m", "z_m", "width_m", "depth_m", "height_m",
+        "pose", "snr_db", "score", "noise_floor_db", "threshold_db", "peak_power_db",
+        "motion_points", "targets_json", "shadow_points_json",
+    ]
+
+    def __init__(
+        self,
+        processor: Any,
+        csv_path: Path,
+        chunk_index: int,
+        chunk_seconds: float,
+        room: Dict[str, Any],
+        radar_detection_threshold_db: float,
+        occupancy_threshold_percent: float,
+    ):
+        self.processor = processor
+        self.processor.threshold_db = min(40.0, max(0.0, float(radar_detection_threshold_db)))
+        self.radar_config = getattr(processor, "radar_config", None) or load_radar_config()
+        self.csv_path = csv_path
+        self.csv_temporary = csv_path.with_suffix(f"{csv_path.suffix}.tmp")
+        self.chunk_index = chunk_index
+        self.chunk_seconds = chunk_seconds
+        self.room = room
+        self.occupancy_threshold_percent = min(100.0, max(0.0, float(occupancy_threshold_percent)))
+        self.evaluated_frames = 0
+        self.detected_frames = 0
+        self.chunk_points: list[np.ndarray] = []
+        self.chunk_weights: list[np.ndarray] = []
+        self.last_targets: list[Dict[str, Any]] = []
+        self.last_detection: Dict[str, Any] = {}
+        self.last_position = [0.0, 0.0]
+        self.last_score = 0.0
+        self.processing_seconds = 0.0
+        self.max_processing_seconds = 0.0
+        self.max_queue_lag_ms = 0.0
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = open(self.csv_temporary, "w", encoding="utf-8", newline="", buffering=64 * 1024)
+        self.writer = csv.DictWriter(self.handle, fieldnames=self.FIELDNAMES)
+        self.writer.writeheader()
+
+    def process(self, full_frame: bytes) -> None:
+        processing_started = time.perf_counter()
+        decoded = decode_radar_frame(full_frame, self.radar_config)
+        if decoded is None:
+            return
+        seq, frame = decoded
+        try:
+            targets = self.processor.update(frame)
+        except Exception:
+            return
+        detection = dict(self.processor.last_detection or {})
+        shadow = dict(self.processor.last_motion_shadow or {})
+        shadow_points = np.asarray(shadow.get("points") if shadow.get("points") is not None else np.empty((0, 3)), dtype=float)
+        shadow_intensity = np.asarray(shadow.get("intensity") if shadow.get("intensity") is not None else np.empty(0), dtype=float)
+        frame_index = self.evaluated_frames
+        self.evaluated_frames += 1
+        if detection.get("detected"):
+            self.detected_frames += 1
+        self.last_targets = [_serialize_target(target, self.room) for target in targets]
+        self.last_detection = detection
+        if self.last_targets:
+            lead = self.last_targets[0]
+            self.last_position = [float(lead["position"][0]), float(lead["position"][1])]
+            self.last_score = float(lead.get("snr_db") or detection.get("cfar_peak_db") or 0.0)
+
+        world_points = np.asarray([
+            _clip_point_to_room(world_from_local(point, self.room), self.room) for point in shadow_points
+        ], dtype=float) if shadow_points.size else np.empty((0, 3), dtype=float)
+        if world_points.size:
+            self.chunk_points.append(world_points)
+            weights = shadow_intensity if shadow_intensity.size == len(world_points) else np.ones(len(world_points))
+            self.chunk_weights.append(np.clip(weights, 0.02, 1.0))
+            if not self.last_targets:
+                self.last_position = [float(world_points[0][0]), float(world_points[0][1])]
+                self.last_score = float(np.max(weights) if weights.size else 0.0)
+
+        primary = self.last_targets[0] if self.last_targets else None
+        self.writer.writerow({
+            "chunk_index": self.chunk_index,
+            "frame_index": frame_index,
+            "seq": seq,
+            "detected": bool(detection.get("detected")),
+            "target_count": len(targets),
+            "occupied": bool(targets),
+            "primary_target_id": primary["id"] if primary else "",
+            "x_m": primary["position"][0] if primary else "",
+            "y_m": primary["position"][1] if primary else "",
+            "z_m": primary["position"][2] if primary else "",
+            "width_m": primary["size"][0] if primary else "",
+            "depth_m": primary["size"][1] if primary else "",
+            "height_m": primary["size"][2] if primary else "",
+            "pose": primary["pose"] if primary else "",
+            "snr_db": primary["snr_db"] if primary else "",
+            "score": self.last_score,
+            "noise_floor_db": detection.get("noise_floor_db", ""),
+            "threshold_db": detection.get("threshold_db", self.processor.threshold_db),
+            "peak_power_db": detection.get("cfar_peak_db", ""),
+            "motion_points": int(detection.get("motion_points") or 0),
+            "targets_json": json.dumps(self.last_targets, separators=(",", ":")),
+            "shadow_points_json": json.dumps(shadow_points.round(4).tolist(), separators=(",", ":")),
+        })
+        elapsed = time.perf_counter() - processing_started
+        self.processing_seconds += elapsed
+        self.max_processing_seconds = max(self.max_processing_seconds, elapsed)
+
+    def finish(self) -> Dict[str, Any]:
+        finalization_started = time.perf_counter()
+        self.handle.flush()
+        self.handle.close()
+        self.csv_temporary.replace(self.csv_path)
+        points = np.vstack(self.chunk_points) if self.chunk_points else np.empty((0, 3), dtype=float)
+        weights = np.concatenate(self.chunk_weights) if self.chunk_weights else np.empty(0, dtype=float)
+        x_axis, y_axis, z = _bin_points(points, self.room, weights=weights, resolution=72)
+        ratio = self.detected_frames / self.evaluated_frames if self.evaluated_frames else 0.0
+        label = occupancy_label(self.detected_frames, self.evaluated_frames, self.occupancy_threshold_percent)
+        primary = self.last_targets[0] if self.last_targets else None
+        frame = {
+            "name": f"chunk-{self.chunk_index:02d}", "index": self.chunk_index,
+            "x": x_axis, "y": y_axis, "z": z, "location": self.last_position,
+            "score": self.last_score, "detected": label == "occupied",
+            "snr_db": float(primary.get("snr_db")) if primary else float(self.last_detection.get("cfar_peak_db") or 0.0),
+            "threshold_db": float(self.last_detection.get("threshold_db") or self.processor.threshold_db),
+            "peak_power_db": self.last_detection.get("cfar_peak_db"),
+            "noise_floor_db": self.last_detection.get("noise_floor_db"),
+            "targets": self.last_targets, "motion_points": int(self.last_detection.get("motion_points") or 0),
+        }
+        payload = {
+            "plot": "xy-tracking", "title": "X-Y localization", "x_label": "X (m)", "y_label": "Y (m)",
+            "x": x_axis, "y": y_axis, "z": z, "frames": [frame], "frame_count": self.evaluated_frames,
+            "sample_count": 1, "frame_interval_ms": max(50, int(round(self.chunk_seconds * 1000))),
+            "updated": datetime.now(timezone.utc).isoformat(),
+            "occupancy": {"label": label, "detected_frames": self.detected_frames, "evaluated_frames": self.evaluated_frames,
+                          "ratio": ratio, "threshold_percent": self.occupancy_threshold_percent, "chunk_seconds": self.chunk_seconds},
+            "location": self.last_position, "score": self.last_score, "detected": label == "occupied",
+            "snr_db": frame["snr_db"], "threshold_db": frame["threshold_db"], "peak_power_db": frame["peak_power_db"],
+            "noise_floor_db": frame["noise_floor_db"], "targets": self.last_targets,
+            "motion_points": frame["motion_points"], "chunk_index": self.chunk_index,
+            "chunk_seconds": self.chunk_seconds, "room": self.room,
+        }
+        payload["performance"] = {
+            "average_processing_ms": round(self.processing_seconds * 1000 / max(1, self.evaluated_frames), 3),
+            "max_processing_ms": round(self.max_processing_seconds * 1000, 3),
+            "max_queue_lag_ms": round(self.max_queue_lag_ms, 3),
+            "finalization_ms": round((time.perf_counter() - finalization_started) * 1000, 3),
+        }
+        return payload
+
+
 def _sensor_pose(room: Dict[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     width = float(room.get("width_m", 3.73))
     depth = float(room.get("depth_m", 5.0))
@@ -216,17 +407,22 @@ def analyze_radar_chunk(
     chunk_index: int,
     chunk_seconds: float,
     room: Optional[Dict[str, Any]] = None,
+    *,
+    frames: Optional[Iterable[bytes]] = None,
+    processor: Any = None,
+    radar_detection_threshold_db: float = 8.0,
+    occupancy_threshold_percent: float = 50.0,
 ) -> Dict[str, Any]:
     if SigProc is None:
         raise RuntimeError("Radar tracking dependencies are unavailable.")
 
     room = room or load_room_config()
-    processing_config = load_processing_config()
     radar_config = load_radar_config()
     if not radar_config:
         raise RuntimeError("Radar configuration could not be loaded.")
 
-    proc = SigProc(str(PROCESSING_CONFIG), radar_config)
+    proc = processor or SigProc(str(PROCESSING_CONFIG), radar_config)
+    proc.threshold_db = min(40.0, max(0.0, float(radar_detection_threshold_db)))
     frame_period_s = float(getattr(proc, "frame_period_s", 0.0) or 0.0)
 
     fieldnames = [
@@ -266,11 +462,19 @@ def analyze_radar_chunk(
     last_score = 0.0
 
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+    csv_temporary = csv_path.with_suffix(f"{csv_path.suffix}.tmp")
+    with open(csv_temporary, "w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
 
-        for frame_index, (seq, frame) in enumerate(iter_radar_frames(bin_path)):
+        source_frames: Iterable[tuple[int, np.ndarray]]
+        if frames is None:
+            source_frames = iter_radar_frames(bin_path)
+        else:
+            source_frames = (
+                decoded for decoded in (decode_radar_frame(raw, radar_config) for raw in frames) if decoded is not None
+            )
+        for frame_index, (seq, frame) in enumerate(source_frames):
             try:
                 targets = proc.update(frame)
             except Exception:
@@ -358,6 +562,7 @@ def analyze_radar_chunk(
                 "peak_power_db": detection.get("cfar_peak_db"),
                 "motion_points": int(detection.get("motion_points") or 0),
             })
+    csv_temporary.replace(csv_path)
 
     if chunk_points:
         points = np.vstack(chunk_points)
@@ -367,8 +572,9 @@ def analyze_radar_chunk(
         weights = np.empty(0, dtype=float)
 
     x_axis, y_axis, z = _bin_points(points, room, weights=weights, resolution=72)
-    occupied = bool(last_targets) or detected_frames > 0
     occupancy_ratio = detected_frames / evaluated_frames if evaluated_frames else 0.0
+    occupancy_threshold_percent = min(100.0, max(0.0, float(occupancy_threshold_percent)))
+    occupied = occupancy_label(detected_frames, evaluated_frames, occupancy_threshold_percent) == "occupied"
     primary = last_targets[0] if last_targets else None
 
     payload = {
@@ -398,13 +604,13 @@ def analyze_radar_chunk(
         "frame_count": max(1, evaluated_frames),
         "sample_count": 1,
         "frame_interval_ms": max(50, int(round(max(chunk_seconds, frame_period_s or 0.12) * 1000))),
-        "updated": datetime.utcnow().isoformat(),
+        "updated": datetime.now(timezone.utc).isoformat(),
         "occupancy": {
             "label": "occupied" if occupied else "empty",
             "detected_frames": detected_frames,
             "evaluated_frames": evaluated_frames,
             "ratio": occupancy_ratio,
-            "threshold_percent": 50.0,
+            "threshold_percent": occupancy_threshold_percent,
             "chunk_seconds": float(chunk_seconds),
         },
         "location": last_position,
@@ -458,6 +664,7 @@ def compile_minute_xy_payload(chunk_payloads: List[Dict[str, Any]]) -> Dict[str,
         }
 
     occupancy_ratio = total_detected / total_evaluated if total_evaluated else 0.0
+    threshold_percent = float((latest.get("occupancy") or {}).get("threshold_percent", 50.0))
     x_axis = latest.get("x") or []
     y_axis = latest.get("y") or []
     z = latest.get("z") or []
@@ -489,13 +696,13 @@ def compile_minute_xy_payload(chunk_payloads: List[Dict[str, Any]]) -> Dict[str,
         "frame_count": len(frames) if frames else 1,
         "sample_count": len(chunk_payloads),
         "frame_interval_ms": max(50, int(round(sum(float(chunk.get("chunk_seconds") or 10.0) for chunk in chunk_payloads) * 1000 / max(1, len(frames) or len(chunk_payloads) or 1)))),
-        "updated": datetime.utcnow().isoformat(),
+        "updated": datetime.now(timezone.utc).isoformat(),
         "occupancy": {
-            "label": "occupied" if occupancy_ratio > 0 else "empty",
+            "label": occupancy_label(total_detected, total_evaluated, threshold_percent),
             "detected_frames": total_detected,
             "evaluated_frames": total_evaluated,
             "ratio": occupancy_ratio,
-            "threshold_percent": 50.0,
+            "threshold_percent": threshold_percent,
             "chunk_seconds": chunk_payloads[0].get("chunk_seconds") if chunk_payloads else 10.0,
         },
         "location": latest.get("location") or [0.0, 0.0],

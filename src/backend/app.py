@@ -29,7 +29,7 @@ import tempfile
 import zipfile
 import gzip
 import pickle
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections import deque
 from functools import lru_cache
@@ -58,7 +58,7 @@ from backend.device_manager import DeviceManager
 from backend.auth_manager import AuthManager
 from backend.terminal_manager import SSHTerminalManager
 from backend.sensor_detection import detect_sensor_inventory
-from backend.home_assistant import load_home_assistant_config, publish_occupancy, save_home_assistant_config
+from backend.home_assistant import get_home_assistant_publisher, load_home_assistant_config, save_home_assistant_config, test_home_assistant_connection
 from backend.capture_manager import (
     list_minutes,
     get_minute,
@@ -121,6 +121,7 @@ RADAR_TRACKING_CONFIG = TRACK_EXAMPLE_DIR / 'config' / 'processing_config.json'
 CSI_NUMBER_RE = re.compile(r'[-+]?\d+(?:\.\d+)?')
 RADAR_CACHE_VERSION = 4
 _radar_cache_lock = threading.RLock()
+_home_assistant_manifest_lock = threading.Lock()
 
 # Initialize Flask app
 app = Flask(__name__, template_folder='templates', static_folder='static')
@@ -783,25 +784,8 @@ def _radar_plot_payload(radar_path: Path, plot: str) -> Dict[str, Any]:
     occupancy['threshold_percent'] = threshold_percent
     occupancy['label'] = 'occupied' if evaluated_frames and detected_frames * 100 >= threshold_percent * evaluated_frames else 'empty'
     payload['occupancy'] = occupancy
-    label = occupancy.get('label')
-    manifest_path = radar_path.parent / 'manifest.json'
-    if label in {'empty', 'occupied'} and manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-            if settings.get('auto_occupancy_label_enabled', True):
-                if manifest.get('auto_occupancy_label') != occupancy:
-                    manifest['labels'] = [label]
-                    manifest['primary_label'] = label
-                    manifest['auto_occupancy_label'] = occupancy
-                    manifest_path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-            signature = f"{label}:{detected_frames}:{evaluated_frames}:{occupancy.get('threshold_percent')}"
-            previous_publish = manifest.get('home_assistant') if isinstance(manifest.get('home_assistant'), dict) else {}
-            if previous_publish.get('signature') != signature or not previous_publish.get('success'):
-                publish_result = publish_occupancy(occupancy, radar_path.parent.name)
-                manifest['home_assistant'] = {**publish_result, 'signature': signature, 'updated_at': datetime.utcnow().isoformat()}
-                manifest_path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-        except Exception as exc:
-            logger.warning('Unable to update occupancy integrations: %s', exc)
+    # Live collection owns persistence, automatic labeling, and Home Assistant
+    # publication. Plot generation is deliberately read-only.
     return payload
 
 
@@ -1556,18 +1540,25 @@ def settings():
             'auto_occupancy_label_enabled': str(payload.get('auto_occupancy_label_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
             'occupancy_threshold_percent': payload.get('occupancy_threshold_percent', 50.0),
         }
-        saved = device_manager.save_device_settings(updates)
-        save_home_assistant_config({
-            'enabled': str(payload.get('home_assistant_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
-            'base_url': payload.get('home_assistant_base_url'),
-            'entity_id': payload.get('home_assistant_entity_id'),
-            'token': payload.get('home_assistant_token'),
-        })
+        try:
+            saved = device_manager.save_device_settings(updates)
+            home_assistant = save_home_assistant_config({
+                'enabled': str(payload.get('home_assistant_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
+                'base_url': payload.get('home_assistant_base_url'),
+                'entity_id': payload.get('home_assistant_entity_id'),
+                'token': payload.get('home_assistant_token'),
+            })
+        except (OSError, ValueError, TypeError) as exc:
+            logger.error('Settings persistence failed: %s', exc)
+            if request.is_json:
+                return jsonify({'success': False, 'message': f'Unable to persist settings: {exc}'}), 500
+            flash(f'Unable to persist settings: {exc}', 'error')
+            return redirect(url_for('settings'))
         if saved.get('auto_occupancy_label_enabled', True):
             _relabel_cached_occupancy(float(saved.get('occupancy_threshold_percent', 50.0)))
         if request.is_json:
-            return jsonify({'success': True, 'settings': saved})
-        flash('Settings saved', 'success')
+            return jsonify({'success': True, 'settings': saved, 'home_assistant': home_assistant, 'sync_status': saved.get('sync_status')})
+        flash('Sync pending' if saved.get('sync_pending') else 'Settings saved', 'success')
         return redirect(url_for('settings'))
 
     return render_template(
@@ -1585,10 +1576,64 @@ def api_settings():
     if request.method == 'GET':
         return jsonify({'success': True, 'settings': device_manager.get_device_settings()})
     payload = request.get_json(silent=True) or {}
-    saved = device_manager.save_device_settings(payload)
+    try:
+        saved = device_manager.save_device_settings(payload)
+    except (OSError, ValueError, TypeError) as exc:
+        return jsonify({'success': False, 'message': f'Unable to persist settings: {exc}'}), 500
     if saved.get('auto_occupancy_label_enabled', True):
         _relabel_cached_occupancy(float(saved.get('occupancy_threshold_percent', 50.0)))
     return jsonify({'success': True, 'settings': saved})
+
+
+@app.route('/api/settings/home-assistant/test', methods=['POST'])
+def api_home_assistant_test():
+    if 'username' not in session:
+        return jsonify({'success': False, 'message': 'Authentication required'}), 401
+    result = test_home_assistant_connection()
+    return jsonify(result), (200 if result.get('success') else 502)
+
+
+@app.route('/api/internal/home-assistant/publish', methods=['POST'])
+def api_internal_home_assistant_publish():
+    """Accept a live chunk from the local collector and return immediately."""
+    if request.remote_addr not in {'127.0.0.1', '::1', None}:
+        return jsonify({'success': False, 'message': 'Local requests only'}), 403
+    payload = request.get_json(silent=True) or {}
+    minute = str(payload.get('minute') or '')
+    occupancy = payload.get('occupancy') if isinstance(payload.get('occupancy'), dict) else {}
+    try:
+        chunk_index = int(payload.get('chunk_index'))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'message': 'A valid chunk_index is required'}), 400
+
+    def record_result(result: Dict[str, Any]) -> None:
+        minute_dir = get_minute(minute)
+        if not minute_dir:
+            return
+        manifest_path = minute_dir / 'manifest.json'
+        with _home_assistant_manifest_lock:
+            status_path = minute_dir / '.home_assistant_status.json'
+            statuses = _read_json_file(status_path, {})
+            statuses[str(chunk_index)] = {**result, 'updated_at': datetime.now(timezone.utc).isoformat()}
+            _write_json_file(status_path, statuses)
+            manifest = _read_json_file(manifest_path, {})
+            chunks = (((manifest.get('outputs') or {}).get('radar') or {}).get('chunks') or [])
+            for chunk in chunks:
+                if isinstance(chunk, dict) and int(chunk.get('chunk_index', -1)) == chunk_index:
+                    chunk['home_assistant'] = statuses[str(chunk_index)]
+                    break
+            _write_json_file(manifest_path, manifest)
+
+    queued = get_home_assistant_publisher().submit(
+        occupancy,
+        minute,
+        callback=record_result,
+        chunk_index=chunk_index,
+        location=payload.get('location'),
+        confidence=payload.get('confidence'),
+        timestamp=payload.get('timestamp'),
+    )
+    return jsonify({'success': queued, 'status': 'queued' if queued else 'queue_full'}), (202 if queued else 503)
 
 
 @app.route('/captures')
@@ -1649,8 +1694,11 @@ def capture_settings_api():
         return jsonify({'success': True, 'capture_settings': device_manager.load_capture_settings()})
 
     payload = request.get_json(silent=True) or {}
-    settings = device_manager.save_capture_settings(payload)
-    return jsonify({'success': True, 'capture_settings': settings, 'message': 'Capture settings updated'})
+    try:
+        settings = device_manager.save_and_sync_capture_settings(payload)
+    except (OSError, ValueError, TypeError) as exc:
+        return jsonify({'success': False, 'message': f'Unable to persist capture settings: {exc}'}), 500
+    return jsonify({'success': True, 'capture_settings': settings, 'sync_status': settings.get('sync_status'), 'message': 'Capture settings updated'})
 
 
 @app.route('/api/captures/stats')
@@ -2366,7 +2414,7 @@ def collection_action(action):
         sensors = payload.get('sensors') or {}
         label = str(payload.get('label') or '').strip()
         if label or sensors:
-            device_manager.save_capture_settings({'labels': [label] if label else [], 'sensors': sensors})
+            device_manager.save_and_sync_capture_settings({'labels': [label] if label else [], 'sensors': sensors})
         COLLECTOR_PAUSE_PATH.unlink(missing_ok=True)
 
         service_running = subprocess.run(
