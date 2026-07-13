@@ -29,6 +29,7 @@ import tempfile
 import zipfile
 import gzip
 import pickle
+import queue
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections import deque
@@ -166,6 +167,57 @@ os.makedirs(Config.CAPTURE_DATA_DIR, exist_ok=True)
 auth_manager = AuthManager(Config)
 device_manager = DeviceManager(Config)
 terminal_manager = SSHTerminalManager(socketio, Config)
+
+# Chunk predictions are synchronized by the long-lived web process so the
+# one-minute capture subprocess never waits on Brain or loses its final update
+# while exiting. Keeping a single bounded worker also prevents network retries
+# from creating unbounded threads.
+_capture_timeline_queue: queue.Queue[str] = queue.Queue(maxsize=12)
+
+
+def _capture_timeline_worker() -> None:
+    while True:
+        minute = _capture_timeline_queue.get()
+        started = time.monotonic()
+        try:
+            synchronized = device_manager.update_status(
+                {'collection_active': True},
+                force_files=True,
+            )
+            if not synchronized:
+                logger.warning('Live timeline synchronization failed for %s', minute)
+            else:
+                logger.info(
+                    'Live timeline synchronized for %s in %.0f ms',
+                    minute,
+                    (time.monotonic() - started) * 1000,
+                )
+        except Exception:
+            logger.exception('Live timeline synchronization failed for %s', minute)
+        finally:
+            _capture_timeline_queue.task_done()
+
+
+def _enqueue_capture_timeline(minute: str) -> None:
+    try:
+        _capture_timeline_queue.put_nowait(minute)
+        return
+    except queue.Full:
+        # Prefer the latest manifest snapshot. A later heartbeat includes all
+        # completed chunks, so superseded work can be safely discarded.
+        try:
+            _capture_timeline_queue.get_nowait()
+            _capture_timeline_queue.task_done()
+        except queue.Empty:
+            pass
+    _capture_timeline_queue.put_nowait(minute)
+
+
+threading.Thread(
+    target=_capture_timeline_worker,
+    name='CaptureTimelineSync',
+    daemon=True,
+).start()
 
 # Global state
 collection_active = False
@@ -2116,6 +2168,18 @@ def upload_capture_minute(minute):
     if not minute_dir:
         return jsonify({'status': 'error', 'message': 'Minute folder not found'}), 404
 
+    incremental = request.args.get('incremental') in {'1', 'true', 'yes'}
+    if incremental:
+        _enqueue_capture_timeline(minute_dir.name)
+        return jsonify({
+            'status': 'success',
+            'minute': minute_dir.name,
+            'timeline_sync': 'queued',
+            'uploaded': [],
+            'skipped': [],
+            'errors': [],
+        }), 202
+
     summary = minute_summary(minute_dir)
     device_id = getattr(device_manager, 'device_id', None)
     uploaded = []
@@ -2124,13 +2188,6 @@ def upload_capture_minute(minute):
     import base64
 
     all_files = sorted(path for path in minute_dir.iterdir() if path.is_file() and not path.name.endswith('.tmp'))
-    incremental = request.args.get('incremental') in {'1', 'true', 'yes'}
-    if incremental:
-        # Live synchronization is intentionally metadata-only. Raw radar, CSV,
-        # visualization, and video assets remain local until a full upload is
-        # explicitly requested from Thoth or ResearchPortal.
-        live_names = {'manifest.json', 'predictions.json'}
-        all_files = [path for path in all_files if path.name in live_names]
 
     for path in all_files:
         if path.name == 'usb_camera.ffmpeg.log' and path.stat().st_size == 0:
@@ -2181,7 +2238,6 @@ def upload_capture_minute(minute):
                     'relative_path': summary.get('relative_path'),
                     'file_kind': key,
                     'size_bytes': path.stat().st_size,
-                    'timeline_only': incremental,
                 },
             }
             response = requests.post(f"{Config.BRAIN_SERVER_URL}/api/file/upload", json=payload, headers=headers, timeout=120)
@@ -2195,35 +2251,29 @@ def upload_capture_minute(minute):
         except Exception as exc:
             errors.append(f"{path.name}: {exc}")
 
-    if incremental:
-        # Push the changed six-dot state immediately without marking the full
-        # minute as uploaded in Brain.
-        if not device_manager.update_status({'collection_active': True}):
-            errors.append('timeline heartbeat failed')
-    else:
-        # The minute-named manifest completes an explicit full-upload request
-        # and is the only operation that marks the minute as cloud uploaded.
-        try:
-            raw = json.dumps(summary, default=str).encode('utf-8')
-            response = requests.post(
-                f"{Config.BRAIN_SERVER_URL}/api/file/upload",
-                json={
-                    'filename': minute_dir.name,
-                    'content': base64.b64encode(raw).decode('ascii'),
-                    'is_base64': True,
-                    'device_id': device_id,
-                    'content_type': 'application/json',
-                    'metadata': {'source': 'thoth_device', 'minute': minute_dir.name, 'file_kind': 'capture-manifest'},
-                },
-                headers={'Authorization': f'Bearer {auth_token}', 'Content-Type': 'application/json'},
-                timeout=120,
-            )
-            if response.status_code in (200, 201):
-                uploaded.append({'name': minute_dir.name, 'bytes': len(raw)})
-            else:
-                errors.append(f'{minute_dir.name}: {response.status_code} {response.text[:300]}')
-        except Exception as exc:
-            errors.append(f'{minute_dir.name}: {exc}')
+    # The minute-named manifest completes an explicit full-upload request and
+    # is the only operation that marks the minute as cloud uploaded.
+    try:
+        raw = json.dumps(summary, default=str).encode('utf-8')
+        response = requests.post(
+            f"{Config.BRAIN_SERVER_URL}/api/file/upload",
+            json={
+                'filename': minute_dir.name,
+                'content': base64.b64encode(raw).decode('ascii'),
+                'is_base64': True,
+                'device_id': device_id,
+                'content_type': 'application/json',
+                'metadata': {'source': 'thoth_device', 'minute': minute_dir.name, 'file_kind': 'capture-manifest'},
+            },
+            headers={'Authorization': f'Bearer {auth_token}', 'Content-Type': 'application/json'},
+            timeout=120,
+        )
+        if response.status_code in (200, 201):
+            uploaded.append({'name': minute_dir.name, 'bytes': len(raw)})
+        else:
+            errors.append(f'{minute_dir.name}: {response.status_code} {response.text[:300]}')
+    except Exception as exc:
+        errors.append(f'{minute_dir.name}: {exc}')
 
     return jsonify({
         'status': 'success' if not errors else 'partial',

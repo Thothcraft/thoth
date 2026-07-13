@@ -164,7 +164,7 @@
                                 <span class="text-gray-400">Unlabeled</span>
                             {% endif %}
                             {% if minute.progress %}
-                                <div class="mt-3 flex items-start gap-1" aria-label="Chunk timeline">
+                                <div class="mt-3 flex items-start gap-1" aria-label="Chunk timeline" data-chunk-timeline="{{ minute.minute }}">
                                         {% for chunk in minute.progress.chunks %}
                                         {% set chunk_detail %}Chunk {{ chunk.index + 1 }}; {{ chunk.prediction if chunk.prediction else chunk.state }}{% if chunk.detected_frames is defined and chunk.detected_frames is not none and chunk.evaluated_frames is defined and chunk.evaluated_frames is not none %}; {{ chunk.detected_frames }} / {{ chunk.evaluated_frames }} frames{% endif %}{% if chunk.ratio is defined and chunk.ratio is not none %}; ratio {{ (chunk.ratio * 100)|round(1) }}%{% endif %}{% if chunk.error is defined and chunk.error %}; {{ chunk.error }}{% endif %}{% endset %}
                                         <div class="min-w-0 flex-1 text-center" title="{{ chunk_detail|trim }}">
@@ -422,6 +422,16 @@ function closePredictionModal() {
   modal.classList.remove('flex');
 }
 
+function renderChunkDots(progress, sizeClass = 'h-2.5 w-2.5') {
+  return (progress?.chunks || []).slice(0, 6).map((chunk) => {
+    const color = chunk.state === 'occupied' ? 'bg-emerald-500' : chunk.state === 'empty' ? 'bg-red-500' : chunk.state === 'collecting' ? 'animate-pulse bg-blue-500' : ['stored', 'analyzing'].includes(chunk.state) ? 'animate-pulse bg-cyan-500' : chunk.state === 'error' ? 'bg-amber-500' : 'bg-slate-300';
+    const frames = chunk.detected_frames == null || chunk.evaluated_frames == null ? '' : `; ${Number(chunk.detected_frames) || 0} / ${Number(chunk.evaluated_frames) || 0} frames`;
+    const detail = 'Chunk ' + (chunk.index + 1) + '; ' + (chunk.prediction || chunk.state || 'waiting') + frames + (chunk.ratio == null ? '' : '; ratio ' + (Number(chunk.ratio) * 100).toFixed(1) + '%') + (chunk.error ? '; ' + chunk.error : '');
+    const safeDetail = escapeHtml(detail);
+    return `<div class="min-w-0 flex-1 text-center" title="${safeDetail}"><div role="img" tabindex="0" title="${safeDetail}" aria-label="${safeDetail}" class="mx-auto ${sizeClass} rounded-full ${color}"></div></div>`;
+  }).join('');
+}
+
 function renderCaptureRow(minute) {
   const name = escapeHtml(minute.minute);
   const labels = Array.isArray(minute.labels) && minute.labels.length
@@ -432,7 +442,7 @@ function renderCaptureRow(minute) {
   const openUrl = urls.open || `/captures/${encodeURIComponent(minute.minute)}`;
   const downloadUrl = urls.download || `/captures/${encodeURIComponent(minute.minute)}/download`;
   const progress = minute.progress;
-  const progressHtml = progress ? `<div class="mt-3 flex items-start gap-1" aria-label="Chunk timeline">${(progress.chunks || []).slice(0, 6).map((chunk) => { const color = chunk.state === 'occupied' ? 'bg-emerald-500' : chunk.state === 'empty' ? 'bg-red-500' : chunk.state === 'collecting' ? 'animate-pulse bg-blue-500' : ['stored', 'analyzing'].includes(chunk.state) ? 'animate-pulse bg-cyan-500' : chunk.state === 'error' ? 'bg-amber-500' : 'bg-slate-300'; const frames = chunk.detected_frames == null || chunk.evaluated_frames == null ? '' : `; ${Number(chunk.detected_frames) || 0} / ${Number(chunk.evaluated_frames) || 0} frames`; const detail = 'Chunk ' + (chunk.index + 1) + '; ' + (chunk.prediction || chunk.state || 'waiting') + frames + (chunk.ratio == null ? '' : '; ratio ' + (Number(chunk.ratio) * 100).toFixed(1) + '%') + (chunk.error ? '; ' + chunk.error : ''); return `<div class="min-w-0 flex-1 text-center" title="${detail}"><div role="img" tabindex="0" title="${detail}" aria-label="${detail}" class="mx-auto h-2.5 w-2.5 rounded-full ${color}"></div></div>`; }).join('')}</div>` : '';
+  const progressHtml = progress ? `<div class="mt-3 flex items-start gap-1" aria-label="Chunk timeline" data-chunk-timeline="${name}">${renderChunkDots(progress)}</div>` : '';
   return `
     <tr data-minute="${name}" class="${minute.minute === activeMinute ? 'bg-blue-50' : ''}">
       <td class="py-3 pr-4"><input type="checkbox" class="capture-select h-4 w-4" value="${name}" aria-label="Select capture ${name}" ${selectedMinutes.has(minute.minute) ? 'checked' : ''}></td>
@@ -548,6 +558,23 @@ async function refreshCaptures() {
   }
 }
 
+let activeTimelineBusy = false;
+async function refreshActiveTimeline() {
+  if (!activeMinute || activeTimelineBusy) return;
+  const timeline = document.querySelector(`[data-chunk-timeline="${activeMinute}"]`);
+  if (!timeline) return;
+  activeTimelineBusy = true;
+  try {
+    const response = await fetch(`/api/captures/${encodeURIComponent(activeMinute)}`, { cache: 'no-store' });
+    const result = await response.json().catch(() => ({}));
+    if (response.ok && result.capture?.progress) {
+      timeline.innerHTML = renderChunkDots(result.capture.progress);
+    }
+  } finally {
+    activeTimelineBusy = false;
+  }
+}
+
 async function refreshStats() {
   const response = await fetch('/api/captures/stats', { cache: 'no-store' });
   const result = await response.json().catch(() => ({}));
@@ -660,5 +687,6 @@ refreshStats();
 refreshCaptures();
 window.setInterval(refreshStats, 2500);
 window.setInterval(refreshCaptures, 3500);
+window.setInterval(refreshActiveTimeline, 500);
 </script>
 {% endblock %}

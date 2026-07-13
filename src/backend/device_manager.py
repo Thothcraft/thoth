@@ -831,7 +831,7 @@ class DeviceManager:
 
         return files_list
 
-    def _heartbeat_file_payload(self) -> Optional[List[Dict[str, Any]]]:
+    def _heartbeat_file_payload(self, force: bool = False) -> Optional[List[Dict[str, Any]]]:
         """Return local file registry only when changed or periodically."""
         now = time.time()
         try:
@@ -847,7 +847,7 @@ class DeviceManager:
                 ) for item in files],
                 sort_keys=True,
             )
-            if signature != self._last_file_report_signature or now - self._last_file_report_at >= 60:
+            if force or signature != self._last_file_report_signature or now - self._last_file_report_at >= 60:
                 self._last_file_report_signature = signature
                 self._last_file_report_at = now
                 return files
@@ -941,7 +941,7 @@ class DeviceManager:
             logger.error(f"Error marking device offline: {e}", exc_info=True)
             return False
 
-    def update_status(self, status_updates: Dict[str, Any]) -> bool:
+    def update_status(self, status_updates: Dict[str, Any], *, force_files: bool = False) -> bool:
         """Update device status on the Brain server.
 
         Args:
@@ -963,7 +963,7 @@ class DeviceManager:
             "device_id": self.device_id,
             **status_updates
         }
-        file_payload = self._heartbeat_file_payload()
+        file_payload = self._heartbeat_file_payload(force=force_files)
         if file_payload is not None:
             data["files"] = file_payload
 

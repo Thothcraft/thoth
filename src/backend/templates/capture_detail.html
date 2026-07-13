@@ -228,7 +228,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const host = document.getElementById(id);
   if (!host || !url) return;
   const activeMinute = {{ 'true' if minute == active_minute else 'false' }};
-  let timer = null;
+  let progressTimer = null;
+  let renderTimer = null;
   const render = async () => {
     const payload = await fetchJson(url);
     const data = payload?.data || {};
@@ -253,15 +254,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     }).join('');
   };
   try {
-    await render();
+    await Promise.allSettled([render(), refreshProgress()]);
     if (activeMinute) {
-      timer = window.setInterval(() => Promise.allSettled([render(), refreshProgress()]), 1500);
+      progressTimer = window.setInterval(refreshProgress, 500);
+      renderTimer = window.setInterval(render, 1500);
     }
   } catch (error) {
     host.innerHTML = `<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">${String(error).replace(/[<>&]/g, '')}</div>`;
   }
   window.addEventListener('beforeunload', () => {
-    if (timer) window.clearInterval(timer);
+    if (progressTimer) window.clearInterval(progressTimer);
+    if (renderTimer) window.clearInterval(renderTimer);
   });
 });
 </script>
