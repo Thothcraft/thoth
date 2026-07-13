@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import struct
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -101,11 +102,17 @@ def iter_radar_frames(bin_path: Path) -> Iterable[tuple[int, np.ndarray]]:
         return []
 
     while offset < total:
-        frame = parse_full_frame(raw[offset:])
+        if offset + 12 > total:
+            break
+        _version, _seq, payload_length = struct.unpack_from("<III", raw, offset)
+        frame_end = offset + 12 + payload_length
+        if payload_length <= 0 or frame_end > total:
+            break
+        frame = parse_full_frame(raw[offset:frame_end])
         if not frame:
             break
         _version, seq, data_len, frame_bytes = frame
-        offset += 12 + data_len
+        offset = frame_end
         try:
             adc_data = read_uint12(frame_bytes)
             split = split_samples(adc_data, 1, num_chirps, num_samples, num_antennas)

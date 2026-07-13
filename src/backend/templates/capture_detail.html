@@ -52,6 +52,7 @@
                         {% for chunk in minute_info.progress.chunks %}
                         <div class="min-w-0 flex-1 text-center" title="Chunk {{ chunk.index + 1 }}: {{ chunk.state }}{% if chunk.location %} at {{ chunk.location.x|round(2) }}, {{ chunk.location.y|round(2) }} m{% endif %}">
                             <div class="mx-auto h-3 w-3 rounded-full ring-2 ring-white {% if chunk.state == 'occupied' %}bg-emerald-500{% elif chunk.state == 'empty' %}bg-slate-500{% elif chunk.state == 'analyzing' %}animate-pulse bg-cyan-500{% elif chunk.state == 'error' %}bg-red-500{% else %}bg-slate-200{% endif %}"></div>
+                            <div class="mt-1 truncate text-[9px] font-semibold uppercase text-slate-600">{{ chunk.state }}</div>
                             <div class="mt-1 text-[9px] text-slate-400">{{ ((chunk.index * minute_info.progress.chunk_seconds)|round(0)|int) if minute_info.progress.chunk_seconds else chunk.index + 1 }}{% if minute_info.progress.chunk_seconds %}s{% endif %}</div>
                         </div>
                         {% endfor %}
@@ -267,7 +268,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     timeline.innerHTML = (progress.chunks || []).map((chunk) => {
       const offset = progress.chunk_seconds ? `${Math.round(chunk.index * progress.chunk_seconds)}s` : String(chunk.index + 1);
       const location = chunk.location ? ` at ${Number(chunk.location.x).toFixed(2)}, ${Number(chunk.location.y).toFixed(2)} m` : '';
-      return `<div class="min-w-0 flex-1 text-center" title="Chunk ${chunk.index + 1}: ${chunk.state}${location}"><div class="mx-auto h-3 w-3 rounded-full ring-2 ring-white ${colors[chunk.state] || colors.waiting}"></div><div class="mt-1 text-[9px] text-slate-400">${offset}</div></div>`;
+      return `<div class="min-w-0 flex-1 text-center" title="Chunk ${chunk.index + 1}: ${chunk.state}${location}"><div class="mx-auto h-3 w-3 rounded-full ring-2 ring-white ${colors[chunk.state] || colors.waiting}"></div><div class="mt-1 truncate text-[9px] font-semibold uppercase text-slate-600">${chunk.state}</div><div class="mt-1 text-[9px] text-slate-400">${offset}</div></div>`;
     }).join('');
   };
   try {
