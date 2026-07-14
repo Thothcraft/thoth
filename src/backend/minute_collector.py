@@ -38,6 +38,42 @@ CSI_HEADER = "type,seq,mac,rssi,rate,noise_floor,fft_gain,agc_gain,channel,local
 
 sys.path.insert(0, str(MMW_RELEASE))
 
+MAX_PENDING_ANALYSIS_FRAMES_PER_CHUNK = 4
+
+
+def enqueue_latest_chunk_frame(
+    analysis_queue: queue.Queue[Any],
+    entry: dict[str, Any],
+    frame: bytes,
+    captured_at: float,
+) -> bool:
+    """Queue a frame while retaining the newest pending samples for its chunk.
+
+    Signal processing must never back-pressure radar capture. When processing
+    falls behind, replacing the oldest still-pending frame from this chunk
+    preserves current motion instead of keeping stale empty-room frames until
+    the following minute. Start/end control messages are never removed.
+
+    Returns True when an older pending frame was replaced.
+    """
+    replaced = False
+    with analysis_queue.mutex:
+        matching_indexes = [
+            index
+            for index, item in enumerate(analysis_queue.queue)
+            if isinstance(item, tuple)
+            and len(item) >= 2
+            and item[0] == "frame"
+            and item[1] is entry
+        ]
+        if len(matching_indexes) >= MAX_PENDING_ANALYSIS_FRAMES_PER_CHUNK:
+            del analysis_queue.queue[matching_indexes[0]]
+            analysis_queue.unfinished_tasks = max(0, analysis_queue.unfinished_tasks - 1)
+            analysis_queue.not_full.notify()
+            replaced = True
+    analysis_queue.put_nowait(("frame", entry, frame, captured_at))
+    return replaced
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -739,9 +775,9 @@ def main() -> int:
     radar_upload_thread: threading.Thread | None = None
     # Hold at most one scheduled minute of frames. This remains bounded while
     # ensuring signal processing can never back-pressure the SPI reader.
-    # Keep only a short real-time window. If processing falls behind, dropping
-    # new frames preserves capture timing and prevents predictions from lagging
-    # an entire minute behind the physical room.
+    # Keep only a short real-time window per chunk. If processing falls behind,
+    # the enqueue helper replaces stale pending frames with the newest samples
+    # so motion cannot remain hidden behind an old empty-room backlog.
     analysis_queue: queue.Queue[Any] = queue.Queue(maxsize=96)
     upload_queue: queue.Queue[Any] = queue.Queue(maxsize=32)
     radar_chunk_results: list[dict[str, Any]] = []
@@ -930,9 +966,10 @@ def main() -> int:
                     )
                     continue
                 if kind == "frame":
-                    if analyzer is not None:
-                        analyzer.max_queue_lag_ms = max(analyzer.max_queue_lag_ms, (time.monotonic() - float(job[2])) * 1000)
-                        analyzer.process(job[1])
+                    frame_entry = job[1]
+                    if analyzer is not None and frame_entry is entry:
+                        analyzer.max_queue_lag_ms = max(analyzer.max_queue_lag_ms, (time.monotonic() - float(job[3])) * 1000)
+                        analyzer.process(job[2])
                     continue
                 if kind != "end" or analyzer is None or entry is None:
                     continue
@@ -1123,9 +1160,11 @@ def main() -> int:
                                     continue
                                 radar_handle.write(full_frame)
                                 try:
-                                    if analysis_queue.qsize() >= 24:
-                                        raise queue.Full
-                                    analysis_queue.put_nowait(("frame", full_frame, time.monotonic()))
+                                    replaced = enqueue_latest_chunk_frame(
+                                        analysis_queue, chunk_entry, full_frame, time.monotonic()
+                                    )
+                                    if replaced:
+                                        chunk_entry["dropped_analysis_frames"] += 1
                                 except queue.Full:
                                     chunk_entry["dropped_analysis_frames"] += 1
 

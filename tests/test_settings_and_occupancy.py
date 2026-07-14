@@ -1,4 +1,5 @@
 import os
+import queue
 import sys
 import tempfile
 import types
@@ -18,7 +19,12 @@ from backend.device_manager import DeviceManager
 from backend import home_assistant
 from backend.radar_analysis import PersistentTargetIdentity, StreamingChunkAnalyzer, occupancy_label, occupancy_region
 from backend.calibration import derive_thresholds
-from backend.minute_collector import annotate_chunk_result, minute_start, summarize_minute_results
+from backend.minute_collector import (
+    annotate_chunk_result,
+    enqueue_latest_chunk_frame,
+    minute_start,
+    summarize_minute_results,
+)
 from collector import next_minute_boundary
 
 
@@ -154,6 +160,22 @@ class SettingsTests(unittest.TestCase):
 
 
 class OccupancyTests(unittest.TestCase):
+    def test_analysis_backlog_keeps_latest_frames_within_each_chunk(self):
+        jobs: queue.Queue = queue.Queue(maxsize=96)
+        entry = {"chunk_index": 2}
+        jobs.put(("start", entry, {}))
+        replacements = [
+            enqueue_latest_chunk_frame(jobs, entry, bytes([index]), float(index))
+            for index in range(7)
+        ]
+        jobs.put(("end", entry))
+        queued = list(jobs.queue)
+        frames = [item[2][0] for item in queued if item[0] == "frame"]
+        self.assertEqual(frames, [3, 4, 5, 6])
+        self.assertEqual(sum(replacements), 3)
+        self.assertEqual(queued[0][0], "start")
+        self.assertEqual(queued[-1][0], "end")
+
     def test_target_ids_persist_across_minutes_with_position_error(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "target_ids.json"
