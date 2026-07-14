@@ -38,7 +38,7 @@ CSI_HEADER = "type,seq,mac,rssi,rate,noise_floor,fft_gain,agc_gain,channel,local
 
 sys.path.insert(0, str(MMW_RELEASE))
 
-MAX_PENDING_ANALYSIS_FRAMES_PER_CHUNK = 4
+MAX_PENDING_ANALYSIS_FRAMES_PER_CHUNK = 1
 
 
 def enqueue_latest_chunk_frame(
@@ -778,7 +778,7 @@ def main() -> int:
     # Keep only a short real-time window per chunk. If processing falls behind,
     # the enqueue helper replaces stale pending frames with the newest samples
     # so motion cannot remain hidden behind an old empty-room backlog.
-    analysis_queue: queue.Queue[Any] = queue.Queue(maxsize=96)
+    analysis_queue: queue.Queue[Any] = queue.Queue(maxsize=16)
     upload_queue: queue.Queue[Any] = queue.Queue(maxsize=32)
     radar_chunk_results: list[dict[str, Any]] = []
     publish_lock = threading.Lock()

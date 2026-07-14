@@ -158,6 +158,25 @@ class SettingsTests(unittest.TestCase):
             }})
             self.assertEqual(manager.load_capture_settings()["occupancy_threshold_percent"], 75.0)
 
+    def test_newer_remote_revision_does_not_overwrite_pending_detection_regions(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = DeviceManager(_Config(root))
+            local = manager.save_capture_settings({
+                "yellow_threshold_percent": 31,
+                "green_threshold_percent": 74,
+            })
+            manager._apply_response_settings({"capture_settings": {
+                **local,
+                "revision": int(local["revision"]) + 5,
+                "updated_at": "2999-01-01T00:00:00+00:00",
+                "yellow_threshold_percent": 20,
+                "green_threshold_percent": 60,
+            }})
+            persisted = manager.load_capture_settings()
+            self.assertEqual(persisted["yellow_threshold_percent"], 31.0)
+            self.assertEqual(persisted["green_threshold_percent"], 74.0)
+            self.assertTrue(manager._settings_sync_pending)
+
 
 class OccupancyTests(unittest.TestCase):
     def test_analysis_backlog_keeps_latest_frames_within_each_chunk(self):
@@ -171,8 +190,8 @@ class OccupancyTests(unittest.TestCase):
         jobs.put(("end", entry))
         queued = list(jobs.queue)
         frames = [item[2][0] for item in queued if item[0] == "frame"]
-        self.assertEqual(frames, [3, 4, 5, 6])
-        self.assertEqual(sum(replacements), 3)
+        self.assertEqual(frames, [6])
+        self.assertEqual(sum(replacements), 6)
         self.assertEqual(queued[0][0], "start")
         self.assertEqual(queued[-1][0], "end")
 

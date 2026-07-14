@@ -335,6 +335,8 @@ class StreamingChunkAnalyzer:
         self.playback_frames: List[Dict[str, Any]] = []
         self.live_state_path = live_state_path
         self.last_live_publish = 0.0
+        self.max_visualization_frames = 48
+        self.max_point_frames = 32
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         self.handle = open(self.csv_temporary, "w", encoding="utf-8", newline="", buffering=64 * 1024)
         self.writer = csv.DictWriter(self.handle, fieldnames=self.FIELDNAMES)
@@ -375,6 +377,9 @@ class StreamingChunkAnalyzer:
             self.chunk_points.append(world_points)
             weights = shadow_intensity if shadow_intensity.size == len(world_points) else np.ones(len(world_points))
             self.chunk_weights.append(np.clip(weights, 0.02, 1.0))
+            if len(self.chunk_points) > self.max_point_frames:
+                del self.chunk_points[0]
+                del self.chunk_weights[0]
             if not self.last_targets:
                 self.last_position = [float(world_points[0][0]), float(world_points[0][1])]
                 self.last_score = float(np.max(weights) if weights.size else 0.0)
@@ -392,6 +397,8 @@ class StreamingChunkAnalyzer:
             "threshold_db": float(detection.get("threshold_db") or self.processor.threshold_db),
             "targets": self.last_targets,
         })
+        if len(self.playback_frames) > self.max_visualization_frames:
+            del self.playback_frames[0]
         self._write_live_state(world_points)
         self.writer.writerow({
             "chunk_index": self.chunk_index,
@@ -426,7 +433,7 @@ class StreamingChunkAnalyzer:
         if self.live_state_path is None:
             return
         now = time.monotonic()
-        if now - self.last_live_publish < 0.2:
+        if now - self.last_live_publish < 0.5:
             return
         self.last_live_publish = now
         temporary = self.live_state_path.with_name(

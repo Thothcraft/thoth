@@ -280,7 +280,12 @@ class DeviceManager:
             capture_synchronized = True
             if desired_capture_settings is not None:
                 capture_synchronized = self._sync_capture_settings_to_brain(desired_capture_settings)
-            synchronized = self.update_status({'online': True, 'hardware_info': self._build_hardware_info()})
+            synchronized = self.update_status({
+                'online': True,
+                'hardware_info': self._build_hardware_info(
+                    include_capture_settings=capture_synchronized or desired_capture_settings is None
+                ),
+            })
             if desired_capture_settings is not None:
                 current_capture_settings = self.load_capture_settings()
                 desired_values_preserved = all(
@@ -342,7 +347,7 @@ class DeviceManager:
                 return False
         return False
 
-    def _build_hardware_info(self) -> Dict[str, Any]:
+    def _build_hardware_info(self, *, include_capture_settings: bool = True) -> Dict[str, Any]:
         import platform
         sensors: List[Dict[str, Any]] = []
         try:
@@ -373,10 +378,11 @@ class DeviceManager:
             'portal_upload_allowed': bool(self.device_settings.get('portal_upload_allowed', True)),
             'deployment_requests_allowed': bool(self.device_settings.get('deployment_requests_allowed', True)),
             'cloud_sync_allowed': bool(self.device_settings.get('cloud_sync_allowed', True)),
-            'capture_settings': self.load_capture_settings(),
             'sensors': sensors,
             'available_sensors': sensors,
         }
+        if include_capture_settings:
+            hardware_info['capture_settings'] = self.load_capture_settings()
         try:
             if os.path.exists('/proc/device-tree/model'):
                 with open('/proc/device-tree/model', 'rb') as handle:
@@ -511,14 +517,20 @@ class DeviceManager:
             normalized['updated_at'] = datetime.now(timezone.utc).isoformat()
             self._settings_sync_pending = True
         self._write_json_atomic(self._capture_settings_path(), normalized)
-        return normalized
+        persisted = self.load_capture_settings()
+        if any(persisted.get(key) != value for key, value in normalized.items()):
+            raise OSError(f'capture settings read-back failed at {self._capture_settings_path()}')
+        return persisted
 
     def save_and_sync_capture_settings(self, settings: Dict[str, Any] | None) -> Dict[str, Any]:
         """Persist locally first, then attempt a device-authenticated Brain sync."""
         saved = self.save_capture_settings(settings, local_change=True)
         if self.registered and self.auth_token:
             canonical_synchronized = self._sync_capture_settings_to_brain(saved)
-            synchronized = self.update_status({'online': True, 'hardware_info': self._build_hardware_info()})
+            synchronized = self.update_status({
+                'online': True,
+                'hardware_info': self._build_hardware_info(include_capture_settings=canonical_synchronized),
+            })
             synchronized = synchronized and canonical_synchronized
             self._settings_sync_pending = not synchronized
             self._settings_sync_error = None if synchronized else 'Brain did not confirm the settings update; the local change is saved and will retry.'
@@ -543,11 +555,18 @@ class DeviceManager:
             remote_revision = int(remote.get('revision') or 0)
             local_key = (local_revision, str(local.get('updated_at') or ''))
             remote_key = (remote_revision, str(remote.get('updated_at') or ''))
-            if remote_key > local_key:
+            comparable_keys = set(self.default_capture_settings()) - {'revision', 'updated_at'}
+            values_match = all(local.get(key) == remote.get(key) for key in comparable_keys)
+            if self._settings_sync_pending and not values_match:
+                logger.info(
+                    'Keeping pending local capture settings revision %s instead of applying Brain revision %s',
+                    local_revision, remote_revision,
+                )
+            elif remote_key > local_key:
                 self.save_capture_settings(remote, local_change=False)
                 self._settings_sync_pending = False
                 self._settings_sync_error = None
-            elif remote_key == local_key:
+            elif remote_key == local_key and values_match:
                 self._settings_sync_pending = False
                 self._settings_sync_error = None
         pending = result.get('pending_uploads')
@@ -1188,13 +1207,20 @@ class DeviceManager:
         def heartbeat_loop():
             while not self.stop_event.is_set():
                 try:
+                    if self._settings_sync_pending and self.registered and self.auth_token:
+                        synchronized = self._sync_capture_settings_to_brain(self.load_capture_settings())
+                        if synchronized:
+                            self._settings_sync_pending = False
+                            self._settings_sync_error = None
                     # Update status with current system information
                     self.update_status({
                         'battery_level': self.status.get('battery_level'),
                         'wifi_connected': self.status.get('wifi_connected', False),
                         'collection_active': self.status.get('collection_active', False),
                         'online': True,
-                        'hardware_info': self._build_hardware_info(),
+                        'hardware_info': self._build_hardware_info(
+                            include_capture_settings=not self._settings_sync_pending
+                        ),
                     })
                 except Exception as e:
                     logger.error(f"Error in heartbeat loop: {e}")
