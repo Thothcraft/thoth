@@ -89,10 +89,10 @@
       shapes.push({ type: 'path', path: `M ${origin[0]},${origin[1]} L ${endpoints[0][0]},${endpoints[0][1]} L ${endpoints[1][0]},${endpoints[1][1]} Z`, line: { color: '#0891b2', width: 1.5 }, fillcolor: 'rgba(6,182,212,.10)', layer: 'above' });
     });
     (room.furniture || []).forEach((item) => shapes.push({ type: 'rect', x0: Number(item.x || 0), y0: Number(item.y || 0), x1: Number(item.x || 0) + Number(item.width || .8), y1: Number(item.y || 0) + Number(item.depth || .8), line: { color: '#78716c' }, fillcolor: 'rgba(120,113,108,.20)', layer: 'above' }));
-    if (room.sleep_anchor) {
-      const x = Number(room.sleep_anchor.x || 0), y = Number(room.sleep_anchor.y || 0), radius = Number(room.sleep_anchor.radius_m || 1);
-      shapes.push({ type: 'circle', x0: x - radius, y0: y - radius, x1: x + radius, y1: y + radius, line: { color: '#a855f7', width: 2 }, fillcolor: 'rgba(168,85,247,.12)', layer: 'above' });
-    }
+    (room.zones || []).forEach((zone) => {
+      const x = Number(zone.x || 0), y = Number(zone.y || 0), zoneWidth = Number(zone.width || 1), zoneDepth = Number(zone.depth || 1);
+      shapes.push({ type: 'rect', x0: x, y0: y, x1: x + zoneWidth, y1: y + zoneDepth, line: { color: zone.color || '#22c55e', width: 2 }, fillcolor: `${zone.color || '#22c55e'}18`, layer: 'above' });
+    });
     [...(room.doors || []).map((item) => ({ ...item, color: '#f59e0b' })), ...(room.windows || []).map((item) => ({ ...item, color: '#38bdf8' }))].forEach((item) => {
       const wall = item.wall || 'Back', offset = Number(item.offset_m || 0), span = Number(item.width_m || 1);
       const points = wall === 'Back' ? [offset, 0, offset + span, 0] : wall === 'Front' ? [offset, depth, offset + span, depth] : wall === 'Left' ? [0, offset, 0, offset + span] : [width, offset, width, offset + span];

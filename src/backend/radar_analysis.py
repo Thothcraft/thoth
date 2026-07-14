@@ -81,13 +81,7 @@ def load_room_config() -> Dict[str, Any]:
     for key in ("doors", "windows", "furniture", "zones"):
         if not isinstance(room.get(key), list):
             room[key] = []
-    if not isinstance(room.get("sleep_anchor"), dict):
-        room["sleep_anchor"] = {
-            "x": float(room.get("width_m", 5.0)) / 2.0,
-            "y": float(room.get("depth_m", 5.0)) / 2.0,
-            "radius_m": 1.0,
-            "name": "Sleep anchor",
-        }
+    room.pop("sleep_anchor", None)
     return room
 
 
@@ -330,10 +324,14 @@ class StreamingChunkAnalyzer:
         shadow_intensity = np.asarray(shadow.get("intensity") if shadow.get("intensity") is not None else np.empty(0), dtype=float)
         frame_index = self.evaluated_frames
         self.evaluated_frames += 1
-        if detection.get("detected"):
-            self.detected_frames += 1
         serialized_targets = [_serialize_target(target, self.room) for target in targets]
         self.last_targets = self.identity.assign(serialized_targets) if self.identity else serialized_targets
+        # Live visualization and chunk labeling share this exact signal.
+        person_detected = bool(self.last_targets)
+        detection["signal_detected"] = bool(detection.get("detected"))
+        detection["detected"] = person_detected
+        if person_detected:
+            self.detected_frames += 1
         self.last_detection = detection
         if self.last_targets:
             lead = self.last_targets[0]
@@ -410,7 +408,12 @@ class StreamingChunkAnalyzer:
             self.live_state_path.parent.mkdir(parents=True, exist_ok=True)
             temporary.write_text(json.dumps({
                 "updated_at": time.time(),
-                "occupied": bool(self.last_targets),
+                "occupied": occupancy_label(self.detected_frames, self.evaluated_frames, self.occupancy_threshold_percent) == "occupied",
+                "person_detected": bool(self.last_targets),
+                "detected_frames": self.detected_frames,
+                "evaluated_frames": self.evaluated_frames,
+                "ratio": self.detected_frames / self.evaluated_frames if self.evaluated_frames else 0.0,
+                "threshold_percent": self.occupancy_threshold_percent,
                 "target_count": len(self.last_targets),
                 "targets": self.last_targets,
                 "shadow": np.asarray(world_points, dtype=float).round(3).tolist(),
@@ -583,6 +586,16 @@ def _serialize_target(target: Dict[str, Any], room: Dict[str, Any]) -> Dict[str,
     ])
     cones = room.get("radar_cones") if isinstance(room.get("radar_cones"), list) else []
     primary_cone = next((cone for cone in cones if isinstance(cone, dict) and cone.get("enabled") is not False), {})
+    zones = []
+    for zone in room.get("zones") or []:
+        if not isinstance(zone, dict):
+            continue
+        x, y = float(zone.get("x") or 0), float(zone.get("y") or 0)
+        width, depth = float(zone.get("width") or 1), float(zone.get("depth") or 1)
+        if x <= float(world[0]) <= x + width and y <= float(world[1]) <= y + depth:
+            label = str(zone.get("label") or zone.get("id") or "zone").strip()
+            if label and label not in zones:
+                zones.append(label)
     return {
         "id": int(target.get("id", 0)),
         "cone_id": primary_cone.get("id", "radar-1"),
@@ -593,6 +606,7 @@ def _serialize_target(target: Dict[str, Any], room: Dict[str, Any]) -> Dict[str,
         "size": [round(float(value), 3) for value in world_size],
         "snr_db": round(float(target.get("snr_db", 0.0)), 2),
         "confidence": round(float(target.get("confidence", target.get("snr_db", 0.0))), 2),
+        "zones": zones,
     }
 
 

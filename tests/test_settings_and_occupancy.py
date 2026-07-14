@@ -117,7 +117,7 @@ class OccupancyTests(unittest.TestCase):
             def update(self, _frame):
                 self.calls += 1
                 self.last_detection = {"detected": self.calls == 1, "threshold_db": self.threshold_db}
-                return []
+                return [{"id": 1, "lateral_m": 0.1, "forward_m": 1.0, "vertical_m": 1.0}] if self.calls == 1 else []
 
         room = {"width_m": 4, "depth_m": 5, "height_m": 3, "sensor_wall": "Back", "sensor_position_m": 2, "sensor_height_m": 1}
         processor = Processor()
@@ -137,18 +137,22 @@ class OccupancyTests(unittest.TestCase):
             self.assertFalse(csv_path.with_suffix(".csv.tmp").exists())
 
     def test_chunk_labels_join_metadata_and_minute_vote(self):
-        room = {"sleep_anchor": {"x": 1.0, "y": 1.0, "radius_m": 0.5}, "zones": [{"id": "bed", "label": "Bedroom", "x": 0.5, "y": 0.5, "width": 1.5, "depth": 1.5}]}
-        settings = {"auto_occupancy_label_enabled": True, "prediction_label_style": "presence", "people_count_label_enabled": True, "sleep_study_enabled": True, "occupancy_vote_chunks": 2}
+        room = {"zones": [{"id": "bed", "label": "Bedroom", "x": 0.5, "y": 0.5, "width": 1.5, "depth": 1.5}]}
+        settings = {"auto_occupancy_label_enabled": True, "prediction_label_style": "presence", "people_count_label_enabled": True, "occupancy_vote_chunks": 2}
         chunks = []
         for index, label in enumerate(("occupied", "empty", "occupied")):
-            result = {"chunk_index": index, "chunk_seconds": 10, "occupancy": {"label": label, "detected_frames": 8 if label == "occupied" else 1, "evaluated_frames": 10, "threshold_percent": 50}, "targets": [{"id": 4, "position": [1.1, 1.1, 1]}] if label == "occupied" else [], "bin_path": f"raw_{index}.bin", "csv_path": f"xy_{index}.csv"}
-            chunks.append(annotate_chunk_result(result, settings, room, ["sleep-study", "participant-1"], "20260713_1200", 3, index * 10))
+            tracked = {"id": 4, "position": [1.1, 1.1, 1]}
+            frames = [{"targets": [tracked] if label == "occupied" and frame < 6 else []} for frame in range(10)]
+            result = {"chunk_index": index, "chunk_seconds": 10, "occupancy": {"label": label, "detected_frames": 8 if label == "occupied" else 1, "evaluated_frames": 10, "threshold_percent": 50}, "targets": [dict(tracked)] if label == "occupied" else [], "frames": frames, "bin_path": f"raw_{index}.bin", "csv_path": f"xy_{index}.csv"}
+            chunks.append(annotate_chunk_result(result, settings, room, ["care", "participant-1"], "20260713_1200", 3, index * 10))
         self.assertIn("present", chunks[0]["labels"])
         self.assertIn("people_count:1", chunks[0]["labels"])
         self.assertIn("zone:Bedroom", chunks[0]["labels"])
+        self.assertEqual(chunks[0]["activity_labels"], ["present", "occupied", "zone:Bedroom"])
+        self.assertEqual(chunks[0]["activity"]["targets"][0]["zone_frames"]["Bedroom"], 6)
         self.assertEqual(chunks[0]["targets"][0]["zones"], ["Bedroom"])
         self.assertEqual(chunks[1]["join"]["previous_chunk_id"], "20260713_1200:00")
-        summary = summarize_minute_results(chunks, settings, ["sleep-study", "participant-1"])
+        summary = summarize_minute_results(chunks, settings, ["care", "participant-1"])
         self.assertEqual(summary["occupancy"]["label"], "occupied")
         self.assertEqual(summary["occupancy"]["vote_required_chunks"], 2)
         self.assertEqual(summary["people_count"], 1)
@@ -183,11 +187,13 @@ class HomeAssistantTests(unittest.TestCase):
                     minute_result = home_assistant.publish_occupancy(
                         {"label": "occupied", "occupied_chunks": 3, "evaluated_chunks": 6, "vote_required_chunks": 3},
                         "20260713_1200", scope="minute", people_count=2,
-                        labels=["sleep-study", "present", "people_count:2"],
-                        sleep_proximity={"in_zone": True, "nearest_target_m": .25},
+                        labels=["care", "present", "people_count:2", "zone:Bedroom"],
+                        activity_labels=["present", "occupied", "zone:Bedroom"],
+                        activity={"state": "occupied", "zones": ["Bedroom"]},
                     )
                 self.assertIn("binary_sensor.thoth_minute_occupancy", minute_result["entity_ids"])
                 self.assertTrue(any("sensor.thoth_minute_labels" in call.args[0] for call in minute_post.call_args_list))
+                self.assertTrue(any("sensor.thoth_minute_activity" in call.args[0] and call.kwargs["json"]["attributes"]["labels"] == ["present", "occupied", "zone:Bedroom"] for call in minute_post.call_args_list))
 
 
 if __name__ == "__main__":

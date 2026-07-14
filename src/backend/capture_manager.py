@@ -501,7 +501,8 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
             "target_count": prediction.get("target_count") if prediction else 0,
             "people_count": (prediction.get("people_count") if prediction else manifest_chunk.get("people_count", 0)),
             "labels": (prediction.get("labels") if prediction else manifest_chunk.get("labels", [])),
-            "sleep_proximity": (prediction.get("sleep_proximity") if prediction else manifest_chunk.get("sleep_proximity")),
+            "activity_labels": (prediction.get("activity_labels") if prediction else manifest_chunk.get("activity_labels", [])),
+            "activity": (prediction.get("activity") if prediction else manifest_chunk.get("activity")),
             "join": (prediction.get("join") if prediction else manifest_chunk.get("join")),
             "detected_frames": (
                 prediction.get("detected_frames") if prediction

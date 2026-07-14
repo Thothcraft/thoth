@@ -139,7 +139,8 @@ def publish_occupancy(
     scope: str = "chunk",
     people_count: Any = None,
     labels: Any = None,
-    sleep_proximity: Any = None,
+    activity_labels: Any = None,
+    activity: Any = None,
     timestamp: Optional[str] = None,
     timeout: float = 5.0,
 ) -> Dict[str, Any]:
@@ -164,7 +165,7 @@ def publish_occupancy(
     targets_entity_id = f"sensor.{prefix}_target_coordinates"
     labels_entity_id = f"sensor.{prefix}_labels"
     zones_entity_id = f"sensor.{prefix}_zones"
-    sleep_entity_id = f"sensor.{prefix}_sleep_proximity"
+    activity_entity_id = f"sensor.{prefix}_activity"
     target_list = targets if isinstance(targets, list) else []
     active_zones = list(dict.fromkeys(
         [str(label)[5:] for label in (labels or []) if str(label).startswith('zone:')]
@@ -226,14 +227,16 @@ def publish_occupancy(
                 'timestamp': timestamp or datetime.now(timezone.utc).isoformat(),
             },
         },
-        sleep_entity_id: {
-            'state': 'in_zone' if isinstance(sleep_proximity, dict) and sleep_proximity.get('in_zone') else 'out_of_zone',
+        activity_entity_id: {
+            'state': str((activity or {}).get('state') or ('occupied' if payload['state'] == 'on' else 'empty')),
             'attributes': {
-                'friendly_name': f'Thoth {scope.title()} Sleep Proximity',
+                'friendly_name': f'Thoth {scope.title()} Human Activity',
+                'labels': list(activity_labels or []),
+                'zones': active_zones,
                 'capture_minute': minute,
                 'chunk_index': chunk_index,
                 'scope': scope,
-                **(sleep_proximity if isinstance(sleep_proximity, dict) else {}),
+                **(activity if isinstance(activity, dict) else {}),
                 'timestamp': timestamp or datetime.now(timezone.utc).isoformat(),
             },
         },
@@ -252,7 +255,7 @@ def publish_occupancy(
             "success": True,
             "status": "published",
             "entity_id": entity_id,
-            "entity_ids": [entity_id, people_entity_id, targets_entity_id, labels_entity_id, zones_entity_id, sleep_entity_id],
+            "entity_ids": [entity_id, people_entity_id, targets_entity_id, labels_entity_id, zones_entity_id, activity_entity_id],
             "state": payload["state"],
             "published_at": datetime.now(timezone.utc).isoformat(),
         })

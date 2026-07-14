@@ -255,8 +255,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       const frames = chunk.detected_frames == null || chunk.evaluated_frames == null ? '' : `; ${Number(chunk.detected_frames) || 0} / ${Number(chunk.evaluated_frames) || 0} frames`;
       const people = `; ${Number(chunk.people_count ?? chunk.target_count ?? 0)} people`;
       const labels = Array.isArray(chunk.labels) && chunk.labels.length ? `; labels ${chunk.labels.join(', ')}` : '';
-      const sleep = chunk.sleep_proximity?.nearest_target_m == null ? '' : `; sleep anchor ${Number(chunk.sleep_proximity.nearest_target_m).toFixed(2)} m`;
-      const detail = `Chunk ${chunk.index + 1}; ${chunk.prediction || chunk.state || 'waiting'}${people}${labels}${frames}${chunk.ratio == null ? '' : `; ratio ${(Number(chunk.ratio) * 100).toFixed(1)}%`}${location}${sleep}${chunk.error ? `; ${chunk.error}` : ''}`;
+      const activity = Array.isArray(chunk.activity_labels) && chunk.activity_labels.length ? `; activity ${chunk.activity_labels.join(', ')}` : '';
+      const detail = `Chunk ${chunk.index + 1}; ${chunk.prediction || chunk.state || 'waiting'}${people}${labels}${activity}${frames}${chunk.ratio == null ? '' : `; ratio ${(Number(chunk.ratio) * 100).toFixed(1)}%`}${location}${chunk.error ? `; ${chunk.error}` : ''}`;
       return `<div class="min-w-0 flex-1 text-center" title="${detail}"><div role="img" tabindex="0" title="${detail}" aria-label="${detail}" class="mx-auto h-3 w-3 rounded-full ring-2 ring-white" style="background:${visual};transition:background-color .45s ease,box-shadow .45s ease;box-shadow:0 0 0 1px color-mix(in srgb, ${visual} 55%, transparent)"></div></div>`;
     }).join('');
   };

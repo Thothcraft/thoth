@@ -1570,8 +1570,7 @@ def api_radar_room():
     for key in ('doors', 'windows', 'furniture', 'zones'):
         if not isinstance(room.get(key), list):
             room[key] = []
-    if not isinstance(room.get('sleep_anchor'), dict):
-        room['sleep_anchor'] = {'x': float(room.get('width_m', 5.0)) / 2, 'y': float(room.get('depth_m', 5.0)) / 2, 'radius_m': 1.0, 'name': 'Sleep anchor'}
+    room.pop('sleep_anchor', None)
     if request.method == 'GET':
         return jsonify({'success': True, 'room': room})
     payload = request.get_json(silent=True) or {}
@@ -1635,14 +1634,6 @@ def api_radar_room():
             'depth': min(float(room.get('depth_m', 5.0)), max(0.1, float(item.get('depth') or 1.0))),
             'color': str(item.get('color') or '#22c55e')[:24],
         } for index, item in enumerate(payload['zones'][:64]) if isinstance(item, dict)]
-    if isinstance(payload.get('sleep_anchor'), dict):
-        anchor = payload['sleep_anchor']
-        room['sleep_anchor'] = {
-            'x': min(float(room.get('width_m', 5.0)), max(0.0, float(anchor.get('x') or 0.0))),
-            'y': min(float(room.get('depth_m', 5.0)), max(0.0, float(anchor.get('y') or 0.0))),
-            'radius_m': min(5.0, max(0.1, float(anchor.get('radius_m') or 1.0))),
-            'name': str(anchor.get('name') or 'Sleep anchor')[:64],
-        }
     if room['radar_cones']:
         primary = room['radar_cones'][0]
         room['sensor_wall'] = primary['wall']
@@ -1779,7 +1770,8 @@ def api_internal_home_assistant_publish():
         scope=scope,
         people_count=payload.get('people_count'),
         labels=payload.get('labels'),
-        sleep_proximity=payload.get('sleep_proximity'),
+        activity_labels=payload.get('activity_labels'),
+        activity=payload.get('activity'),
         timestamp=payload.get('timestamp'),
     )
     return jsonify({'success': queued, 'status': 'queued' if queued else 'queue_full'}), (202 if queued else 503)

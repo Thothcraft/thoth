@@ -188,59 +188,94 @@ def annotate_chunk_result(
     occupancy = result.get("occupancy") or {}
     raw_label = str(occupancy.get("label") or "empty")
     targets = result.get("targets") if isinstance(result.get("targets"), list) else []
-    people_count = len(targets)
+    frames = result.get("frames") if isinstance(result.get("frames"), list) else []
+    evaluated_frames = int(occupancy.get("evaluated_frames") or len(frames))
+    dwell_threshold = min(100.0, max(0.0, float(occupancy.get("threshold_percent") or 50.0)))
+    target_stats: dict[int, dict[str, Any]] = {}
+    people_count = 0
+
+    def zones_at(position: object) -> list[str]:
+        if not isinstance(position, (list, tuple)) or len(position) < 2:
+            return []
+        tx, ty = float(position[0]), float(position[1])
+        matched: list[str] = []
+        for zone in room.get("zones") or []:
+            if not isinstance(zone, dict):
+                continue
+            x, y = float(zone.get("x") or 0), float(zone.get("y") or 0)
+            width, depth = float(zone.get("width") or 1), float(zone.get("depth") or 1)
+            if x <= tx <= x + width and y <= ty <= y + depth:
+                label = str(zone.get("label") or zone.get("id") or "zone").strip()
+                if label and label not in matched:
+                    matched.append(label)
+        return matched
+
+    for frame in frames:
+        frame_targets = frame.get("targets") if isinstance(frame, dict) and isinstance(frame.get("targets"), list) else []
+        people_count = max(people_count, len(frame_targets))
+        for target in frame_targets:
+            if not isinstance(target, dict):
+                continue
+            target_id = int(target.get("id") or 0)
+            stats = target_stats.setdefault(target_id, {"target_id": target_id, "present_frames": 0, "zone_frames": {}})
+            stats["present_frames"] += 1
+            for zone_label in zones_at(target.get("position")):
+                stats["zone_frames"][zone_label] = int(stats["zone_frames"].get(zone_label) or 0) + 1
+
+    if not frames and targets:
+        people_count = len(targets)
+        for target in targets:
+            if not isinstance(target, dict):
+                continue
+            target_id = int(target.get("id") or 0)
+            stats = target_stats.setdefault(target_id, {"target_id": target_id, "present_frames": evaluated_frames, "zone_frames": {}})
+            for zone_label in zones_at(target.get("position")):
+                stats["zone_frames"][zone_label] = evaluated_frames
+
     occupied_zones: list[str] = []
+    activity_targets: list[dict[str, Any]] = []
+    for target_id, stats in target_stats.items():
+        qualified = [
+            zone_label for zone_label, count in stats["zone_frames"].items()
+            if evaluated_frames > 0 and int(count) * 100.0 >= dwell_threshold * evaluated_frames
+        ]
+        for zone_label in qualified:
+            if zone_label not in occupied_zones:
+                occupied_zones.append(zone_label)
+        activity_targets.append({
+            "target_id": target_id,
+            "present_frames": int(stats["present_frames"]),
+            "evaluated_frames": evaluated_frames,
+            "zone_frames": dict(stats["zone_frames"]),
+            "zones": qualified,
+        })
     for target in targets:
-        position = target.get("position") if isinstance(target, dict) else None
-        target_zones: list[str] = []
-        if isinstance(position, (list, tuple)) and len(position) >= 2:
-            tx, ty = float(position[0]), float(position[1])
-            for zone in room.get("zones") or []:
-                if not isinstance(zone, dict):
-                    continue
-                x, y = float(zone.get("x") or 0), float(zone.get("y") or 0)
-                width, depth = float(zone.get("width") or 1), float(zone.get("depth") or 1)
-                if x <= tx <= x + width and y <= ty <= y + depth:
-                    label = str(zone.get("label") or zone.get("id") or "zone").strip()
-                    if label and label not in target_zones:
-                        target_zones.append(label)
-                    if label and label not in occupied_zones:
-                        occupied_zones.append(label)
         if isinstance(target, dict):
-            target["zones"] = target_zones
+            activity = next((item for item in activity_targets if item["target_id"] == int(target.get("id") or 0)), None)
+            target["zones"] = list((activity or {}).get("zones") or [])
+
+    activity_labels = ["present", "occupied"] if raw_label == "occupied" else ["absent", "empty"]
+    activity_labels.extend(f"zone:{label}" for label in occupied_zones)
     labels = list(dict.fromkeys(preset_labels))
     if settings.get("auto_occupancy_label_enabled"):
         labels.append(prediction_label_for(raw_label, str(settings.get("prediction_label_style") or "occupancy")))
     if settings.get("people_count_label_enabled"):
         labels.append(f"people_count:{people_count}")
-    labels.extend(f"zone:{label}" for label in occupied_zones)
-
-    anchor = room.get("sleep_anchor") if isinstance(room.get("sleep_anchor"), dict) else {}
-    anchor_x = float(anchor.get("x") or 0.0)
-    anchor_y = float(anchor.get("y") or 0.0)
-    radius = max(0.1, float(anchor.get("radius_m") or 1.0))
-    distances = []
-    for target in targets:
-        position = target.get("position") if isinstance(target, dict) else None
-        if isinstance(position, (list, tuple)) and len(position) >= 2:
-            distances.append(math.hypot(float(position[0]) - anchor_x, float(position[1]) - anchor_y))
-    nearest = min(distances) if distances else None
-    sleep_proximity = {
-        "anchor": {"x": anchor_x, "y": anchor_y, "radius_m": radius, "name": anchor.get("name") or "Sleep anchor"},
-        "nearest_target_m": round(nearest, 3) if nearest is not None else None,
-        "targets_in_zone": sum(distance <= radius for distance in distances),
-        "in_zone": any(distance <= radius for distance in distances),
-    }
-    if settings.get("sleep_study_enabled"):
-        labels.append("sleep_zone:present" if sleep_proximity["in_zone"] else "sleep_zone:empty")
+    labels.extend(activity_labels)
 
     chunk_index = int(result.get("chunk_index") or 0)
-    evaluated_frames = int(occupancy.get("evaluated_frames") or 0)
     result.update({
         "labels": list(dict.fromkeys(labels)),
         "zones": occupied_zones,
         "people_count": people_count,
-        "sleep_proximity": sleep_proximity,
+        "activity_labels": list(dict.fromkeys(activity_labels)),
+        "activity": {
+            "state": "occupied" if raw_label == "occupied" else "empty",
+            "labels": list(dict.fromkeys(activity_labels)),
+            "zones": occupied_zones,
+            "targets": activity_targets,
+            "dwell_threshold_percent": dwell_threshold,
+        },
         "join": {
             "schema_version": 2,
             "minute": minute,
@@ -273,22 +308,17 @@ def summarize_minute_results(
     evaluated_frames = sum(int((chunk.get("occupancy") or {}).get("evaluated_frames") or 0) for chunk in chunks)
     ratio = detected_frames / evaluated_frames if evaluated_frames else 0.0
     people_count = max((int(chunk.get("people_count") or 0) for chunk in chunks), default=0)
-    sleep_chunks = sum(bool((chunk.get("sleep_proximity") or {}).get("in_zone")) for chunk in chunks)
-    nearest_values = [
-        float((chunk.get("sleep_proximity") or {}).get("nearest_target_m"))
-        for chunk in chunks if (chunk.get("sleep_proximity") or {}).get("nearest_target_m") is not None
-    ]
     labels = list(dict.fromkeys(preset_labels))
     if settings.get("auto_occupancy_label_enabled"):
         labels.append(prediction_label_for(label, str(settings.get("prediction_label_style") or "occupancy")))
     if settings.get("people_count_label_enabled"):
         labels.append(f"people_count:{people_count}")
-    if settings.get("sleep_study_enabled"):
-        labels.append("sleep_zone:present" if sleep_chunks >= vote_required else "sleep_zone:empty")
     occupied_zones = list(dict.fromkeys(
         str(zone) for chunk in chunks for zone in (chunk.get("zones") or []) if str(zone).strip()
     ))
-    labels.extend(f"zone:{zone}" for zone in occupied_zones)
+    activity_labels = ["present", "occupied"] if label == "occupied" else ["absent", "empty"]
+    activity_labels.extend(f"zone:{zone}" for zone in occupied_zones)
+    labels.extend(activity_labels)
     latest = chunks[-1] if chunks else {}
     return {
         "occupancy": {
@@ -303,17 +333,19 @@ def summarize_minute_results(
         },
         "labels": list(dict.fromkeys(labels)),
         "zones": occupied_zones,
+        "activity_labels": list(dict.fromkeys(activity_labels)),
+        "activity": {
+            "state": label,
+            "labels": list(dict.fromkeys(activity_labels)),
+            "zones": occupied_zones,
+            "occupied_chunks": occupied_chunks,
+            "evaluated_chunks": len(chunks),
+            "vote_required_chunks": vote_required,
+        },
         "people_count": people_count,
         "targets": latest.get("targets") or [],
         "location": latest.get("location"),
         "score": latest.get("score"),
-        "sleep_proximity": {
-            "chunks_in_zone": sleep_chunks,
-            "evaluated_chunks": len(chunks),
-            "vote_required_chunks": vote_required,
-            "in_zone": sleep_chunks >= vote_required,
-            "nearest_target_m": min(nearest_values) if nearest_values else None,
-        },
     }
 
 
@@ -735,7 +767,7 @@ def main() -> int:
             xy_payload["occupancy"] = minute_summary["occupancy"]
             xy_payload["labels"] = minute_summary["labels"]
             xy_payload["people_count"] = minute_summary["people_count"]
-            xy_payload["sleep_proximity"] = minute_summary["sleep_proximity"]
+            xy_payload["activity"] = minute_summary["activity"]
             timeline = [
                 {
                     "model_name": "xy-tracking",
@@ -749,7 +781,8 @@ def main() -> int:
                     "people_count": chunk.get("people_count", len(chunk.get("targets") or [])),
                     "targets": chunk.get("targets") or [],
                     "labels": chunk.get("labels") or [],
-                    "sleep_proximity": chunk.get("sleep_proximity"),
+                    "activity_labels": chunk.get("activity_labels") or [],
+                    "activity": chunk.get("activity"),
                     "join": chunk.get("join"),
                     "detected_frames": chunk.get("occupancy", {}).get("detected_frames", 0),
                     "evaluated_frames": chunk.get("occupancy", {}).get("evaluated_frames", 0),
@@ -792,7 +825,8 @@ def main() -> int:
             "targets": result.get("targets") or [],
             "people_count": result.get("people_count"),
             "labels": result.get("labels") or [],
-            "sleep_proximity": result.get("sleep_proximity"),
+            "activity_labels": result.get("activity_labels") or [],
+            "activity": result.get("activity"),
             "timestamp": entry.get("finished") or iso_now(),
         }).encode("utf-8")
         try:
@@ -896,7 +930,8 @@ def main() -> int:
                     "people_count": result.get("people_count", 0),
                     "targets": result.get("targets") or [],
                     "labels": result.get("labels") or [],
-                    "sleep_proximity": result.get("sleep_proximity"),
+                    "activity_labels": result.get("activity_labels") or [],
+                    "activity": result.get("activity"),
                     "join": result.get("join"),
                     "performance": result.get("performance"),
                     "finished": iso_now(),
@@ -1112,7 +1147,8 @@ def main() -> int:
                     "targets": result.get("targets", []),
                     "people_count": result.get("people_count", 0),
                     "labels": result.get("labels", []),
-                    "sleep_proximity": result.get("sleep_proximity"),
+                    "activity_labels": result.get("activity_labels") or [],
+                    "activity": result.get("activity"),
                     "join": result.get("join"),
                     "finished": iso_now(),
                 })
@@ -1135,7 +1171,7 @@ def main() -> int:
             xy_payload["occupancy"] = minute_summary["occupancy"]
             xy_payload["labels"] = minute_summary["labels"]
             xy_payload["people_count"] = minute_summary["people_count"]
-            xy_payload["sleep_proximity"] = minute_summary["sleep_proximity"]
+            xy_payload["activity"] = minute_summary["activity"]
             xy_payload_path = output_dir / "xy-tracking.json"
             write_json_atomic(xy_payload_path, xy_payload)
             manifest["outputs"]["xy_tracking"] = {
@@ -1167,7 +1203,8 @@ def main() -> int:
                         "people_count": chunk.get("people_count", len(chunk.get("targets") or [])),
                         "targets": chunk.get("targets") or [],
                         "labels": chunk.get("labels") or [],
-                        "sleep_proximity": chunk.get("sleep_proximity"),
+                        "activity_labels": chunk.get("activity_labels") or [],
+                        "activity": chunk.get("activity"),
                         "join": chunk.get("join"),
                         "detected_frames": chunk.get("occupancy", {}).get("detected_frames", 0),
                         "evaluated_frames": chunk.get("occupancy", {}).get("evaluated_frames", 0),
