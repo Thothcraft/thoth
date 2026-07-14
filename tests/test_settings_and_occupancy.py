@@ -70,6 +70,26 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(reloaded["people_count_label_enabled"])
             self.assertTrue(reloaded["sleep_study_enabled"])
 
+    def test_dashboard_persists_labels_and_sensor_toggles_as_capture_settings(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = DeviceManager(_Config(root))
+            saved = manager.save_device_settings({
+                "labels": ["bedroom", "participant-1"],
+                "sensors": {"usb_camera": False, "dreamhat_radar": True},
+            })
+            self.assertEqual(saved["labels"], ["bedroom", "participant-1"])
+            self.assertFalse(saved["sensors"]["usb_camera"])
+            self.assertTrue(saved["sensors"]["dreamhat_radar"])
+
+    def test_frequent_heartbeat_does_not_rescan_complete_inventory(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = DeviceManager(_Config(root))
+            manager._last_file_report_at = 100.0
+            with mock.patch("backend.device_manager.time.time", return_value=120.0), mock.patch.object(
+                manager, "_get_data_files_list", side_effect=AssertionError("unexpected inventory scan")
+            ):
+                self.assertIsNone(manager._heartbeat_file_payload())
+
     def test_region_thresholds_are_strictly_validated(self):
         with tempfile.TemporaryDirectory() as root:
             manager = DeviceManager(_Config(root))

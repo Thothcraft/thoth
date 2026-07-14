@@ -180,10 +180,7 @@ def _capture_timeline_worker() -> None:
         minute = _capture_timeline_queue.get()
         started = time.monotonic()
         try:
-            synchronized = device_manager.update_status(
-                {'collection_active': True},
-                force_files=True,
-            )
+            synchronized = device_manager.update_capture_timeline(minute)
             if not synchronized:
                 logger.warning('Live timeline synchronization failed for %s', minute)
             else:

@@ -22,7 +22,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .capture_manager import list_minutes, list_minute_folders, capture_files, minute_summary
+from .capture_manager import list_minutes, list_minute_folders, capture_files, minute_summary, get_minute
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -253,6 +253,8 @@ class DeviceManager:
 
     def save_device_settings(self, updates: Dict[str, Any]) -> Dict[str, Any]:
         processing_keys = {
+            'labels',
+            'sensors',
             'radar_detection_threshold_db',
             'occupancy_threshold_percent',
             'yellow_threshold_percent',
@@ -867,29 +869,9 @@ class DeviceManager:
         files_list = []
         try:
             for minute_dir in list_minute_folders():
-                summary = minute_summary(minute_dir)
-                relative_path = str(summary.get('relative_path') or minute_dir.name)
-                minute_files = capture_files(minute_dir)
-                file_count = sum(1 for file_path in minute_files.values() if file_path and file_path.exists())
-                sizes = summary.get('sizes') if isinstance(summary, dict) else {}
-                total_size = sum(int(value or 0) for value in (sizes.values() if isinstance(sizes, dict) else []))
-                stat = minute_dir.stat()
-                files_list.append({
-                    'name': relative_path,
-                    'size': total_size,
-                    'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
-                    'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                    'type': 'minute',
-                    'data_type': 'minute:' + ','.join(
-                        key for key, present in (summary.get('files') or {}).items()
-                        if present and key in {'radar', 'csi', 'video', 'sense_hat'}
-                    ),
-                    'minute_files': file_count,
-                    'label': summary.get('label'),
-                    'labels': summary.get('labels', []),
-                    'occupancy': summary.get('occupancy'),
-                    'progress': summary.get('progress'),
-                })
+                record = self._minute_file_record(minute_dir)
+                if record:
+                    files_list.append(record)
 
             files_list.sort(key=lambda item: str(item.get('modified') or ''), reverse=True)
             logger.info(f"Found {len(files_list)} capture files to report")
@@ -899,9 +881,38 @@ class DeviceManager:
 
         return files_list
 
+    def _minute_file_record(self, minute_dir: Path) -> Optional[Dict[str, Any]]:
+        """Build one lightweight metadata record without uploading capture files."""
+        try:
+            summary = minute_summary(minute_dir)
+            relative_path = str(summary.get('relative_path') or minute_dir.name)
+            minute_files = capture_files(minute_dir)
+            file_count = sum(1 for file_path in minute_files.values() if file_path and file_path.exists())
+            sizes = summary.get('sizes') if isinstance(summary, dict) else {}
+            total_size = sum(int(value or 0) for value in (sizes.values() if isinstance(sizes, dict) else []))
+            stat = minute_dir.stat()
+            return {
+                'name': relative_path, 'size': total_size,
+                'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                'type': 'minute',
+                'data_type': 'minute:' + ','.join(
+                    key for key, present in (summary.get('files') or {}).items()
+                    if present and key in {'radar', 'csi', 'video', 'sense_hat'}
+                ),
+                'minute_files': file_count, 'label': summary.get('label'),
+                'labels': summary.get('labels', []), 'occupancy': summary.get('occupancy'),
+                'progress': summary.get('progress'),
+            }
+        except (OSError, ValueError) as exc:
+            logger.warning("Unable to summarize live minute %s: %s", minute_dir, exc)
+            return None
+
     def _heartbeat_file_payload(self, force: bool = False) -> Optional[List[Dict[str, Any]]]:
         """Return local file registry only when changed or periodically."""
         now = time.time()
+        if not force and now - self._last_file_report_at < 60:
+            return None
         try:
             files = self._get_data_files_list()
             signature = json.dumps(
@@ -922,6 +933,34 @@ class DeviceManager:
         except Exception as e:
             logger.error(f"Error preparing heartbeat file payload: {e}")
         return None
+
+    def update_capture_timeline(self, minute: str) -> bool:
+        """Publish one minute's metadata immediately as a partial heartbeat."""
+        if not self.registered or not self.auth_token:
+            return False
+        minute_dir = get_minute(minute)
+        record = self._minute_file_record(minute_dir) if minute_dir else None
+        if record is None:
+            return False
+        try:
+            response = self.session.post(
+                f"{self.config.BRAIN_SERVER_URL}/api/device/heartbeat",
+                json={
+                    "device_id": self.device_id, "online": True,
+                    "collection_active": True, "files": [record],
+                    "inventory_complete": False,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+                headers={"Authorization": f"Bearer {self.auth_token}", "Content-Type": "application/json"},
+                timeout=5,
+            )
+            if response.status_code == 200:
+                self._apply_response_settings(response.json())
+                return True
+            logger.warning("Live timeline update failed: %s %s", response.status_code, response.text)
+        except requests.exceptions.RequestException as exc:
+            logger.warning("Live timeline update failed: %s", exc)
+        return False
 
     def _save_registration_info(self, device_info: Dict[str, Any], auth_token: str) -> None:
         """Save device registration information to disk."""

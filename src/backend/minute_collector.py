@@ -739,7 +739,10 @@ def main() -> int:
     radar_upload_thread: threading.Thread | None = None
     # Hold at most one scheduled minute of frames. This remains bounded while
     # ensuring signal processing can never back-pressure the SPI reader.
-    analysis_queue: queue.Queue[Any] = queue.Queue(maxsize=768)
+    # Keep only a short real-time window. If processing falls behind, dropping
+    # new frames preserves capture timing and prevents predictions from lagging
+    # an entire minute behind the physical room.
+    analysis_queue: queue.Queue[Any] = queue.Queue(maxsize=96)
     upload_queue: queue.Queue[Any] = queue.Queue(maxsize=32)
     radar_chunk_results: list[dict[str, Any]] = []
     publish_lock = threading.Lock()
@@ -1095,6 +1098,7 @@ def main() -> int:
                         "chunk_seconds": current_chunk_seconds,
                         "status": "collecting",
                         "settings": settings_snapshot,
+                        "dropped_analysis_frames": 0,
                     }
                     radar_chunk_results.append(chunk_entry)
                     manifest["outputs"]["radar"]["chunks"].append(chunk_entry)
@@ -1118,7 +1122,12 @@ def main() -> int:
                                 except queue.Empty:
                                     continue
                                 radar_handle.write(full_frame)
-                                analysis_queue.put(("frame", full_frame, time.monotonic()))
+                                try:
+                                    if analysis_queue.qsize() >= 24:
+                                        raise queue.Full
+                                    analysis_queue.put_nowait(("frame", full_frame, time.monotonic()))
+                                except queue.Full:
+                                    chunk_entry["dropped_analysis_frames"] += 1
 
                     if not radar_path.exists() or radar_path.stat().st_size == 0:
                         chunk_entry.update({
@@ -1153,7 +1162,9 @@ def main() -> int:
             sense_thread.join(timeout=5)
         if radar_analysis_thread is not None:
             analysis_queue.put(None)
-            radar_analysis_thread.join()
+            radar_analysis_thread.join(timeout=max(15.0, chunk_seconds * 2.0))
+            if radar_analysis_thread.is_alive():
+                manifest["errors"].append("Radar analysis exceeded its shutdown deadline; incomplete chunks were released for the next minute.")
         if radar_upload_thread is not None:
             try:
                 upload_queue.put_nowait(None)
