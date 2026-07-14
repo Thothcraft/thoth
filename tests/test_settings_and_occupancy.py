@@ -16,7 +16,8 @@ if "dotenv" not in sys.modules:
 
 from backend.device_manager import DeviceManager
 from backend import home_assistant
-from backend.radar_analysis import PersistentTargetIdentity, StreamingChunkAnalyzer, occupancy_label
+from backend.radar_analysis import PersistentTargetIdentity, StreamingChunkAnalyzer, occupancy_label, occupancy_region
+from backend.calibration import derive_thresholds
 from backend.minute_collector import annotate_chunk_result, minute_start, summarize_minute_results
 from collector import next_minute_boundary
 
@@ -69,6 +70,12 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(reloaded["people_count_label_enabled"])
             self.assertTrue(reloaded["sleep_study_enabled"])
 
+    def test_region_thresholds_are_strictly_validated(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = DeviceManager(_Config(root))
+            with self.assertRaisesRegex(ValueError, "yellow < green"):
+                manager.save_capture_settings({"yellow_threshold_percent": 70, "green_threshold_percent": 60})
+
     def test_persistence_failure_is_reported(self):
         with tempfile.TemporaryDirectory() as root:
             manager = DeviceManager(_Config(root))
@@ -104,6 +111,17 @@ class OccupancyTests(unittest.TestCase):
         self.assertEqual(occupancy_label(50, 100, 50), "occupied")
         self.assertEqual(occupancy_label(49, 100, 50), "empty")
         self.assertEqual(occupancy_label(0, 0, 0), "empty")
+        self.assertEqual(occupancy_region(19, 100, 20, 60), "red")
+        self.assertEqual(occupancy_region(20, 100, 20, 60), "yellow")
+        self.assertEqual(occupancy_region(59, 100, 20, 60), "yellow")
+        self.assertEqual(occupancy_region(60, 100, 20, 60), "green")
+
+    def test_calibration_uses_adjacent_median_midpoints(self):
+        result = derive_thresholds({"red": [4, 6, 8], "yellow": [38, 40, 42], "green": [84, 86, 88]})
+        self.assertEqual(result["yellow_threshold_percent"], 23.0)
+        self.assertEqual(result["green_threshold_percent"], 63.0)
+        with self.assertRaisesRegex(ValueError, "ordered"):
+            derive_thresholds({"red": [30], "yellow": [20], "green": [90]})
 
     def test_streaming_analyzer_processes_each_live_frame_and_finalizes_csv(self):
         class Processor:
@@ -123,13 +141,14 @@ class OccupancyTests(unittest.TestCase):
         processor = Processor()
         with tempfile.TemporaryDirectory() as root, mock.patch("backend.radar_analysis.load_radar_config", return_value={}):
             csv_path = Path(root) / "chunk.csv"
-            analyzer = StreamingChunkAnalyzer(processor, csv_path, 0, 10, room, 11, 50, live_state_path=None)
+            analyzer = StreamingChunkAnalyzer(processor, csv_path, 0, 10, room, 11, 50, 20, 50, live_state_path=None)
             with mock.patch("backend.radar_analysis.decode_radar_frame", return_value=(1, object())):
                 analyzer.process(b"frame-1")
                 analyzer.process(b"frame-2")
             result = analyzer.finish()
             self.assertEqual(processor.calls, 2)
             self.assertEqual(result["occupancy"]["label"], "occupied")
+            self.assertEqual(result["occupancy"]["classification"], "green")
             self.assertEqual(result["occupancy"]["evaluated_frames"], 2)
             self.assertEqual(len(result["frames"]), 2)
             self.assertEqual(result["frame_interval_ms"], 5000)
@@ -175,14 +194,15 @@ class HomeAssistantTests(unittest.TestCase):
                         targets=[{"id": 7, "position": [1.2, 3.4, 1.0], "position_error_m": .18}],
                     )
                 self.assertTrue(result["success"])
-                self.assertEqual(post.call_count, 6)
+                self.assertEqual(post.call_count, 7)
                 payload = post.call_args_list[0].kwargs["json"]
                 self.assertEqual(payload["state"], "on")
                 self.assertEqual(payload["attributes"]["chunk_index"], 2)
                 self.assertEqual(payload["attributes"]["coordinates"], {"x": 1.2, "y": 3.4})
-                self.assertEqual(post.call_args_list[1].kwargs["json"]["state"], 1)
-                self.assertEqual(post.call_args_list[2].kwargs["json"]["attributes"]["targets"][0]["target_id"], 7)
-                self.assertEqual(post.call_args_list[3].kwargs["json"]["state"], "none")
+                self.assertEqual(post.call_args_list[1].kwargs["json"]["state"], "green")
+                self.assertEqual(post.call_args_list[2].kwargs["json"]["state"], 1)
+                self.assertEqual(post.call_args_list[3].kwargs["json"]["attributes"]["targets"][0]["target_id"], 7)
+                self.assertEqual(post.call_args_list[4].kwargs["json"]["state"], "none")
                 with mock.patch("backend.home_assistant.requests.post", return_value=response) as minute_post:
                     minute_result = home_assistant.publish_occupancy(
                         {"label": "occupied", "occupied_chunks": 3, "evaluated_chunks": 6, "vote_required_chunks": 3},

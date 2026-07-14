@@ -144,6 +144,8 @@ def load_processing_settings() -> dict[str, Any]:
     defaults: dict[str, Any] = {
         "radar_detection_threshold_db": 8.0,
         "occupancy_threshold_percent": 50.0,
+        "yellow_threshold_percent": 20.0,
+        "green_threshold_percent": 60.0,
         "auto_occupancy_label_enabled": True,
         "system_mode": "balanced",
         "occupancy_vote_chunks": 1,
@@ -163,6 +165,10 @@ def load_processing_settings() -> dict[str, Any]:
         print(f"Unable to load processing settings: {exc}", file=sys.stderr)
     defaults["radar_detection_threshold_db"] = min(40.0, max(0.0, float(defaults["radar_detection_threshold_db"])))
     defaults["occupancy_threshold_percent"] = min(100.0, max(0.0, float(defaults["occupancy_threshold_percent"])))
+    defaults["yellow_threshold_percent"] = min(100.0, max(0.0, float(defaults["yellow_threshold_percent"])))
+    defaults["green_threshold_percent"] = min(100.0, max(0.0, float(defaults["green_threshold_percent"])))
+    if defaults["yellow_threshold_percent"] >= defaults["green_threshold_percent"]:
+        defaults["yellow_threshold_percent"], defaults["green_threshold_percent"] = 20.0, 60.0
     defaults["auto_occupancy_label_enabled"] = bool(defaults["auto_occupancy_label_enabled"])
     mode = str(defaults.get("system_mode") or "balanced").strip().lower()
     defaults["system_mode"] = mode if mode in {"responsive", "balanced", "precision"} else "balanced"
@@ -187,6 +193,7 @@ def annotate_chunk_result(
 ) -> dict[str, Any]:
     occupancy = result.get("occupancy") or {}
     raw_label = str(occupancy.get("label") or "empty")
+    classification = str(occupancy.get("classification") or ("green" if raw_label == "occupied" else "red"))
     targets = result.get("targets") if isinstance(result.get("targets"), list) else []
     frames = result.get("frames") if isinstance(result.get("frames"), list) else []
     evaluated_frames = int(occupancy.get("evaluated_frames") or len(frames))
@@ -254,7 +261,9 @@ def annotate_chunk_result(
             activity = next((item for item in activity_targets if item["target_id"] == int(target.get("id") or 0)), None)
             target["zones"] = list((activity or {}).get("zones") or [])
 
-    activity_labels = ["present", "occupied"] if raw_label == "occupied" else ["absent", "empty"]
+    activity_labels = (["present", "occupied"] if classification == "green" else
+                       ["present", "intermediate"] if classification == "yellow" else
+                       ["absent", "empty"])
     activity_labels.extend(f"zone:{label}" for label in occupied_zones)
     labels = list(dict.fromkeys(preset_labels))
     if settings.get("auto_occupancy_label_enabled"):
@@ -265,12 +274,21 @@ def annotate_chunk_result(
 
     chunk_index = int(result.get("chunk_index") or 0)
     result.update({
+        "settings_revision": int(settings.get("revision") or 0),
+        "settings_snapshot": {
+            "revision": int(settings.get("revision") or 0),
+            "system_mode": str(settings.get("system_mode") or "balanced"),
+            "radar_detection_threshold_db": float(settings.get("radar_detection_threshold_db") or 8.0),
+            "yellow_threshold_percent": float(settings.get("yellow_threshold_percent") or 20.0),
+            "green_threshold_percent": float(settings.get("green_threshold_percent") or 60.0),
+            "chunk_seconds": float(result.get("chunk_seconds") or settings.get("chunk_seconds") or 10.0),
+        },
         "labels": list(dict.fromkeys(labels)),
         "zones": occupied_zones,
         "people_count": people_count,
         "activity_labels": list(dict.fromkeys(activity_labels)),
         "activity": {
-            "state": "occupied" if raw_label == "occupied" else "empty",
+            "state": {"green": "occupied", "yellow": "intermediate"}.get(classification, "empty"),
             "labels": list(dict.fromkeys(activity_labels)),
             "zones": occupied_zones,
             "targets": activity_targets,
@@ -307,6 +325,9 @@ def summarize_minute_results(
     detected_frames = sum(int((chunk.get("occupancy") or {}).get("detected_frames") or 0) for chunk in chunks)
     evaluated_frames = sum(int((chunk.get("occupancy") or {}).get("evaluated_frames") or 0) for chunk in chunks)
     ratio = detected_frames / evaluated_frames if evaluated_frames else 0.0
+    yellow_threshold = float(settings.get("yellow_threshold_percent") or 20.0)
+    green_threshold = float(settings.get("green_threshold_percent") or 60.0)
+    classification = "green" if evaluated_frames and ratio * 100 >= green_threshold else ("yellow" if evaluated_frames and ratio * 100 >= yellow_threshold else "red")
     people_count = max((int(chunk.get("people_count") or 0) for chunk in chunks), default=0)
     labels = list(dict.fromkeys(preset_labels))
     if settings.get("auto_occupancy_label_enabled"):
@@ -323,6 +344,7 @@ def summarize_minute_results(
     return {
         "occupancy": {
             "label": label,
+            "classification": classification,
             "occupied_chunks": occupied_chunks,
             "evaluated_chunks": len(chunks),
             "vote_required_chunks": vote_required,
@@ -330,6 +352,8 @@ def summarize_minute_results(
             "evaluated_frames": evaluated_frames,
             "ratio": ratio,
             "threshold_percent": float((latest.get("occupancy") or {}).get("threshold_percent") or 50.0),
+            "yellow_threshold_percent": yellow_threshold,
+            "green_threshold_percent": green_threshold,
         },
         "labels": list(dict.fromkeys(labels)),
         "zones": occupied_zones,
@@ -787,6 +811,11 @@ def main() -> int:
                     "detected_frames": chunk.get("occupancy", {}).get("detected_frames", 0),
                     "evaluated_frames": chunk.get("occupancy", {}).get("evaluated_frames", 0),
                     "ratio": chunk.get("occupancy", {}).get("ratio", 0.0),
+                    "classification": chunk.get("occupancy", {}).get("classification", "red"),
+                    "yellow_threshold_percent": chunk.get("occupancy", {}).get("yellow_threshold_percent", 20.0),
+                    "green_threshold_percent": chunk.get("occupancy", {}).get("green_threshold_percent", 60.0),
+                    "settings_revision": chunk.get("settings_revision", 0),
+                    "settings_snapshot": chunk.get("settings_snapshot"),
                     "bin_path": chunk.get("bin_path"),
                     "csv_path": chunk.get("csv_path"),
                 }
@@ -892,7 +921,9 @@ def main() -> int:
                         float(entry["chunk_seconds"]), room_config,
                         float(settings_snapshot["radar_detection_threshold_db"]),
                         float(settings_snapshot["occupancy_threshold_percent"]),
-                        identity,
+                        float(settings_snapshot["yellow_threshold_percent"]),
+                        float(settings_snapshot["green_threshold_percent"]),
+                        identity=identity,
                     )
                     continue
                 if kind == "frame":
@@ -1209,6 +1240,11 @@ def main() -> int:
                         "detected_frames": chunk.get("occupancy", {}).get("detected_frames", 0),
                         "evaluated_frames": chunk.get("occupancy", {}).get("evaluated_frames", 0),
                         "ratio": chunk.get("occupancy", {}).get("ratio", 0.0),
+                        "classification": chunk.get("occupancy", {}).get("classification", "red"),
+                        "yellow_threshold_percent": chunk.get("occupancy", {}).get("yellow_threshold_percent", 20.0),
+                        "green_threshold_percent": chunk.get("occupancy", {}).get("green_threshold_percent", 60.0),
+                        "settings_revision": chunk.get("settings_revision", 0),
+                        "settings_snapshot": chunk.get("settings_snapshot"),
                         "bin_path": chunk.get("bin_path"),
                         "csv_path": chunk.get("csv_path"),
                     }

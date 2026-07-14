@@ -171,6 +171,33 @@ def create_signal_processor() -> Any:
     return SigProc(str(PROCESSING_CONFIG), radar_config)
 
 
+def validate_region_thresholds(yellow_threshold_percent: float, green_threshold_percent: float) -> tuple[float, float]:
+    """Return validated red/yellow/green boundaries as percentages."""
+    yellow = float(yellow_threshold_percent)
+    green = float(green_threshold_percent)
+    if not 0.0 <= yellow < green <= 100.0:
+        raise ValueError("thresholds must satisfy 0 <= yellow < green <= 100")
+    return yellow, green
+
+
+def occupancy_region(
+    detected_frames: int,
+    evaluated_frames: int,
+    yellow_threshold_percent: float,
+    green_threshold_percent: float,
+) -> str:
+    """Classify a completed chunk from its evaluated-frame detection ratio."""
+    yellow, green = validate_region_thresholds(yellow_threshold_percent, green_threshold_percent)
+    if evaluated_frames <= 0:
+        return "red"
+    ratio_percent = max(0, detected_frames) * 100.0 / evaluated_frames
+    if ratio_percent >= green:
+        return "green"
+    if ratio_percent >= yellow:
+        return "yellow"
+    return "red"
+
+
 def occupancy_label(detected_frames: int, evaluated_frames: int, threshold_percent: float) -> str:
     threshold = min(100.0, max(0.0, float(threshold_percent)))
     return "occupied" if evaluated_frames > 0 and detected_frames * 100.0 >= threshold * evaluated_frames else "empty"
@@ -276,6 +303,8 @@ class StreamingChunkAnalyzer:
         room: Dict[str, Any],
         radar_detection_threshold_db: float,
         occupancy_threshold_percent: float,
+        yellow_threshold_percent: float = 20.0,
+        green_threshold_percent: float = 60.0,
         identity: Optional[PersistentTargetIdentity] = None,
         live_state_path: Optional[Path] = LIVE_OCCUPANCY_PATH,
     ):
@@ -288,6 +317,9 @@ class StreamingChunkAnalyzer:
         self.chunk_seconds = chunk_seconds
         self.room = room
         self.occupancy_threshold_percent = min(100.0, max(0.0, float(occupancy_threshold_percent)))
+        self.yellow_threshold_percent, self.green_threshold_percent = validate_region_thresholds(
+            yellow_threshold_percent, green_threshold_percent
+        )
         self.identity = identity
         self.evaluated_frames = 0
         self.detected_frames = 0
@@ -408,12 +440,15 @@ class StreamingChunkAnalyzer:
             self.live_state_path.parent.mkdir(parents=True, exist_ok=True)
             temporary.write_text(json.dumps({
                 "updated_at": time.time(),
-                "occupied": occupancy_label(self.detected_frames, self.evaluated_frames, self.occupancy_threshold_percent) == "occupied",
+                "occupied": occupancy_region(self.detected_frames, self.evaluated_frames, self.yellow_threshold_percent, self.green_threshold_percent) == "green",
+                "classification": occupancy_region(self.detected_frames, self.evaluated_frames, self.yellow_threshold_percent, self.green_threshold_percent),
                 "person_detected": bool(self.last_targets),
                 "detected_frames": self.detected_frames,
                 "evaluated_frames": self.evaluated_frames,
                 "ratio": self.detected_frames / self.evaluated_frames if self.evaluated_frames else 0.0,
                 "threshold_percent": self.occupancy_threshold_percent,
+                "yellow_threshold_percent": self.yellow_threshold_percent,
+                "green_threshold_percent": self.green_threshold_percent,
                 "target_count": len(self.last_targets),
                 "targets": self.last_targets,
                 "shadow": np.asarray(world_points, dtype=float).round(3).tolist(),
@@ -443,7 +478,11 @@ class StreamingChunkAnalyzer:
         weights = np.concatenate(self.chunk_weights) if self.chunk_weights else np.empty(0, dtype=float)
         x_axis, y_axis, z = _bin_points(points, self.room, weights=weights, resolution=72)
         ratio = self.detected_frames / self.evaluated_frames if self.evaluated_frames else 0.0
-        label = occupancy_label(self.detected_frames, self.evaluated_frames, self.occupancy_threshold_percent)
+        classification = occupancy_region(
+            self.detected_frames, self.evaluated_frames,
+            self.yellow_threshold_percent, self.green_threshold_percent,
+        )
+        label = "occupied" if classification == "green" else "empty"
         primary = self.last_targets[0] if self.last_targets else None
         frame = {
             "name": f"chunk-{self.chunk_index:02d}", "index": self.chunk_index,
@@ -460,8 +499,11 @@ class StreamingChunkAnalyzer:
             "x": x_axis, "y": y_axis, "z": z, "frames": self.playback_frames or [frame], "frame_count": self.evaluated_frames,
             "sample_count": self.evaluated_frames, "frame_interval_ms": max(50, int(round(self.chunk_seconds * 1000 / max(1, self.evaluated_frames)))),
             "updated": datetime.now(timezone.utc).isoformat(),
-            "occupancy": {"label": label, "detected_frames": self.detected_frames, "evaluated_frames": self.evaluated_frames,
-                          "ratio": ratio, "threshold_percent": self.occupancy_threshold_percent, "chunk_seconds": self.chunk_seconds},
+            "occupancy": {"label": label, "classification": classification, "detected_frames": self.detected_frames, "evaluated_frames": self.evaluated_frames,
+                          "ratio": ratio, "threshold_percent": self.occupancy_threshold_percent,
+                          "yellow_threshold_percent": self.yellow_threshold_percent,
+                          "green_threshold_percent": self.green_threshold_percent,
+                          "chunk_seconds": self.chunk_seconds},
             "location": self.last_position, "score": self.last_score, "detected": label == "occupied",
             "snr_db": frame["snr_db"], "threshold_db": frame["threshold_db"], "peak_power_db": frame["peak_power_db"],
             "noise_floor_db": frame["noise_floor_db"], "targets": self.last_targets,
@@ -621,6 +663,8 @@ def analyze_radar_chunk(
     processor: Any = None,
     radar_detection_threshold_db: float = 8.0,
     occupancy_threshold_percent: float = 50.0,
+    yellow_threshold_percent: float = 20.0,
+    green_threshold_percent: float = 60.0,
 ) -> Dict[str, Any]:
     if SigProc is None:
         raise RuntimeError("Radar tracking dependencies are unavailable.")
@@ -783,7 +827,9 @@ def analyze_radar_chunk(
     x_axis, y_axis, z = _bin_points(points, room, weights=weights, resolution=72)
     occupancy_ratio = detected_frames / evaluated_frames if evaluated_frames else 0.0
     occupancy_threshold_percent = min(100.0, max(0.0, float(occupancy_threshold_percent)))
-    occupied = occupancy_label(detected_frames, evaluated_frames, occupancy_threshold_percent) == "occupied"
+    yellow_threshold_percent, green_threshold_percent = validate_region_thresholds(yellow_threshold_percent, green_threshold_percent)
+    classification = occupancy_region(detected_frames, evaluated_frames, yellow_threshold_percent, green_threshold_percent)
+    occupied = classification == "green"
     primary = last_targets[0] if last_targets else None
 
     payload = {
@@ -816,10 +862,13 @@ def analyze_radar_chunk(
         "updated": datetime.now(timezone.utc).isoformat(),
         "occupancy": {
             "label": "occupied" if occupied else "empty",
+            "classification": classification,
             "detected_frames": detected_frames,
             "evaluated_frames": evaluated_frames,
             "ratio": occupancy_ratio,
             "threshold_percent": occupancy_threshold_percent,
+            "yellow_threshold_percent": yellow_threshold_percent,
+            "green_threshold_percent": green_threshold_percent,
             "chunk_seconds": float(chunk_seconds),
         },
         "location": last_position,
@@ -874,6 +923,9 @@ def compile_minute_xy_payload(chunk_payloads: List[Dict[str, Any]]) -> Dict[str,
 
     occupancy_ratio = total_detected / total_evaluated if total_evaluated else 0.0
     threshold_percent = float((latest.get("occupancy") or {}).get("threshold_percent", 50.0))
+    yellow_threshold = float((latest.get("occupancy") or {}).get("yellow_threshold_percent", 20.0))
+    green_threshold = float((latest.get("occupancy") or {}).get("green_threshold_percent", 60.0))
+    classification = occupancy_region(total_detected, total_evaluated, yellow_threshold, green_threshold)
     x_axis = latest.get("x") or []
     y_axis = latest.get("y") or []
     z = latest.get("z") or []
@@ -907,11 +959,14 @@ def compile_minute_xy_payload(chunk_payloads: List[Dict[str, Any]]) -> Dict[str,
         "frame_interval_ms": max(50, int(round(sum(float(chunk.get("chunk_seconds") or 10.0) for chunk in chunk_payloads) * 1000 / max(1, len(frames) or len(chunk_payloads) or 1)))),
         "updated": datetime.now(timezone.utc).isoformat(),
         "occupancy": {
-            "label": occupancy_label(total_detected, total_evaluated, threshold_percent),
+            "label": "occupied" if classification == "green" else "empty",
+            "classification": classification,
             "detected_frames": total_detected,
             "evaluated_frames": total_evaluated,
             "ratio": occupancy_ratio,
             "threshold_percent": threshold_percent,
+            "yellow_threshold_percent": yellow_threshold,
+            "green_threshold_percent": green_threshold,
             "chunk_seconds": chunk_payloads[0].get("chunk_seconds") if chunk_payloads else 10.0,
         },
         "location": latest.get("location") or [0.0, 0.0],

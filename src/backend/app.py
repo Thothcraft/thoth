@@ -834,7 +834,13 @@ def _radar_plot_payload(radar_path: Path, plot: str) -> Dict[str, Any]:
     except (TypeError, ValueError):
         threshold_percent = 50.0
     occupancy['threshold_percent'] = threshold_percent
-    occupancy['label'] = 'occupied' if evaluated_frames and detected_frames * 100 >= threshold_percent * evaluated_frames else 'empty'
+    yellow = float(settings.get('yellow_threshold_percent', 20.0))
+    green = float(settings.get('green_threshold_percent', 60.0))
+    ratio_percent = occupancy['ratio'] * 100.0
+    occupancy['yellow_threshold_percent'] = yellow
+    occupancy['green_threshold_percent'] = green
+    occupancy['classification'] = 'green' if evaluated_frames and ratio_percent >= green else ('yellow' if evaluated_frames and ratio_percent >= yellow else 'red')
+    occupancy['label'] = 'occupied' if occupancy['classification'] == 'green' else 'empty'
     payload['occupancy'] = occupancy
     # Live collection owns persistence, automatic labeling, and Home Assistant
     # publication. Plot generation is deliberately read-only.
@@ -1660,6 +1666,8 @@ def settings():
             'radar_detection_threshold_db': payload.get('radar_detection_threshold_db', 8.0),
             'auto_occupancy_label_enabled': str(payload.get('auto_occupancy_label_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
             'occupancy_threshold_percent': payload.get('occupancy_threshold_percent', 50.0),
+            'yellow_threshold_percent': payload.get('yellow_threshold_percent', 20.0),
+            'green_threshold_percent': payload.get('green_threshold_percent', 60.0),
             'chunk_seconds': payload.get('chunk_seconds', 10.0),
             'system_mode': payload.get('system_mode', 'balanced'),
             'labels': payload.get('labels', []),

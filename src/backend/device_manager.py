@@ -46,6 +46,7 @@ class DeviceManager:
         self.device_settings = self.load_device_settings()
         self._last_file_report_at = 0.0
         self._last_file_report_signature = None
+        self._inventory_revision = int(time.time() * 1000)
         self._uploading_minutes: set[str] = set()
         self._uploading_minutes_lock = threading.Lock()
         self._settings_sync_pending = False
@@ -194,7 +195,7 @@ class DeviceManager:
                 return min(40.0, max(0.0, float(value)))
             except (TypeError, ValueError):
                 return 8.0
-        if key == 'occupancy_threshold_percent':
+        if key in {'occupancy_threshold_percent', 'yellow_threshold_percent', 'green_threshold_percent'}:
             try:
                 return min(100.0, max(0.0, float(value)))
             except (TypeError, ValueError):
@@ -254,6 +255,8 @@ class DeviceManager:
         processing_keys = {
             'radar_detection_threshold_db',
             'occupancy_threshold_percent',
+            'yellow_threshold_percent',
+            'green_threshold_percent',
             'auto_occupancy_label_enabled',
             'chunk_seconds',
             'system_mode',
@@ -342,6 +345,8 @@ class DeviceManager:
             },
             'radar_detection_threshold_db': 8.0,
             'occupancy_threshold_percent': 50.0,
+            'yellow_threshold_percent': 20.0,
+            'green_threshold_percent': 60.0,
             'auto_occupancy_label_enabled': True,
             'chunk_seconds': 10.0,
             'system_mode': 'balanced',
@@ -349,6 +354,7 @@ class DeviceManager:
             'prediction_label_style': 'occupancy',
             'people_count_label_enabled': False,
             'sleep_study_enabled': False,
+            'calibrations': {},
             'revision': 0,
             'updated_at': None,
         }
@@ -384,6 +390,12 @@ class DeviceManager:
             'occupancy_threshold_percent': self._coerce_setting_value(
                 'occupancy_threshold_percent', source.get('occupancy_threshold_percent', 50.0)
             ),
+            'yellow_threshold_percent': self._coerce_setting_value(
+                'yellow_threshold_percent', source.get('yellow_threshold_percent', 20.0)
+            ),
+            'green_threshold_percent': self._coerce_setting_value(
+                'green_threshold_percent', source.get('green_threshold_percent', 60.0)
+            ),
             'auto_occupancy_label_enabled': self._coerce_setting_value(
                 'auto_occupancy_label_enabled', source.get('auto_occupancy_label_enabled', True)
             ),
@@ -405,6 +417,7 @@ class DeviceManager:
             'sleep_study_enabled': self._coerce_setting_value(
                 'sleep_study_enabled', source.get('sleep_study_enabled', False)
             ),
+            'calibrations': source.get('calibrations') if isinstance(source.get('calibrations'), dict) else {},
             'revision': revision,
             'updated_at': str(updated_at) if updated_at else None,
         }
@@ -418,7 +431,7 @@ class DeviceManager:
                 loaded = json.loads(source.read_text(encoding='utf-8'))
                 # Migrate processing controls from the legacy device settings file.
                 legacy_device_settings = self.load_device_settings()
-                for key in ('radar_detection_threshold_db', 'occupancy_threshold_percent', 'auto_occupancy_label_enabled', 'chunk_seconds', 'system_mode', 'occupancy_vote_chunks', 'prediction_label_style', 'people_count_label_enabled', 'sleep_study_enabled'):
+                for key in ('radar_detection_threshold_db', 'occupancy_threshold_percent', 'yellow_threshold_percent', 'green_threshold_percent', 'auto_occupancy_label_enabled', 'chunk_seconds', 'system_mode', 'occupancy_vote_chunks', 'prediction_label_style', 'people_count_label_enabled', 'sleep_study_enabled'):
                     if key not in loaded and key in legacy_device_settings:
                         loaded[key] = legacy_device_settings[key]
                 if source != path:
@@ -431,6 +444,8 @@ class DeviceManager:
     def save_capture_settings(self, settings: Dict[str, Any] | None, *, local_change: bool = True) -> Dict[str, Any]:
         current = self.load_capture_settings()
         normalized = self.normalize_capture_settings({**current, **(settings or {})})
+        if normalized['yellow_threshold_percent'] >= normalized['green_threshold_percent']:
+            raise ValueError('thresholds must satisfy 0 <= yellow < green <= 100')
         if local_change:
             normalized['revision'] = max(int(current.get('revision') or 0), int(normalized.get('revision') or 0)) + 1
             normalized['updated_at'] = datetime.now(timezone.utc).isoformat()
@@ -877,10 +892,6 @@ class DeviceManager:
                 })
 
             files_list.sort(key=lambda item: str(item.get('modified') or ''), reverse=True)
-            limit = int(getattr(self.config, 'CAPTURE_FILE_REPORT_LIMIT', 300) or 300)
-            if limit > 0 and len(files_list) > limit:
-                files_list = files_list[:limit]
-
             logger.info(f"Found {len(files_list)} capture files to report")
 
         except Exception as e:
@@ -1023,6 +1034,10 @@ class DeviceManager:
         file_payload = self._heartbeat_file_payload(force=force_files)
         if file_payload is not None:
             data["files"] = file_payload
+            self._inventory_revision += 1
+            data["inventory_revision"] = self._inventory_revision
+            data["inventory_timestamp"] = datetime.now(timezone.utc).isoformat()
+            data["inventory_complete"] = True
 
         # Add timestamp if not provided
         if 'timestamp' not in data:
