@@ -1263,14 +1263,6 @@ device_scheduler.add_job(
     id='capture_cleanup',
     replace_existing=True
 )
-device_scheduler.add_job(
-    _prewarm_latest_radar_playback,
-    'interval',
-    seconds=20,
-    id='radar_playback_prewarm',
-    max_instances=1,
-    replace_existing=True,
-)
 device_scheduler.start()
 
 # Load registration info if available
@@ -1518,11 +1510,14 @@ def _read_json_file(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
 
 def _write_json_file(path: Path, value: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + '.tmp')
-    with temporary.open('w') as handle:
-        json.dump(value, handle, indent=4)
-        handle.write('\n')
-    temporary.replace(path)
+    temporary = path.with_name(f'.{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
+    try:
+        with temporary.open('w') as handle:
+            json.dump(value, handle, indent=4)
+            handle.write('\n')
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 @app.route('/presence')
@@ -1541,7 +1536,21 @@ def api_radar_occupancy():
         'shadow': [],
     })
     room = _read_json_file(RADAR_ROOM_CONFIG, {})
-    state['room'] = room or state.get('room', {})
+    live_room = state.get('room') if isinstance(state.get('room'), dict) else {}
+    if room:
+        merged_room = dict(live_room)
+        merged_room.update(room)
+        state['room'] = merged_room
+    else:
+        state['room'] = live_room
+    cones = state['room'].get('radar_cones') if isinstance(state.get('room'), dict) else None
+    if isinstance(cones, list) and cones:
+        primary = cones[0]
+        state['fov'] = {
+            'horizontal_deg': primary.get('horizontal_deg', 40),
+            'vertical_deg': primary.get('vertical_deg', 65),
+            'range_m': primary.get('range_m', 15),
+        }
     state['stale'] = time.time() - float(state.get('updated_at') or 0) > 3.0
     return jsonify(state)
 
@@ -1549,6 +1558,20 @@ def api_radar_occupancy():
 @app.route('/api/radar/room', methods=['GET', 'POST'])
 def api_radar_room():
     room = _read_json_file(RADAR_ROOM_CONFIG, {})
+    if not isinstance(room.get('radar_cones'), list) or not room.get('radar_cones'):
+        room['radar_cones'] = [{
+            'id': 'radar-1', 'name': 'Radar 1', 'enabled': True,
+            'wall': room.get('sensor_wall', 'Back'),
+            'position_m': room.get('sensor_position_m', 2.0),
+            'height_m': room.get('sensor_height_m', 1.0),
+            'horizontal_deg': 40.0, 'vertical_deg': 65.0,
+            'range_m': 15.0, 'azimuth_deg': 0.0,
+        }]
+    for key in ('doors', 'windows', 'furniture', 'zones'):
+        if not isinstance(room.get(key), list):
+            room[key] = []
+    if not isinstance(room.get('sleep_anchor'), dict):
+        room['sleep_anchor'] = {'x': float(room.get('width_m', 5.0)) / 2, 'y': float(room.get('depth_m', 5.0)) / 2, 'radius_m': 1.0, 'name': 'Sleep anchor'}
     if request.method == 'GET':
         return jsonify({'success': True, 'room': room})
     payload = request.get_json(silent=True) or {}
@@ -1570,6 +1593,61 @@ def api_radar_room():
     room['sensor_wall'] = wall if wall in {'Back', 'Front', 'Left', 'Right'} else 'Back'
     if 'floor_anchored_targets' in payload:
         room['floor_anchored_targets'] = bool(payload['floor_anchored_targets'])
+    walls = {'Back', 'Front', 'Left', 'Right'}
+    if isinstance(payload.get('radar_cones'), list):
+        room['radar_cones'] = [{
+            'id': str(item.get('id') or f'radar-{index + 1}')[:64],
+            'name': str(item.get('name') or f'Radar {index + 1}')[:64],
+            'enabled': item.get('enabled') is not False,
+            'wall': str(item.get('wall') or 'Back').title() if str(item.get('wall') or 'Back').title() in walls else 'Back',
+            'position_m': min(20.0, max(0.0, float(item.get('position_m') or 0.0))),
+            'height_m': min(8.0, max(0.1, float(item.get('height_m') or 1.0))),
+            'horizontal_deg': min(160.0, max(5.0, float(item.get('horizontal_deg') or 40.0))),
+            'vertical_deg': min(120.0, max(5.0, float(item.get('vertical_deg') or 65.0))),
+            'range_m': min(30.0, max(0.5, float(item.get('range_m') or 15.0))),
+            'azimuth_deg': min(90.0, max(-90.0, float(item.get('azimuth_deg') or 0.0))),
+        } for index, item in enumerate(payload['radar_cones'][:8]) if isinstance(item, dict)] or room['radar_cones']
+    for key in ('doors', 'windows'):
+        if isinstance(payload.get(key), list):
+            room[key] = [{
+                'id': str(item.get('id') or f'{key[:-1]}-{index + 1}')[:64],
+                'wall': str(item.get('wall') or 'Back').title() if str(item.get('wall') or 'Back').title() in walls else 'Back',
+                'offset_m': min(20.0, max(0.0, float(item.get('offset_m') or 0.0))),
+                'width_m': min(5.0, max(0.2, float(item.get('width_m') or 1.0))),
+            } for index, item in enumerate(payload[key][:32]) if isinstance(item, dict)]
+    if isinstance(payload.get('furniture'), list):
+        allowed = {'chair', 'table', 'bed', 'sofa', 'desk', 'cabinet', 'custom'}
+        room['furniture'] = [{
+            'id': str(item.get('id') or f'furniture-{index + 1}')[:64],
+            'type': str(item.get('type') or 'custom').lower() if str(item.get('type') or 'custom').lower() in allowed else 'custom',
+            'x': min(20.0, max(0.0, float(item.get('x') or 0.0))),
+            'y': min(20.0, max(0.0, float(item.get('y') or 0.0))),
+            'width': min(5.0, max(0.1, float(item.get('width') or 0.8))),
+            'depth': min(5.0, max(0.1, float(item.get('depth') or 0.8))),
+        } for index, item in enumerate(payload['furniture'][:64]) if isinstance(item, dict)]
+    if isinstance(payload.get('zones'), list):
+        room['zones'] = [{
+            'id': str(item.get('id') or f'zone-{index + 1}')[:64],
+            'label': str(item.get('label') or f'Zone {index + 1}')[:64],
+            'x': min(float(room.get('width_m', 5.0)), max(0.0, float(item.get('x') or 0.0))),
+            'y': min(float(room.get('depth_m', 5.0)), max(0.0, float(item.get('y') or 0.0))),
+            'width': min(float(room.get('width_m', 5.0)), max(0.1, float(item.get('width') or 1.0))),
+            'depth': min(float(room.get('depth_m', 5.0)), max(0.1, float(item.get('depth') or 1.0))),
+            'color': str(item.get('color') or '#22c55e')[:24],
+        } for index, item in enumerate(payload['zones'][:64]) if isinstance(item, dict)]
+    if isinstance(payload.get('sleep_anchor'), dict):
+        anchor = payload['sleep_anchor']
+        room['sleep_anchor'] = {
+            'x': min(float(room.get('width_m', 5.0)), max(0.0, float(anchor.get('x') or 0.0))),
+            'y': min(float(room.get('depth_m', 5.0)), max(0.0, float(anchor.get('y') or 0.0))),
+            'radius_m': min(5.0, max(0.1, float(anchor.get('radius_m') or 1.0))),
+            'name': str(anchor.get('name') or 'Sleep anchor')[:64],
+        }
+    if room['radar_cones']:
+        primary = room['radar_cones'][0]
+        room['sensor_wall'] = primary['wall']
+        room['sensor_position_m'] = primary['position_m']
+        room['sensor_height_m'] = primary['height_m']
     wall_length = room.get('width_m', 5.0) if room['sensor_wall'] in {'Back', 'Front'} else room.get('depth_m', 5.0)
     room['sensor_position_m'] = min(float(room.get('sensor_position_m', 0)), wall_length)
     room['sensor_height_m'] = min(float(room.get('sensor_height_m', 1.4)), float(room.get('height_m', 2.7)))
@@ -1591,6 +1669,13 @@ def settings():
             'radar_detection_threshold_db': payload.get('radar_detection_threshold_db', 8.0),
             'auto_occupancy_label_enabled': str(payload.get('auto_occupancy_label_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
             'occupancy_threshold_percent': payload.get('occupancy_threshold_percent', 50.0),
+            'chunk_seconds': payload.get('chunk_seconds', 10.0),
+            'system_mode': payload.get('system_mode', 'balanced'),
+            'labels': payload.get('labels', []),
+            'occupancy_vote_chunks': payload.get('occupancy_vote_chunks', 1),
+            'prediction_label_style': payload.get('prediction_label_style', 'occupancy'),
+            'people_count_label_enabled': str(payload.get('people_count_label_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
+            'sleep_study_enabled': str(payload.get('sleep_study_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
         }
         try:
             saved = device_manager.save_device_settings(updates)
@@ -1606,8 +1691,6 @@ def settings():
                 return jsonify({'success': False, 'message': f'Unable to persist settings: {exc}'}), 500
             flash(f'Unable to persist settings: {exc}', 'error')
             return redirect(url_for('settings'))
-        if saved.get('auto_occupancy_label_enabled', True):
-            _relabel_cached_occupancy(float(saved.get('occupancy_threshold_percent', 50.0)))
         if request.is_json:
             return jsonify({'success': True, 'settings': saved, 'home_assistant': home_assistant, 'sync_status': saved.get('sync_status')})
         flash('Sync pending' if saved.get('sync_pending') else 'Settings saved', 'success')
@@ -1653,8 +1736,9 @@ def api_internal_home_assistant_publish():
     payload = request.get_json(silent=True) or {}
     minute = str(payload.get('minute') or '')
     occupancy = payload.get('occupancy') if isinstance(payload.get('occupancy'), dict) else {}
+    scope = 'minute' if payload.get('scope') == 'minute' else 'chunk'
     try:
-        chunk_index = int(payload.get('chunk_index'))
+        chunk_index = int(payload.get('chunk_index')) if scope == 'chunk' else None
     except (TypeError, ValueError):
         return jsonify({'success': False, 'message': 'A valid chunk_index is required'}), 400
 
@@ -1666,13 +1750,21 @@ def api_internal_home_assistant_publish():
         with _home_assistant_manifest_lock:
             status_path = minute_dir / '.home_assistant_status.json'
             statuses = _read_json_file(status_path, {})
-            statuses[str(chunk_index)] = {**result, 'updated_at': datetime.now(timezone.utc).isoformat()}
+            status_key = str(chunk_index) if chunk_index is not None else 'minute'
+            statuses[status_key] = {**result, 'updated_at': datetime.now(timezone.utc).isoformat()}
             _write_json_file(status_path, statuses)
             manifest = _read_json_file(manifest_path, {})
+            # The collector is the sole manifest writer until finalization. Its
+            # next atomic snapshot merges this sidecar status. This avoids a
+            # cross-process lost-update race on the live manifest.
+            if not manifest.get('folder_minute') or not manifest.get('capture_finished'):
+                return
+            if chunk_index is None:
+                manifest['home_assistant'] = statuses[status_key]
             chunks = (((manifest.get('outputs') or {}).get('radar') or {}).get('chunks') or [])
             for chunk in chunks:
-                if isinstance(chunk, dict) and int(chunk.get('chunk_index', -1)) == chunk_index:
-                    chunk['home_assistant'] = statuses[str(chunk_index)]
+                if chunk_index is not None and isinstance(chunk, dict) and int(chunk.get('chunk_index', -1)) == chunk_index:
+                    chunk['home_assistant'] = statuses[status_key]
                     break
             _write_json_file(manifest_path, manifest)
 
@@ -1683,6 +1775,11 @@ def api_internal_home_assistant_publish():
         chunk_index=chunk_index,
         location=payload.get('location'),
         confidence=payload.get('confidence'),
+        targets=payload.get('targets'),
+        scope=scope,
+        people_count=payload.get('people_count'),
+        labels=payload.get('labels'),
+        sleep_proximity=payload.get('sleep_proximity'),
         timestamp=payload.get('timestamp'),
     )
     return jsonify({'success': queued, 'status': 'queued' if queued else 'queue_full'}), (202 if queued else 503)
@@ -1827,9 +1924,6 @@ def _requested_capture_minutes() -> tuple[list[str], list[Path], tuple[Response,
     names = list(dict.fromkeys(str(item).strip() for item in requested if str(item).strip()))
     if not names:
         return [], [], (jsonify({'status': 'error', 'message': 'Select at least one capture'}), 400)
-    if len(names) > 100:
-        return [], [], (jsonify({'status': 'error', 'message': 'Select no more than 100 captures at once'}), 400)
-
     minute_dirs: list[Path] = []
     missing: list[str] = []
     for name in names:

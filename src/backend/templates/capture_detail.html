@@ -34,7 +34,8 @@
                         {% for chunk in minute_info.progress.chunks %}
                         {% set chunk_detail %}Chunk {{ chunk.index + 1 }}; {{ chunk.prediction if chunk.prediction else chunk.state }}{% if chunk.detected_frames is defined and chunk.detected_frames is not none and chunk.evaluated_frames is defined and chunk.evaluated_frames is not none %}; {{ chunk.detected_frames }} / {{ chunk.evaluated_frames }} frames{% endif %}{% if chunk.ratio is defined and chunk.ratio is not none %}; ratio {{ (chunk.ratio * 100)|round(1) }}%{% endif %}{% if chunk.location is defined and chunk.location %}; coordinates {{ chunk.location.x|round(2) }}, {{ chunk.location.y|round(2) }} m{% endif %}{% if chunk.error is defined and chunk.error %}; {{ chunk.error }}{% endif %}{% endset %}
                         <div class="min-w-0 flex-1 text-center" title="{{ chunk_detail|trim }}">
-                            <div role="img" tabindex="0" title="{{ chunk_detail|trim }}" aria-label="{{ chunk_detail|trim }}" class="mx-auto h-3 w-3 rounded-full ring-2 ring-white {% if chunk.state == 'occupied' %}bg-emerald-500{% elif chunk.state == 'empty' %}bg-red-500{% elif chunk.state == 'collecting' %}animate-pulse bg-blue-500{% elif chunk.state in ['stored', 'analyzing'] %}animate-pulse bg-cyan-500{% elif chunk.state == 'error' %}bg-amber-500{% else %}bg-slate-300{% endif %}"></div>
+                            {% set ratio = chunk.ratio|default(0, true)|float %}{% set thinking = chunk.progress|default(0, true)|float %}
+                            <div role="img" tabindex="0" title="{{ chunk_detail|trim }}" aria-label="{{ chunk_detail|trim }}" class="mx-auto h-3 w-3 rounded-full ring-2 ring-white" style="background:{% if chunk.state == 'occupied' %}hsl(145 72% {{ 82-ratio*44 }}%){% elif chunk.state == 'empty' %}hsl(4 78% {{ 44+ratio*40 }}%){% elif chunk.state == 'collecting' %}hsl(217 88% {{ 82-thinking*38 }}%){% elif chunk.state in ['stored','analyzing'] %}hsl(190 82% {{ 80-thinking*35 }}%){% elif chunk.state == 'error' %}hsl(38 92% 52%){% else %}hsl(215 16% 78%){% endif %};transition:background-color .45s ease"></div>
                         </div>
                         {% endfor %}
                 </div>
@@ -231,6 +232,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   let progressTimer = null;
   let renderTimer = null;
   const render = async () => {
+    if (host.__thothPlaying) return;
     const payload = await fetchJson(url);
     const data = payload?.data || {};
     await ThothPlayback.renderAnimatedHeatmap(host, payload, {
@@ -245,12 +247,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     const progress = response?.capture?.progress;
     const timeline = document.getElementById('chunk-timeline');
     if (!progress || !timeline) return;
-    const colors = { occupied: 'bg-emerald-500', empty: 'bg-red-500', collecting: 'animate-pulse bg-blue-500', stored: 'animate-pulse bg-cyan-500', analyzing: 'animate-pulse bg-cyan-500', error: 'bg-amber-500', waiting: 'bg-slate-300' };
-    timeline.innerHTML = (progress.chunks || []).slice(0, 6).map((chunk) => {
+    timeline.innerHTML = (progress.chunks || []).map((chunk) => {
+      const ratio = Math.max(0, Math.min(1, Number(chunk.ratio) || 0));
+      const thinking = Math.max(0, Math.min(1, Number(chunk.progress) || 0));
+      const visual = chunk.state === 'occupied' ? `hsl(145 72% ${82-ratio*44}%)` : chunk.state === 'empty' ? `hsl(4 78% ${44+ratio*40}%)` : chunk.state === 'collecting' ? `hsl(217 88% ${82-thinking*38}%)` : ['stored','analyzing'].includes(chunk.state) ? `hsl(190 82% ${80-thinking*35}%)` : chunk.state === 'error' ? 'hsl(38 92% 52%)' : 'hsl(215 16% 78%)';
       const location = chunk.location ? ` at ${Number(chunk.location.x).toFixed(2)}, ${Number(chunk.location.y).toFixed(2)} m` : '';
       const frames = chunk.detected_frames == null || chunk.evaluated_frames == null ? '' : `; ${Number(chunk.detected_frames) || 0} / ${Number(chunk.evaluated_frames) || 0} frames`;
-      const detail = `Chunk ${chunk.index + 1}; ${chunk.prediction || chunk.state || 'waiting'}${frames}${chunk.ratio == null ? '' : `; ratio ${(Number(chunk.ratio) * 100).toFixed(1)}%`}${location}${chunk.error ? `; ${chunk.error}` : ''}`;
-      return `<div class="min-w-0 flex-1 text-center" title="${detail}"><div role="img" tabindex="0" title="${detail}" aria-label="${detail}" class="mx-auto h-3 w-3 rounded-full ring-2 ring-white ${colors[chunk.state] || colors.waiting}"></div></div>`;
+      const people = `; ${Number(chunk.people_count ?? chunk.target_count ?? 0)} people`;
+      const labels = Array.isArray(chunk.labels) && chunk.labels.length ? `; labels ${chunk.labels.join(', ')}` : '';
+      const sleep = chunk.sleep_proximity?.nearest_target_m == null ? '' : `; sleep anchor ${Number(chunk.sleep_proximity.nearest_target_m).toFixed(2)} m`;
+      const detail = `Chunk ${chunk.index + 1}; ${chunk.prediction || chunk.state || 'waiting'}${people}${labels}${frames}${chunk.ratio == null ? '' : `; ratio ${(Number(chunk.ratio) * 100).toFixed(1)}%`}${location}${sleep}${chunk.error ? `; ${chunk.error}` : ''}`;
+      return `<div class="min-w-0 flex-1 text-center" title="${detail}"><div role="img" tabindex="0" title="${detail}" aria-label="${detail}" class="mx-auto h-3 w-3 rounded-full ring-2 ring-white" style="background:${visual};transition:background-color .45s ease,box-shadow .45s ease;box-shadow:0 0 0 1px color-mix(in srgb, ${visual} 55%, transparent)"></div></div>`;
     }).join('');
   };
   try {

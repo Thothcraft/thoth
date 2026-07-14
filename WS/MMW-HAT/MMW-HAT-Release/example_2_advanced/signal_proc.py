@@ -173,24 +173,39 @@ class SigProc:
             num_beams=self.num_elevation_beams,
             max_angle_degrees=self.max_elevation_deg,
         )
+        self.system_mode = "precision"
+        self._rd_spectrum = np.empty(
+            (samples, 2 * chirps, 3), dtype=complex
+        )
+        self._static_spectrum = np.empty(
+            (samples, chirps, 3), dtype=complex
+        )
+
+    def set_system_mode(self, mode):
+        """Trade angular resolution for latency without dropping radar frames."""
+        selected = mode if mode in {"responsive", "balanced", "precision"} else "balanced"
+        beam_count = {"responsive": 17, "balanced": 25, "precision": 49}[selected]
+        if selected == self.system_mode and beam_count == self.num_azimuth_beams:
+            return
+        self.system_mode = selected
+        self.num_azimuth_beams = beam_count
+        self.num_elevation_beams = beam_count
+        self.azimuth_bin = np.linspace(
+            -self.max_azimuth_deg, self.max_azimuth_deg, beam_count
+        )
+        self.elevation_bin = np.linspace(
+            -self.max_elevation_deg, self.max_elevation_deg, beam_count
+        )
+        self.azimuth_dbf = DBF(
+            2, num_beams=beam_count, max_angle_degrees=self.max_azimuth_deg
+        )
+        self.elevation_dbf = DBF(
+            2, num_beams=beam_count, max_angle_degrees=self.max_elevation_deg
+        )
 
     def range_angle_products(self, frame):
-        rd_spectrum = np.zeros(
-            (
-                self.radar_config["num_samples_per_chirp"],
-                2 * self.radar_config["num_chirps_per_frame"],
-                3,
-            ),
-            dtype=complex,
-        )
-        static_spectrum = np.zeros(
-            (
-                self.radar_config["num_samples_per_chirp"],
-                self.radar_config["num_chirps_per_frame"],
-                3,
-            ),
-            dtype=complex,
-        )
+        rd_spectrum = self._rd_spectrum
+        static_spectrum = self._static_spectrum
         for antenna in range(3):
             rd_spectrum[:, :, antenna] = self.doppler.compute_doppler_map(
                 frame[antenna], antenna
@@ -675,28 +690,28 @@ class SigProc:
             keep = np.argpartition(values, -self.shadow_max_points)[-self.shadow_max_points:]
             indices = indices[keep]
 
-        points = []
-        intensities = []
-        for range_idx, azimuth_idx in indices:
-            doppler_idx = int(np.argmax(np.abs(azimuth_cube[range_idx, :, azimuth_idx])))
-            elevation_idx = int(np.argmax(np.abs(elevation_cube[range_idx, doppler_idx, :])))
-            range_m = float(self.range_bin[range_idx])
-            azimuth = math.radians(float(self.azimuth_bin[azimuth_idx]))
-            elevation = math.radians(float(self.elevation_bin[elevation_idx]))
-            horizontal = range_m * math.cos(elevation)
-            points.append(
-                [
-                    horizontal * math.sin(azimuth),
-                    horizontal * math.cos(azimuth),
-                    range_m * math.sin(elevation),
-                ]
-            )
-            intensities.append(float(strength[range_idx, azimuth_idx]))
-        return (
-            np.asarray(points, dtype=float).reshape((-1, 3)),
-            np.asarray(intensities, dtype=float),
-            strength,
+        if not len(indices):
+            return np.empty((0, 3), dtype=float), np.empty(0, dtype=float), strength
+
+        range_indices = indices[:, 0]
+        azimuth_indices = indices[:, 1]
+        doppler_profiles = np.abs(azimuth_cube[range_indices, :, azimuth_indices])
+        doppler_indices = np.argmax(doppler_profiles, axis=1)
+        elevation_profiles = np.abs(
+            elevation_cube[range_indices, doppler_indices, :]
         )
+        elevation_indices = np.argmax(elevation_profiles, axis=1)
+        ranges = self.range_bin[range_indices]
+        azimuths = np.deg2rad(self.azimuth_bin[azimuth_indices])
+        elevations = np.deg2rad(self.elevation_bin[elevation_indices])
+        horizontal = ranges * np.cos(elevations)
+        points = np.column_stack((
+            horizontal * np.sin(azimuths),
+            horizontal * np.cos(azimuths),
+            ranges * np.sin(elevations),
+        ))
+        intensities = strength[range_indices, azimuth_indices]
+        return points, intensities, strength
 
     def update(self, frame):
         (

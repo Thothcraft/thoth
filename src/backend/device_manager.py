@@ -199,6 +199,26 @@ class DeviceManager:
                 return min(100.0, max(0.0, float(value)))
             except (TypeError, ValueError):
                 return 50.0
+        if key == 'chunk_seconds':
+            try:
+                return min(30.0, max(2.0, float(value)))
+            except (TypeError, ValueError):
+                return 10.0
+        if key == 'system_mode':
+            mode = str(value or 'balanced').strip().lower()
+            return mode if mode in {'responsive', 'balanced', 'precision'} else 'balanced'
+        if key == 'occupancy_vote_chunks':
+            try:
+                return min(60, max(1, int(value)))
+            except (TypeError, ValueError):
+                return 1
+        if key == 'prediction_label_style':
+            style = str(value or 'occupancy').strip().lower()
+            return style if style in {'occupancy', 'presence'} else 'occupancy'
+        if key in {'people_count_label_enabled', 'sleep_study_enabled'}:
+            if isinstance(value, str):
+                return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+            return bool(value)
         if key.endswith('_allowed') or key.startswith('auto_'):
             if isinstance(value, bool):
                 return value
@@ -235,6 +255,12 @@ class DeviceManager:
             'radar_detection_threshold_db',
             'occupancy_threshold_percent',
             'auto_occupancy_label_enabled',
+            'chunk_seconds',
+            'system_mode',
+            'occupancy_vote_chunks',
+            'prediction_label_style',
+            'people_count_label_enabled',
+            'sleep_study_enabled',
         }
         capture_updates = {key: value for key, value in (updates or {}).items() if key in processing_keys}
         device_updates = {key: value for key, value in (updates or {}).items() if key not in processing_keys}
@@ -317,6 +343,12 @@ class DeviceManager:
             'radar_detection_threshold_db': 8.0,
             'occupancy_threshold_percent': 50.0,
             'auto_occupancy_label_enabled': True,
+            'chunk_seconds': 10.0,
+            'system_mode': 'balanced',
+            'occupancy_vote_chunks': 1,
+            'prediction_label_style': 'occupancy',
+            'people_count_label_enabled': False,
+            'sleep_study_enabled': False,
             'revision': 0,
             'updated_at': None,
         }
@@ -355,6 +387,24 @@ class DeviceManager:
             'auto_occupancy_label_enabled': self._coerce_setting_value(
                 'auto_occupancy_label_enabled', source.get('auto_occupancy_label_enabled', True)
             ),
+            'chunk_seconds': self._coerce_setting_value(
+                'chunk_seconds', source.get('chunk_seconds', 10.0)
+            ),
+            'system_mode': self._coerce_setting_value(
+                'system_mode', source.get('system_mode', 'balanced')
+            ),
+            'occupancy_vote_chunks': self._coerce_setting_value(
+                'occupancy_vote_chunks', source.get('occupancy_vote_chunks', 1)
+            ),
+            'prediction_label_style': self._coerce_setting_value(
+                'prediction_label_style', source.get('prediction_label_style', 'occupancy')
+            ),
+            'people_count_label_enabled': self._coerce_setting_value(
+                'people_count_label_enabled', source.get('people_count_label_enabled', False)
+            ),
+            'sleep_study_enabled': self._coerce_setting_value(
+                'sleep_study_enabled', source.get('sleep_study_enabled', False)
+            ),
             'revision': revision,
             'updated_at': str(updated_at) if updated_at else None,
         }
@@ -368,7 +418,7 @@ class DeviceManager:
                 loaded = json.loads(source.read_text(encoding='utf-8'))
                 # Migrate processing controls from the legacy device settings file.
                 legacy_device_settings = self.load_device_settings()
-                for key in ('radar_detection_threshold_db', 'occupancy_threshold_percent', 'auto_occupancy_label_enabled'):
+                for key in ('radar_detection_threshold_db', 'occupancy_threshold_percent', 'auto_occupancy_label_enabled', 'chunk_seconds', 'system_mode', 'occupancy_vote_chunks', 'prediction_label_style', 'people_count_label_enabled', 'sleep_study_enabled'):
                     if key not in loaded and key in legacy_device_settings:
                         loaded[key] = legacy_device_settings[key]
                 if source != path:
@@ -733,9 +783,16 @@ class DeviceManager:
 
             # Prepare registration data
             hardware_info = self._build_hardware_info()
+            saved_name = None
+            try:
+                registration_path = self._config_dir() / 'device_config.json'
+                if registration_path.exists():
+                    saved_name = json.loads(registration_path.read_text(encoding='utf-8')).get('device_name')
+            except Exception:
+                saved_name = None
             data = {
                 "device_id": self.device_id,
-                "device_name": f"Thoth-{self.device_id[:8]}",
+                "device_name": saved_name or f"Thoth-{self.device_id[:8]}",
                 "device_type": "thoth",
                 "os_version": f"{os_name} {os_version}",
                 "app_version": self.config.VERSION if hasattr(self.config, 'VERSION') else "1.0.0",

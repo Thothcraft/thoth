@@ -126,7 +126,7 @@
         <div class="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 pb-4">
             <div class="text-sm text-gray-700"><span id="selected-capture-count" class="font-semibold text-gray-950">0</span> selected</div>
             <div class="flex flex-wrap items-center gap-2">
-                <button id="download-selected" type="button" disabled class="inline-flex items-center gap-2 border border-gray-400 px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40">
+                <button id="download-selected" type="button" disabled class="inline-flex items-center gap-2 border border-slate-950 bg-slate-950 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40">
                     <i class="fas fa-download"></i> Download selected
                 </button>
                 <button id="delete-selected" type="button" disabled class="inline-flex items-center gap-2 border border-red-300 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40">
@@ -168,7 +168,8 @@
                                         {% for chunk in minute.progress.chunks %}
                                         {% set chunk_detail %}Chunk {{ chunk.index + 1 }}; {{ chunk.prediction if chunk.prediction else chunk.state }}{% if chunk.detected_frames is defined and chunk.detected_frames is not none and chunk.evaluated_frames is defined and chunk.evaluated_frames is not none %}; {{ chunk.detected_frames }} / {{ chunk.evaluated_frames }} frames{% endif %}{% if chunk.ratio is defined and chunk.ratio is not none %}; ratio {{ (chunk.ratio * 100)|round(1) }}%{% endif %}{% if chunk.error is defined and chunk.error %}; {{ chunk.error }}{% endif %}{% endset %}
                                         <div class="min-w-0 flex-1 text-center" title="{{ chunk_detail|trim }}">
-                                            <div role="img" tabindex="0" title="{{ chunk_detail|trim }}" aria-label="{{ chunk_detail|trim }}" class="mx-auto h-2.5 w-2.5 rounded-full {% if chunk.state == 'occupied' %}bg-emerald-500{% elif chunk.state == 'empty' %}bg-red-500{% elif chunk.state == 'collecting' %}animate-pulse bg-blue-500{% elif chunk.state in ['stored', 'analyzing'] %}animate-pulse bg-cyan-500{% elif chunk.state == 'error' %}bg-amber-500{% else %}bg-slate-300{% endif %}"></div>
+                                            {% set ratio = chunk.ratio|default(0, true)|float %}{% set thinking = chunk.progress|default(0, true)|float %}
+                                            <div role="img" tabindex="0" title="{{ chunk_detail|trim }}" aria-label="{{ chunk_detail|trim }}" class="mx-auto h-2.5 w-2.5 rounded-full" style="background:{% if chunk.state == 'occupied' %}hsl(145 72% {{ 82-ratio*44 }}%){% elif chunk.state == 'empty' %}hsl(4 78% {{ 44+ratio*40 }}%){% elif chunk.state == 'collecting' %}hsl(217 88% {{ 82-thinking*38 }}%){% elif chunk.state in ['stored','analyzing'] %}hsl(190 82% {{ 80-thinking*35 }}%){% elif chunk.state == 'error' %}hsl(38 92% 52%){% else %}hsl(215 16% 78%){% endif %};transition:background-color .45s ease"></div>
                                         </div>
                                         {% endfor %}
                                 </div>
@@ -198,7 +199,7 @@
                                 <a href="{{ url_for('capture_detail', minute=minute.minute) }}" class="inline-flex items-center gap-1 border border-gray-300 px-2.5 py-1.5 text-xs font-semibold text-gray-800 hover:bg-gray-50">
                                     <i class="fas fa-folder-open"></i> Open
                                 </a>
-                                <a href="{{ url_for('download_capture_minute', minute=minute.minute) }}" class="inline-flex items-center gap-1 border border-gray-300 px-2.5 py-1.5 text-xs font-semibold text-gray-800 hover:bg-gray-50">
+                                <a href="{{ url_for('download_capture_minute', minute=minute.minute) }}" class="inline-flex items-center gap-1 border border-slate-950 bg-slate-950 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-slate-800">
                                     <i class="fas fa-download"></i> ZIP
                                 </a>
                                 {% if minute.files.predictions %}
@@ -423,12 +424,25 @@ function closePredictionModal() {
 }
 
 function renderChunkDots(progress, sizeClass = 'h-2.5 w-2.5') {
-  return (progress?.chunks || []).slice(0, 6).map((chunk) => {
-    const color = chunk.state === 'occupied' ? 'bg-emerald-500' : chunk.state === 'empty' ? 'bg-red-500' : chunk.state === 'collecting' ? 'animate-pulse bg-blue-500' : ['stored', 'analyzing'].includes(chunk.state) ? 'animate-pulse bg-cyan-500' : chunk.state === 'error' ? 'bg-amber-500' : 'bg-slate-300';
+  return (progress?.chunks || []).map((chunk) => {
+    const ratio = Math.max(0, Math.min(1, Number(chunk.ratio) || 0));
+    const thinking = Math.max(0, Math.min(1, Number(chunk.progress) || 0));
+    const visual = chunk.state === 'occupied'
+      ? `hsl(145 72% ${82 - ratio * 44}%)`
+      : chunk.state === 'empty'
+        ? `hsl(4 78% ${44 + ratio * 40}%)`
+        : chunk.state === 'collecting'
+          ? `hsl(217 88% ${82 - thinking * 38}%)`
+          : ['stored', 'analyzing'].includes(chunk.state)
+            ? `hsl(190 82% ${80 - thinking * 35}%)`
+            : chunk.state === 'error' ? 'hsl(38 92% 52%)' : 'hsl(215 16% 78%)';
     const frames = chunk.detected_frames == null || chunk.evaluated_frames == null ? '' : `; ${Number(chunk.detected_frames) || 0} / ${Number(chunk.evaluated_frames) || 0} frames`;
-    const detail = 'Chunk ' + (chunk.index + 1) + '; ' + (chunk.prediction || chunk.state || 'waiting') + frames + (chunk.ratio == null ? '' : '; ratio ' + (Number(chunk.ratio) * 100).toFixed(1) + '%') + (chunk.error ? '; ' + chunk.error : '');
+    const people = `; ${Number(chunk.people_count ?? chunk.target_count ?? 0)} people`;
+    const labels = Array.isArray(chunk.labels) && chunk.labels.length ? `; labels ${chunk.labels.join(', ')}` : '';
+    const sleep = chunk.sleep_proximity?.nearest_target_m == null ? '' : `; sleep anchor ${Number(chunk.sleep_proximity.nearest_target_m).toFixed(2)} m`;
+    const detail = 'Chunk ' + (chunk.index + 1) + '; ' + (chunk.prediction || chunk.state || 'waiting') + people + labels + frames + (chunk.ratio == null ? '' : '; ratio ' + (Number(chunk.ratio) * 100).toFixed(1) + '%') + sleep + (chunk.error ? '; ' + chunk.error : '');
     const safeDetail = escapeHtml(detail);
-    return `<div class="min-w-0 flex-1 text-center" title="${safeDetail}"><div role="img" tabindex="0" title="${safeDetail}" aria-label="${safeDetail}" class="mx-auto ${sizeClass} rounded-full ${color}"></div></div>`;
+    return `<div class="min-w-0 flex-1 text-center" title="${safeDetail}"><div role="img" tabindex="0" title="${safeDetail}" aria-label="${safeDetail}" class="mx-auto ${sizeClass} rounded-full ring-2 ring-white" style="background:${visual};box-shadow:0 0 0 1px color-mix(in srgb, ${visual} 55%, transparent);transition:background-color .45s ease,box-shadow .45s ease"></div></div>`;
   }).join('');
 }
 
@@ -455,7 +469,7 @@ function renderCaptureRow(minute) {
       <td class="py-3 pr-4">
         <div class="flex flex-wrap justify-end gap-2">
           <a href="${openUrl}" class="inline-flex items-center gap-1 border border-gray-300 px-2.5 py-1.5 text-xs font-semibold text-gray-800 hover:bg-gray-50"><i class="fas fa-folder-open"></i> Open</a>
-          <a href="${downloadUrl}" class="inline-flex items-center gap-1 border border-gray-300 px-2.5 py-1.5 text-xs font-semibold text-gray-800 hover:bg-gray-50"><i class="fas fa-download"></i> ZIP</a>
+          <a href="${downloadUrl}" class="inline-flex items-center gap-1 border border-slate-950 bg-slate-950 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"><i class="fas fa-download"></i> ZIP</a>
           ${minute.files?.predictions ? `<button type="button" class="capture-predictions inline-flex items-center gap-1 border border-cyan-300 px-2.5 py-1.5 text-xs font-semibold text-cyan-700 hover:bg-cyan-50" data-minute="${name}"><i class="fas fa-chart-line"></i> Predictions</button>` : ''}
           <button type="button" class="capture-upload inline-flex items-center gap-1 border border-blue-300 px-2.5 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50" data-minute="${name}"><i class="fas fa-cloud-upload-alt"></i> Upload</button>
           <button type="button" class="capture-delete inline-flex items-center gap-1 border border-red-300 px-2.5 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50" data-minute="${name}"><i class="fas fa-trash"></i> Delete</button>

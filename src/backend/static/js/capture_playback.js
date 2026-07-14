@@ -67,6 +67,40 @@
     }];
   }
 
+  function applyRoomLayout(layout, room) {
+    if (!room || !Number(room.width_m) || !Number(room.depth_m)) return;
+    const width = Number(room.width_m), depth = Number(room.depth_m);
+    layout.xaxis = { ...layout.xaxis, range: [0, width], constrain: 'domain' };
+    layout.yaxis = { ...layout.yaxis, range: [0, depth], scaleanchor: 'x', scaleratio: 1 };
+    const shapes = [{ type: 'rect', x0: 0, y0: 0, x1: width, y1: depth, line: { color: '#334155', width: 2 }, fillcolor: 'rgba(248,250,252,.18)', layer: 'above' }];
+    const cones = Array.isArray(room.radar_cones) && room.radar_cones.length ? room.radar_cones : [{
+      wall: room.sensor_wall || 'Back', position_m: room.sensor_position_m || width / 2,
+      horizontal_deg: 40, range_m: 15, azimuth_deg: 0, enabled: true,
+    }];
+    cones.filter((cone) => cone.enabled !== false).forEach((cone) => {
+      const wall = cone.wall || cone.sensor_wall || 'Back';
+      const position = Number(cone.position_m ?? cone.sensor_position_m ?? 0);
+      const origin = wall === 'Back' ? [position, 0] : wall === 'Front' ? [position, depth] : wall === 'Left' ? [0, position] : [width, position];
+      const heading = wall === 'Back' ? 90 : wall === 'Front' ? -90 : wall === 'Left' ? 0 : 180;
+      const center = (heading + Number(cone.azimuth_deg || 0)) * Math.PI / 180;
+      const half = Number(cone.horizontal_deg || 40) * Math.PI / 360;
+      const range = Number(cone.range_m || 15);
+      const endpoints = [-half, half].map((offset) => [origin[0] + Math.cos(center + offset) * range, origin[1] + Math.sin(center + offset) * range]);
+      shapes.push({ type: 'path', path: `M ${origin[0]},${origin[1]} L ${endpoints[0][0]},${endpoints[0][1]} L ${endpoints[1][0]},${endpoints[1][1]} Z`, line: { color: '#0891b2', width: 1.5 }, fillcolor: 'rgba(6,182,212,.10)', layer: 'above' });
+    });
+    (room.furniture || []).forEach((item) => shapes.push({ type: 'rect', x0: Number(item.x || 0), y0: Number(item.y || 0), x1: Number(item.x || 0) + Number(item.width || .8), y1: Number(item.y || 0) + Number(item.depth || .8), line: { color: '#78716c' }, fillcolor: 'rgba(120,113,108,.20)', layer: 'above' }));
+    if (room.sleep_anchor) {
+      const x = Number(room.sleep_anchor.x || 0), y = Number(room.sleep_anchor.y || 0), radius = Number(room.sleep_anchor.radius_m || 1);
+      shapes.push({ type: 'circle', x0: x - radius, y0: y - radius, x1: x + radius, y1: y + radius, line: { color: '#a855f7', width: 2 }, fillcolor: 'rgba(168,85,247,.12)', layer: 'above' });
+    }
+    [...(room.doors || []).map((item) => ({ ...item, color: '#f59e0b' })), ...(room.windows || []).map((item) => ({ ...item, color: '#38bdf8' }))].forEach((item) => {
+      const wall = item.wall || 'Back', offset = Number(item.offset_m || 0), span = Number(item.width_m || 1);
+      const points = wall === 'Back' ? [offset, 0, offset + span, 0] : wall === 'Front' ? [offset, depth, offset + span, depth] : wall === 'Left' ? [0, offset, 0, offset + span] : [width, offset, width, offset + span];
+      shapes.push({ type: 'line', x0: points[0], y0: points[1], x1: points[2], y1: points[3], line: { color: item.color, width: 7 }, layer: 'above' });
+    });
+    layout.shapes = shapes;
+  }
+
   async function renderAnimatedLine(host, payload, options = {}) {
     if (!host) return;
     const data = payload?.data || {};
@@ -75,7 +109,7 @@
     const title = options.title || data.title || 'Series';
     const xLabel = options.xLabel || data.x_label || 'X';
     const yLabel = options.yLabel || data.y_label || 'Y';
-    const intervalMs = options.intervalMs || data.frame_interval_ms || 120;
+    const intervalMs = options.intervalMs || Math.min(750, data.frame_interval_ms || 120);
 
     if (!points.length) {
       host.innerHTML = '<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">No data available</div>';
@@ -133,7 +167,7 @@
     const title = options.title || data.title || 'Heatmap';
     const xLabel = options.xLabel || data.x_label || 'X';
     const yLabel = options.yLabel || data.y_label || 'Y';
-    const intervalMs = options.intervalMs || data.frame_interval_ms || 120;
+    const intervalMs = options.intervalMs || Math.min(750, data.frame_interval_ms || 120);
     const isTracking = data.plot === 'xy-tracking';
     const valueLabel = isTracking ? 'Track score' : 'Power';
     const colorbarTitle = isTracking ? 'track history' : 'log power';
@@ -156,7 +190,7 @@
 
     function frameImage(frame) {
       if (Array.isArray(frame?.z)) return frame.z;
-      if (!Array.isArray(frame?.z_shape) || !Array.isArray(frame?.z_sparse)) return [];
+      if (!Array.isArray(frame?.z_shape) || !Array.isArray(frame?.z_sparse)) return Array.isArray(data.z) ? data.z : [];
       const rows = Number(frame.z_shape[0]) || 0;
       const columns = Number(frame.z_shape[1]) || 0;
       const image = Array.from({ length: rows }, () => Array(columns).fill(0));
@@ -166,17 +200,23 @@
       return image;
     }
 
-    function trackingMarker(location, score, detected, snrDb, thresholdDb) {
-      const valid = detected === true && Array.isArray(location) && Number.isFinite(location[0]) && Number.isFinite(location[1]);
+    function trackingMarker(targets, location, score, detected, snrDb, thresholdDb) {
+      const validTargets = Array.isArray(targets) ? targets.filter((target) => Array.isArray(target?.position) && Number.isFinite(Number(target.position[0])) && Number.isFinite(Number(target.position[1]))) : [];
+      const fallback = detected === true && Array.isArray(location) && Number.isFinite(location[0]) && Number.isFinite(location[1]) ? [{ id: '?', position: location, confidence: score, snr_db: snrDb, position_error_m: 0 }] : [];
+      const plotted = validTargets.length ? validTargets : fallback;
       return {
         type: 'scatter',
-        mode: 'markers',
-        x: valid ? [location[0]] : [],
-        y: valid ? [location[1]] : [],
+        mode: 'markers+text',
+        x: plotted.map((target) => Number(target.position[0])),
+        y: plotted.map((target) => Number(target.position[1])),
+        text: plotted.map((target) => `T${target.id}`),
+        textposition: 'top center',
         marker: { color: '#ef4444', size: 13, line: { color: '#ffffff', width: 2 } },
-        customdata: valid ? [[score, snrDb, thresholdDb]] : [],
-        name: 'Tracked target',
-        hovertemplate: 'X: %{x:.2f} m<br>Y: %{y:.2f} m<br>Track: %{customdata[0]:.2f}<br>SNR: %{customdata[1]:.1f} dB<br>Threshold: %{customdata[2]:.1f} dB<extra></extra>',
+        error_x: { type: 'data', array: plotted.map((target) => Number(target.position_error_m || 0)), visible: true, color: '#ef4444' },
+        error_y: { type: 'data', array: plotted.map((target) => Number(target.position_error_m || 0)), visible: true, color: '#ef4444' },
+        customdata: plotted.map((target) => [target.id, Number(target.position_error_m || 0), Number(target.confidence ?? score ?? 0), Number(target.snr_db ?? snrDb ?? 0), thresholdDb]),
+        name: 'Tracked targets',
+        hovertemplate: 'Target %{customdata[0]}<br>X: %{x:.2f} ± %{customdata[1]:.2f} m<br>Y: %{y:.2f} ± %{customdata[1]:.2f} m<br>Confidence: %{customdata[2]:.2f}<br>SNR: %{customdata[3]:.1f} dB<br>Threshold: %{customdata[4]:.1f} dB<extra></extra>',
         showlegend: isTracking,
       };
     }
@@ -200,7 +240,8 @@
         hovertemplate: `${yLabel}: %{y}<br>${xLabel}: %{x}<br>${valueLabel} %{z:.2f}<extra></extra>`,
         colorbar: { title: colorbarTitle },
       }];
-      if (isTracking) staticTraces.push(trackingMarker(data.location, data.score, data.detected, data.snr_db, data.threshold_db));
+      if (isTracking) staticTraces.push(trackingMarker(data.targets, data.location, data.score, data.detected, data.snr_db, data.threshold_db));
+      if (isTracking) applyRoomLayout(staticLayout, data.room);
       await Plotly.newPlot(host, staticTraces, staticLayout, plotConfig());
       renderOccupancySummary();
       return;
@@ -218,12 +259,13 @@
         hovertemplate: `${yLabel}: %{y}<br>${xLabel}: %{x}<br>${valueLabel} %{z:.2f}<extra></extra>`,
         colorbar: { title: colorbarTitle },
       }];
-      if (isTracking) frameTraces.push(trackingMarker(frame.location, frame.score, frame.detected, frame.snr_db, frame.threshold_db));
+      if (isTracking) frameTraces.push(trackingMarker(frame.targets, frame.location, frame.score, frame.detected, frame.snr_db, frame.threshold_db));
       return { name: String(index), data: frameTraces };
     });
 
     const staticLayout = buildPlaybackLayout(title, xLabel, yLabel, intervalMs);
     staticLayout.uirevision = options.uirevision || 'capture-heatmap';
+    if (isTracking) applyRoomLayout(staticLayout, data.room);
     staticLayout.sliders = buildSliderFrames(frames, (frame, index) => String(index + 1), intervalMs);
     if (host.data) {
       await Plotly.react(host, frames[0].data, staticLayout, plotConfig());
@@ -238,6 +280,10 @@
       }
       await Plotly.addFrames(host, frames);
     }
+    if (typeof host.removeAllListeners === 'function') host.removeAllListeners('plotly_buttonclicked');
+    if (typeof host.on === 'function') host.on('plotly_buttonclicked', (event) => {
+      host.__thothPlaying = event?.button?.label === 'Play';
+    });
     renderOccupancySummary();
   }
 

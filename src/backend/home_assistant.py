@@ -118,6 +118,9 @@ def _occupancy_payload(
             "ratio": ratio,
             "detected_percent": round(ratio * 100, 2),
             "threshold_percent": float(occupancy.get("threshold_percent", 50.0)),
+            "occupied_chunks": occupancy.get("occupied_chunks"),
+            "evaluated_chunks": occupancy.get("evaluated_chunks"),
+            "vote_required_chunks": occupancy.get("vote_required_chunks"),
             "coordinates": coordinates,
             "confidence": confidence,
             "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
@@ -132,6 +135,11 @@ def publish_occupancy(
     chunk_index: Optional[int] = None,
     location: Any = None,
     confidence: Any = None,
+    targets: Any = None,
+    scope: str = "chunk",
+    people_count: Any = None,
+    labels: Any = None,
+    sleep_proximity: Any = None,
     timestamp: Optional[str] = None,
     timeout: float = 5.0,
 ) -> Dict[str, Any]:
@@ -145,19 +153,106 @@ def publish_occupancy(
         occupancy, minute, chunk_index=chunk_index, location=location,
         confidence=confidence, timestamp=timestamp,
     )
-    entity_id = str(config["entity_id"])
+    configured_entity_id = str(config["entity_id"])
+    base_name = configured_entity_id.split('.', 1)[-1]
+    if base_name.endswith('_occupancy'):
+        base_name = base_name[:-10]
+    scope = "minute" if scope == "minute" else "chunk"
+    prefix = f"{base_name}_minute" if scope == "minute" else base_name
+    entity_id = f"binary_sensor.{prefix}_occupancy" if scope == "minute" else configured_entity_id
+    people_entity_id = f"sensor.{prefix}_people_count"
+    targets_entity_id = f"sensor.{prefix}_target_coordinates"
+    labels_entity_id = f"sensor.{prefix}_labels"
+    zones_entity_id = f"sensor.{prefix}_zones"
+    sleep_entity_id = f"sensor.{prefix}_sleep_proximity"
+    target_list = targets if isinstance(targets, list) else []
+    active_zones = list(dict.fromkeys(
+        [str(label)[5:] for label in (labels or []) if str(label).startswith('zone:')]
+        + [str(zone) for target in target_list if isinstance(target, dict) for zone in (target.get('zones') or [])]
+    ))
+    target_tuples = []
+    for target in target_list:
+        position = target.get('position') if isinstance(target, dict) else None
+        if not isinstance(position, (list, tuple)) or len(position) < 2:
+            continue
+        target_tuples.append({
+            'target_id': target.get('id'),
+            'x': round(float(position[0]), 3),
+            'y': round(float(position[1]), 3),
+            'error_m': round(float(target.get('position_error_m') or 0.0), 3),
+        })
+    companion_payloads = {
+        people_entity_id: {
+            'state': int(people_count) if people_count is not None else len(target_tuples),
+            'attributes': {
+                'friendly_name': 'Thoth People Count',
+                'unit_of_measurement': 'people',
+                'capture_minute': minute,
+                'chunk_index': chunk_index,
+                'scope': scope,
+                'timestamp': timestamp or datetime.now(timezone.utc).isoformat(),
+            },
+        },
+        targets_entity_id: {
+            'state': ' | '.join(f"T{item['target_id']}:({item['x']},{item['y']})" for item in target_tuples) or 'none',
+            'attributes': {
+                'friendly_name': 'Thoth Target Coordinates',
+                'targets': target_tuples,
+                'capture_minute': minute,
+                'chunk_index': chunk_index,
+                'scope': scope,
+                'timestamp': timestamp or datetime.now(timezone.utc).isoformat(),
+            },
+        },
+        labels_entity_id: {
+            'state': ', '.join(str(label) for label in (labels or [])) or 'none',
+            'attributes': {
+                'friendly_name': f'Thoth {scope.title()} Labels',
+                'labels': list(labels or []),
+                'capture_minute': minute,
+                'chunk_index': chunk_index,
+                'scope': scope,
+                'timestamp': timestamp or datetime.now(timezone.utc).isoformat(),
+            },
+        },
+        zones_entity_id: {
+            'state': ', '.join(active_zones) or 'none',
+            'attributes': {
+                'friendly_name': f'Thoth {scope.title()} Active Zones',
+                'active_zones': active_zones,
+                'capture_minute': minute,
+                'chunk_index': chunk_index,
+                'scope': scope,
+                'timestamp': timestamp or datetime.now(timezone.utc).isoformat(),
+            },
+        },
+        sleep_entity_id: {
+            'state': 'in_zone' if isinstance(sleep_proximity, dict) and sleep_proximity.get('in_zone') else 'out_of_zone',
+            'attributes': {
+                'friendly_name': f'Thoth {scope.title()} Sleep Proximity',
+                'capture_minute': minute,
+                'chunk_index': chunk_index,
+                'scope': scope,
+                **(sleep_proximity if isinstance(sleep_proximity, dict) else {}),
+                'timestamp': timestamp or datetime.now(timezone.utc).isoformat(),
+            },
+        },
+    }
     try:
-        response = requests.post(
-            f"{config['base_url']}/api/states/{entity_id}",
-            json=payload,
-            headers={"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"},
-            timeout=timeout,
-        )
-        response.raise_for_status()
+        headers = {"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"}
+        for destination, entity_payload in {entity_id: payload, **companion_payloads}.items():
+            response = requests.post(
+                f"{config['base_url']}/api/states/{destination}",
+                json=entity_payload,
+                headers=headers,
+                timeout=timeout,
+            )
+            response.raise_for_status()
         return _record_status({
             "success": True,
             "status": "published",
             "entity_id": entity_id,
+            "entity_ids": [entity_id, people_entity_id, targets_entity_id, labels_entity_id, zones_entity_id, sleep_entity_id],
             "state": payload["state"],
             "published_at": datetime.now(timezone.utc).isoformat(),
         })

@@ -24,10 +24,10 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from backend.config import Config  # type: ignore
-    from backend.radar_analysis import StreamingChunkAnalyzer, compile_minute_xy_payload, create_signal_processor, load_room_config  # type: ignore
+    from backend.radar_analysis import PersistentTargetIdentity, StreamingChunkAnalyzer, compile_minute_xy_payload, create_signal_processor, load_room_config  # type: ignore
 else:
     from .config import Config
-    from .radar_analysis import StreamingChunkAnalyzer, compile_minute_xy_payload, create_signal_processor, load_room_config
+    from .radar_analysis import PersistentTargetIdentity, StreamingChunkAnalyzer, compile_minute_xy_payload, create_signal_processor, load_room_config
 
 THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / "WS" / "MMW-HAT" / "MMW-HAT-Release"
@@ -74,6 +74,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Start immediately and name the folder from the current real-clock minute.",
     )
+    parser.add_argument(
+        "--scheduled-start",
+        default=None,
+        help="Exact ISO-8601 wall-clock minute assigned by the continuous supervisor.",
+    )
     return parser.parse_args()
 
 
@@ -101,7 +106,12 @@ def output_dir_for_minute(folder_name: str, labels: list[str]) -> Path:
     return root / folder_name
 
 
-def minute_start(start_now: bool) -> dt.datetime:
+def minute_start(start_now: bool, scheduled_start: str | None = None) -> dt.datetime:
+    if scheduled_start:
+        scheduled = dt.datetime.fromisoformat(scheduled_start)
+        if scheduled.tzinfo is None:
+            scheduled = scheduled.replace(tzinfo=dt.datetime.now().astimezone().tzinfo)
+        return scheduled
     now = dt.datetime.now().astimezone()
     current_minute = now.replace(second=0, microsecond=0)
     if start_now:
@@ -135,6 +145,11 @@ def load_processing_settings() -> dict[str, Any]:
         "radar_detection_threshold_db": 8.0,
         "occupancy_threshold_percent": 50.0,
         "auto_occupancy_label_enabled": True,
+        "system_mode": "balanced",
+        "occupancy_vote_chunks": 1,
+        "prediction_label_style": "occupancy",
+        "people_count_label_enabled": False,
+        "sleep_study_enabled": False,
         "revision": 0,
         "updated_at": None,
     }
@@ -149,7 +164,157 @@ def load_processing_settings() -> dict[str, Any]:
     defaults["radar_detection_threshold_db"] = min(40.0, max(0.0, float(defaults["radar_detection_threshold_db"])))
     defaults["occupancy_threshold_percent"] = min(100.0, max(0.0, float(defaults["occupancy_threshold_percent"])))
     defaults["auto_occupancy_label_enabled"] = bool(defaults["auto_occupancy_label_enabled"])
+    mode = str(defaults.get("system_mode") or "balanced").strip().lower()
+    defaults["system_mode"] = mode if mode in {"responsive", "balanced", "precision"} else "balanced"
+    defaults["occupancy_vote_chunks"] = min(60, max(1, int(defaults.get("occupancy_vote_chunks") or 1)))
+    style = str(defaults.get("prediction_label_style") or "occupancy").strip().lower()
+    defaults["prediction_label_style"] = style if style in {"occupancy", "presence"} else "occupancy"
+    defaults["people_count_label_enabled"] = bool(defaults.get("people_count_label_enabled"))
+    defaults["sleep_study_enabled"] = bool(defaults.get("sleep_study_enabled"))
     return defaults
+
+
+def prediction_label_for(label: str, style: str) -> str:
+    if style == "presence":
+        return "present" if label == "occupied" else "absent"
+    return "occupied" if label == "occupied" else "empty"
+
+
+def annotate_chunk_result(
+    result: dict[str, Any], settings: dict[str, Any], room: dict[str, Any],
+    preset_labels: list[str], minute: str, expected_chunks: int,
+    previous_frames: int,
+) -> dict[str, Any]:
+    occupancy = result.get("occupancy") or {}
+    raw_label = str(occupancy.get("label") or "empty")
+    targets = result.get("targets") if isinstance(result.get("targets"), list) else []
+    people_count = len(targets)
+    occupied_zones: list[str] = []
+    for target in targets:
+        position = target.get("position") if isinstance(target, dict) else None
+        target_zones: list[str] = []
+        if isinstance(position, (list, tuple)) and len(position) >= 2:
+            tx, ty = float(position[0]), float(position[1])
+            for zone in room.get("zones") or []:
+                if not isinstance(zone, dict):
+                    continue
+                x, y = float(zone.get("x") or 0), float(zone.get("y") or 0)
+                width, depth = float(zone.get("width") or 1), float(zone.get("depth") or 1)
+                if x <= tx <= x + width and y <= ty <= y + depth:
+                    label = str(zone.get("label") or zone.get("id") or "zone").strip()
+                    if label and label not in target_zones:
+                        target_zones.append(label)
+                    if label and label not in occupied_zones:
+                        occupied_zones.append(label)
+        if isinstance(target, dict):
+            target["zones"] = target_zones
+    labels = list(dict.fromkeys(preset_labels))
+    if settings.get("auto_occupancy_label_enabled"):
+        labels.append(prediction_label_for(raw_label, str(settings.get("prediction_label_style") or "occupancy")))
+    if settings.get("people_count_label_enabled"):
+        labels.append(f"people_count:{people_count}")
+    labels.extend(f"zone:{label}" for label in occupied_zones)
+
+    anchor = room.get("sleep_anchor") if isinstance(room.get("sleep_anchor"), dict) else {}
+    anchor_x = float(anchor.get("x") or 0.0)
+    anchor_y = float(anchor.get("y") or 0.0)
+    radius = max(0.1, float(anchor.get("radius_m") or 1.0))
+    distances = []
+    for target in targets:
+        position = target.get("position") if isinstance(target, dict) else None
+        if isinstance(position, (list, tuple)) and len(position) >= 2:
+            distances.append(math.hypot(float(position[0]) - anchor_x, float(position[1]) - anchor_y))
+    nearest = min(distances) if distances else None
+    sleep_proximity = {
+        "anchor": {"x": anchor_x, "y": anchor_y, "radius_m": radius, "name": anchor.get("name") or "Sleep anchor"},
+        "nearest_target_m": round(nearest, 3) if nearest is not None else None,
+        "targets_in_zone": sum(distance <= radius for distance in distances),
+        "in_zone": any(distance <= radius for distance in distances),
+    }
+    if settings.get("sleep_study_enabled"):
+        labels.append("sleep_zone:present" if sleep_proximity["in_zone"] else "sleep_zone:empty")
+
+    chunk_index = int(result.get("chunk_index") or 0)
+    evaluated_frames = int(occupancy.get("evaluated_frames") or 0)
+    result.update({
+        "labels": list(dict.fromkeys(labels)),
+        "zones": occupied_zones,
+        "people_count": people_count,
+        "sleep_proximity": sleep_proximity,
+        "join": {
+            "schema_version": 2,
+            "minute": minute,
+            "chunk_id": f"{minute}:{chunk_index:02d}",
+            "chunk_index": chunk_index,
+            "expected_chunks": expected_chunks,
+            "previous_chunk_id": f"{minute}:{chunk_index - 1:02d}" if chunk_index else None,
+            "next_chunk_id": f"{minute}:{chunk_index + 1:02d}" if chunk_index + 1 < expected_chunks else None,
+            "start_offset_seconds": round(chunk_index * float(result.get("chunk_seconds") or 0.0), 3),
+            "duration_seconds": float(result.get("chunk_seconds") or 0.0),
+            "frame_start": previous_frames,
+            "frame_count": evaluated_frames,
+            "frame_end_exclusive": previous_frames + evaluated_frames,
+            "source_files": {
+                "radar_bin": Path(str(result.get("bin_path") or "")).name,
+                "radar_csv": Path(str(result.get("csv_path") or "")).name,
+            },
+        },
+    })
+    return result
+
+
+def summarize_minute_results(
+    chunks: list[dict[str, Any]], settings: dict[str, Any], preset_labels: list[str]
+) -> dict[str, Any]:
+    occupied_chunks = sum((chunk.get("occupancy") or {}).get("label") == "occupied" for chunk in chunks)
+    vote_required = min(max(1, int(settings.get("occupancy_vote_chunks") or 1)), max(1, len(chunks)))
+    label = "occupied" if occupied_chunks >= vote_required else "empty"
+    detected_frames = sum(int((chunk.get("occupancy") or {}).get("detected_frames") or 0) for chunk in chunks)
+    evaluated_frames = sum(int((chunk.get("occupancy") or {}).get("evaluated_frames") or 0) for chunk in chunks)
+    ratio = detected_frames / evaluated_frames if evaluated_frames else 0.0
+    people_count = max((int(chunk.get("people_count") or 0) for chunk in chunks), default=0)
+    sleep_chunks = sum(bool((chunk.get("sleep_proximity") or {}).get("in_zone")) for chunk in chunks)
+    nearest_values = [
+        float((chunk.get("sleep_proximity") or {}).get("nearest_target_m"))
+        for chunk in chunks if (chunk.get("sleep_proximity") or {}).get("nearest_target_m") is not None
+    ]
+    labels = list(dict.fromkeys(preset_labels))
+    if settings.get("auto_occupancy_label_enabled"):
+        labels.append(prediction_label_for(label, str(settings.get("prediction_label_style") or "occupancy")))
+    if settings.get("people_count_label_enabled"):
+        labels.append(f"people_count:{people_count}")
+    if settings.get("sleep_study_enabled"):
+        labels.append("sleep_zone:present" if sleep_chunks >= vote_required else "sleep_zone:empty")
+    occupied_zones = list(dict.fromkeys(
+        str(zone) for chunk in chunks for zone in (chunk.get("zones") or []) if str(zone).strip()
+    ))
+    labels.extend(f"zone:{zone}" for zone in occupied_zones)
+    latest = chunks[-1] if chunks else {}
+    return {
+        "occupancy": {
+            "label": label,
+            "occupied_chunks": occupied_chunks,
+            "evaluated_chunks": len(chunks),
+            "vote_required_chunks": vote_required,
+            "detected_frames": detected_frames,
+            "evaluated_frames": evaluated_frames,
+            "ratio": ratio,
+            "threshold_percent": float((latest.get("occupancy") or {}).get("threshold_percent") or 50.0),
+        },
+        "labels": list(dict.fromkeys(labels)),
+        "zones": occupied_zones,
+        "people_count": people_count,
+        "targets": latest.get("targets") or [],
+        "location": latest.get("location"),
+        "score": latest.get("score"),
+        "sleep_proximity": {
+            "chunks_in_zone": sleep_chunks,
+            "evaluated_chunks": len(chunks),
+            "vote_required_chunks": vote_required,
+            "in_zone": sleep_chunks >= vote_required,
+            "nearest_target_m": min(nearest_values) if nearest_values else None,
+        },
+    }
 
 
 def find_camera(requested: str | None) -> str | None:
@@ -411,7 +576,7 @@ def stop_video_capture(proc: subprocess.Popen | None, timeout: float = 10.0) -> 
     return proc.returncode
 
 
-def start_radar_capture(output_prefix: Path) -> Any:
+def start_radar_capture(output_prefix: Path | None = None) -> Any:
     if not Path("/dev/spidev0.0").exists():
         raise RuntimeError("/dev/spidev0.0 is missing; enable SPI and reboot the Raspberry Pi.")
 
@@ -420,7 +585,10 @@ def start_radar_capture(output_prefix: Path) -> Any:
 
     bgt60tr13c = None
     try:
-        bgt60tr13c = BGT60TR13C(spi_speed=50_000_000, save_to_file=str(output_prefix))
+        bgt60tr13c = BGT60TR13C(
+            spi_speed=50_000_000,
+            save_to_file=str(output_prefix) if output_prefix is not None else None,
+        )
         if bgt60tr13c.check_chip_id() != RET_VAL_OK:
             raise RuntimeError("BGT60TR13C chip ID check failed.")
 
@@ -466,7 +634,7 @@ def main() -> int:
     args = parse_args()
     preset_labels = normalize_labels(args.label or [])
     chunk_seconds = max(1.0, float(args.chunk_seconds))
-    target_start = minute_start(args.start_now)
+    target_start = minute_start(args.start_now, args.scheduled_start)
     folder_name = target_start.strftime("%Y%m%d_%H%M")
     output_dir = output_dir_for_minute(folder_name, preset_labels)
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -516,7 +684,7 @@ def main() -> int:
     # Hold at most one scheduled minute of frames. This remains bounded while
     # ensuring signal processing can never back-pressure the SPI reader.
     analysis_queue: queue.Queue[Any] = queue.Queue(maxsize=768)
-    upload_queue: queue.Queue[Any] = queue.Queue(maxsize=6)
+    upload_queue: queue.Queue[Any] = queue.Queue(maxsize=32)
     radar_chunk_results: list[dict[str, Any]] = []
     publish_lock = threading.Lock()
     room_config = load_room_config()
@@ -528,6 +696,9 @@ def main() -> int:
         except (FileNotFoundError, ValueError, OSError):
             return
         chunks = (((manifest.get("outputs") or {}).get("radar") or {}).get("chunks") or [])
+        minute_status = statuses.get("minute") if isinstance(statuses, dict) else None
+        if isinstance(minute_status, dict):
+            manifest["home_assistant"] = minute_status
         for entry in chunks:
             status = statuses.get(str(entry.get("chunk_index"))) if isinstance(statuses, dict) else None
             if isinstance(status, dict):
@@ -555,7 +726,16 @@ def main() -> int:
             completed = [entry["result"] for entry in radar_chunk_results if isinstance(entry.get("result"), dict)]
             if not completed:
                 return
+            active_settings = next((
+                item.get("settings") for item in radar_chunk_results
+                if isinstance(item.get("settings"), dict)
+            ), load_processing_settings())
+            minute_summary = summarize_minute_results(completed, active_settings, preset_labels)
             xy_payload = compile_minute_xy_payload(completed)
+            xy_payload["occupancy"] = minute_summary["occupancy"]
+            xy_payload["labels"] = minute_summary["labels"]
+            xy_payload["people_count"] = minute_summary["people_count"]
+            xy_payload["sleep_proximity"] = minute_summary["sleep_proximity"]
             timeline = [
                 {
                     "model_name": "xy-tracking",
@@ -566,7 +746,11 @@ def main() -> int:
                     "location": chunk.get("location"),
                     "score": chunk.get("score"),
                     "target_count": len(chunk.get("targets") or []),
+                    "people_count": chunk.get("people_count", len(chunk.get("targets") or [])),
                     "targets": chunk.get("targets") or [],
+                    "labels": chunk.get("labels") or [],
+                    "sleep_proximity": chunk.get("sleep_proximity"),
+                    "join": chunk.get("join"),
                     "detected_frames": chunk.get("occupancy", {}).get("detected_frames", 0),
                     "evaluated_frames": chunk.get("occupancy", {}).get("evaluated_frames", 0),
                     "ratio": chunk.get("occupancy", {}).get("ratio", 0.0),
@@ -579,9 +763,10 @@ def main() -> int:
             write_json_atomic(output_dir / "predictions.json", {
                 "generated_at": iso_now(),
                 "chunk_seconds": chunk_seconds,
-                "labels": preset_labels,
+                "labels": minute_summary["labels"],
+                "preset_labels": preset_labels,
                 "timeline": timeline,
-                "summary": xy_payload.get("occupancy", {}),
+                "summary": minute_summary,
             })
             write_live_manifest()
 
@@ -596,14 +781,19 @@ def main() -> int:
         except Exception as exc:
             print(f"Live chunk {index} upload deferred: {exc}", file=sys.stderr)
 
-    def enqueue_home_assistant(entry: dict[str, Any], occupancy: dict[str, Any], result: dict[str, Any]) -> None:
+    def enqueue_home_assistant(entry: dict[str, Any], occupancy: dict[str, Any], result: dict[str, Any], scope: str = "chunk") -> None:
         payload = json.dumps({
             "minute": folder_name,
-            "chunk_index": entry["chunk_index"],
+            "scope": scope,
+            "chunk_index": entry.get("chunk_index"),
             "occupancy": occupancy,
             "location": result.get("location"),
             "confidence": result.get("score"),
-            "timestamp": entry["finished"],
+            "targets": result.get("targets") or [],
+            "people_count": result.get("people_count"),
+            "labels": result.get("labels") or [],
+            "sleep_proximity": result.get("sleep_proximity"),
+            "timestamp": entry.get("finished") or iso_now(),
         }).encode("utf-8")
         try:
             request = urllib.request.Request(
@@ -647,6 +837,7 @@ def main() -> int:
                 finally:
                     analysis_queue.task_done()
         analyzer: StreamingChunkAnalyzer | None = None
+        identity: PersistentTargetIdentity | None = None
         entry: dict[str, Any] | None = None
         settings_snapshot: dict[str, Any] = {}
         while True:
@@ -657,11 +848,17 @@ def main() -> int:
                 kind = job[0]
                 if kind == "start":
                     entry, settings_snapshot = job[1], job[2]
+                    if identity is None:
+                        mode = str(settings_snapshot.get("system_mode") or "balanced")
+                        identity = PersistentTargetIdentity(mode=mode)
+                        if hasattr(processor, "set_system_mode"):
+                            processor.set_system_mode(mode)
                     analyzer = StreamingChunkAnalyzer(
                         processor, Path(entry["csv_path"]), int(entry["chunk_index"]),
                         float(entry["chunk_seconds"]), room_config,
                         float(settings_snapshot["radar_detection_threshold_db"]),
                         float(settings_snapshot["occupancy_threshold_percent"]),
+                        identity,
                     )
                     continue
                 if kind == "frame":
@@ -677,6 +874,14 @@ def main() -> int:
                 result = analyzer.finish()
                 result["bin_path"] = entry.get("bin_path")
                 result["csv_path"] = entry.get("csv_path")
+                previous_frames = sum(
+                    int(((item.get("result") or {}).get("occupancy") or {}).get("evaluated_frames") or 0)
+                    for item in radar_chunk_results if item is not entry
+                )
+                annotate_chunk_result(
+                    result, settings_snapshot, room_config, preset_labels,
+                    folder_name, expected_chunks, previous_frames,
+                )
                 entry["result"] = result
                 occupancy = result.get("occupancy", {})
                 label = occupancy.get("label") or "empty"
@@ -688,6 +893,11 @@ def main() -> int:
                     "occupied": label == "occupied",
                     "location": result.get("location"),
                     "score": result.get("score"),
+                    "people_count": result.get("people_count", 0),
+                    "targets": result.get("targets") or [],
+                    "labels": result.get("labels") or [],
+                    "sleep_proximity": result.get("sleep_proximity"),
+                    "join": result.get("join"),
                     "performance": result.get("performance"),
                     "finished": iso_now(),
                 })
@@ -780,7 +990,7 @@ def main() -> int:
                 "config_dir": str(RADAR_CFG),
                 "chunk_seconds": chunk_seconds,
                 "chunks": [],
-                "note": "Radar is captured and analyzed in 10-second windows so each chunk gets its own .bin and .csv pair.",
+                "note": f"Radar is captured and analyzed in {chunk_seconds:g}-second windows so each chunk gets its own .bin and .csv pair.",
             }
             with publish_lock:
                 write_live_manifest()
@@ -788,66 +998,75 @@ def main() -> int:
             radar_upload_thread = threading.Thread(target=run_upload_worker, name="RadarUpload", daemon=True)
             radar_analysis_thread.start()
             radar_upload_thread.start()
-            for chunk_index in range(6):
-                remaining = stop_at - time.monotonic()
-                if remaining <= 0:
-                    break
-                current_chunk_seconds = min(chunk_seconds, remaining)
-                radar_prefix = output_dir / f"mmw_radar_raw_{chunk_index:02d}"
-                radar_started = iso_now()
-                settings_snapshot = load_processing_settings()
-                radar = None
-                csv_path = output_dir / f"mmw_radar_xy_{chunk_index:02d}.csv"
-                chunk_entry: dict[str, Any] = {
-                    "chunk_index": chunk_index,
-                    "bin_path": "",
-                    "csv_path": str(csv_path),
-                    "started": radar_started,
-                    "chunk_seconds": current_chunk_seconds,
-                    "status": "collecting",
-                    "settings": settings_snapshot,
-                }
-                radar_chunk_results.append(chunk_entry)
-                manifest["outputs"]["radar"]["chunks"].append(chunk_entry)
-                with publish_lock:
-                    write_live_manifest()
-                analysis_queue.put(("start", chunk_entry, settings_snapshot))
-                try:
-                    radar = start_radar_capture(radar_prefix)
-                    chunk_stop = time.monotonic() + current_chunk_seconds
-                    while True:
-                        remaining_chunk = chunk_stop - time.monotonic()
-                        if remaining_chunk <= 0:
-                            break
-                        try:
-                            analysis_queue.put(("frame", bytes(radar.frame_buffer.get(timeout=min(remaining_chunk, 0.1))), time.monotonic()))
-                        except queue.Empty:
-                            pass
-                except Exception as exc:
-                    manifest["warnings"].append(f"Radar chunk {chunk_index} failed to start: {exc}")
-                    chunk_entry["error"] = str(exc)
-                finally:
-                    stop_radar_capture(radar)
+            expected_chunks = max(1, int(math.ceil(args.duration / chunk_seconds)))
+            radar = None
+            radar_error: str | None = None
+            try:
+                # Keep one SPI/FIFO session alive for the whole minute. Frames
+                # are rotated into per-chunk binaries below, avoiding six
+                # hardware resets and leaving a clean handoff before :00.
+                radar = start_radar_capture()
+            except Exception as exc:
+                radar_error = str(exc)
+                manifest["warnings"].append(f"Radar failed to start: {exc}")
 
-                if radar is not None:
-                    while True:
-                        try:
-                            analysis_queue.put(("frame", bytes(radar.frame_buffer.get_nowait()), time.monotonic()))
-                        except queue.Empty:
-                            break
-
-                radar_files = sorted(output_dir.glob(f"mmw_radar_raw_{chunk_index:02d}_*.bin"))
-                if not radar_files:
-                    chunk_entry.update({"status": "error", "capture_error": True, "error": chunk_entry.get("error") or "Radar binary was not created"})
+            try:
+                for chunk_index in range(expected_chunks):
+                    remaining = stop_at - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    current_chunk_seconds = min(chunk_seconds, remaining)
+                    radar_started = iso_now()
+                    settings_snapshot = load_processing_settings()
+                    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+                    radar_path = output_dir / f"mmw_radar_raw_{chunk_index:02d}_{timestamp}.bin"
+                    csv_path = output_dir / f"mmw_radar_xy_{chunk_index:02d}.csv"
+                    chunk_entry: dict[str, Any] = {
+                        "chunk_index": chunk_index,
+                        "bin_path": str(radar_path),
+                        "csv_path": str(csv_path),
+                        "started": radar_started,
+                        "chunk_seconds": current_chunk_seconds,
+                        "status": "collecting",
+                        "settings": settings_snapshot,
+                    }
+                    radar_chunk_results.append(chunk_entry)
+                    manifest["outputs"]["radar"]["chunks"].append(chunk_entry)
                     with publish_lock:
                         write_live_manifest()
-                else:
-                    radar_path = radar_files[-1]
-                    chunk_entry["bin_path"] = str(radar_path)
-                    chunk_entry["status"] = "stored"
-                with publish_lock:
-                    write_live_manifest()
-                analysis_queue.put(("end", chunk_entry))
+                    analysis_queue.put(("start", chunk_entry, settings_snapshot))
+
+                    chunk_stop = min(stop_at, time.monotonic() + current_chunk_seconds)
+                    if radar is None:
+                        chunk_entry.update({"capture_error": True, "error": radar_error or "Radar is unavailable"})
+                        while time.monotonic() < chunk_stop:
+                            time.sleep(min(0.1, chunk_stop - time.monotonic()))
+                    else:
+                        with open(radar_path, "wb", buffering=256 * 1024) as radar_handle:
+                            while True:
+                                remaining_chunk = chunk_stop - time.monotonic()
+                                if remaining_chunk <= 0:
+                                    break
+                                try:
+                                    full_frame = bytes(radar.frame_buffer.get(timeout=min(remaining_chunk, 0.1)))
+                                except queue.Empty:
+                                    continue
+                                radar_handle.write(full_frame)
+                                analysis_queue.put(("frame", full_frame, time.monotonic()))
+
+                    if not radar_path.exists() or radar_path.stat().st_size == 0:
+                        chunk_entry.update({
+                            "status": "error",
+                            "capture_error": True,
+                            "error": chunk_entry.get("error") or "Radar binary was not created",
+                        })
+                    else:
+                        chunk_entry["status"] = "stored"
+                    with publish_lock:
+                        write_live_manifest()
+                    analysis_queue.put(("end", chunk_entry))
+            finally:
+                stop_radar_capture(radar)
 
         while True:
             remaining = stop_at - time.monotonic()
@@ -891,6 +1110,10 @@ def main() -> int:
                     "location": result.get("location"),
                     "score": result.get("score"),
                     "targets": result.get("targets", []),
+                    "people_count": result.get("people_count", 0),
+                    "labels": result.get("labels", []),
+                    "sleep_proximity": result.get("sleep_proximity"),
+                    "join": result.get("join"),
                     "finished": iso_now(),
                 })
                 if not error:
@@ -903,7 +1126,16 @@ def main() -> int:
                 })
 
         if completed_chunks:
+            minute_settings = next((
+                chunk.get("settings") for chunk in radar_chunk_results
+                if isinstance(chunk.get("settings"), dict)
+            ), load_processing_settings())
+            minute_summary = summarize_minute_results(completed_chunks, minute_settings, preset_labels)
             xy_payload = compile_minute_xy_payload(completed_chunks)
+            xy_payload["occupancy"] = minute_summary["occupancy"]
+            xy_payload["labels"] = minute_summary["labels"]
+            xy_payload["people_count"] = minute_summary["people_count"]
+            xy_payload["sleep_proximity"] = minute_summary["sleep_proximity"]
             xy_payload_path = output_dir / "xy-tracking.json"
             write_json_atomic(xy_payload_path, xy_payload)
             manifest["outputs"]["xy_tracking"] = {
@@ -920,7 +1152,8 @@ def main() -> int:
             prediction_payload = {
                 "generated_at": iso_now(),
                 "chunk_seconds": chunk_seconds,
-                "labels": preset_labels,
+                "labels": minute_summary["labels"],
+                "preset_labels": preset_labels,
                 "timeline": [
                     {
                         "model_name": "xy-tracking",
@@ -931,7 +1164,11 @@ def main() -> int:
                         "location": chunk.get("location"),
                         "score": chunk.get("score"),
                         "target_count": len(chunk.get("targets") or []),
+                        "people_count": chunk.get("people_count", len(chunk.get("targets") or [])),
                         "targets": chunk.get("targets") or [],
+                        "labels": chunk.get("labels") or [],
+                        "sleep_proximity": chunk.get("sleep_proximity"),
+                        "join": chunk.get("join"),
                         "detected_frames": chunk.get("occupancy", {}).get("detected_frames", 0),
                         "evaluated_frames": chunk.get("occupancy", {}).get("evaluated_frames", 0),
                         "ratio": chunk.get("occupancy", {}).get("ratio", 0.0),
@@ -940,9 +1177,16 @@ def main() -> int:
                     }
                     for chunk in completed_chunks
                 ],
-                "summary": xy_payload.get("occupancy", {}),
+                "summary": minute_summary,
             }
             write_json_atomic(predictions_path, prediction_payload)
+            manifest["preset_labels"] = preset_labels
+            manifest["labels"] = minute_summary["labels"]
+            manifest["minute_summary"] = minute_summary
+            manifest["chunk_metadata_schema_version"] = 2
+            minute_entry = {"finished": iso_now()}
+            enqueue_home_assistant(minute_entry, minute_summary["occupancy"], minute_summary, scope="minute")
+            manifest["home_assistant"] = minute_entry.get("home_assistant")
 
         video_returncode = stop_video_capture(video_proc)
         if video_returncode is not None:

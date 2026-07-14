@@ -435,7 +435,7 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
     expected_chunks = _manifest_expected_chunks(manifest, seconds_recorded)
     if not expected_chunks:
         expected_chunks = max(len(radar_bins), len(radar_csvs), len((predictions or {}).get("timeline") or []), 6)
-    expected_chunks = 6
+    expected_chunks = max(1, expected_chunks)
 
     stored_chunks = min(len(radar_bins), len(radar_csvs)) if radar_bins or radar_csvs else 0
     analyzed_chunks = len((predictions or {}).get("timeline") or [])
@@ -473,6 +473,19 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
             state = "stored"
         elif recorded:
             state = "analyzing"
+        if state == "collecting" and manifest_chunk.get("started"):
+            try:
+                started = datetime.fromisoformat(str(manifest_chunk["started"]))
+                now = datetime.now().astimezone() if started.tzinfo else datetime.now()
+                visual_progress = min(0.94, max(0.04, (now - started).total_seconds() / max(0.1, float(manifest_chunk.get("chunk_seconds") or 10.0))))
+            except (TypeError, ValueError):
+                visual_progress = 0.35
+        elif state in {"stored", "analyzing"}:
+            visual_progress = 0.96
+        elif state in {"occupied", "empty", "error"}:
+            visual_progress = 1.0
+        else:
+            visual_progress = 0.0
         chunks.append({
             "index": index,
             "state": state,
@@ -483,6 +496,13 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
             "location": location,
             "score": prediction.get("score") if prediction else None,
             "ratio": prediction.get("ratio") if prediction else None,
+            "progress": visual_progress,
+            "targets": prediction.get("targets") if prediction else [],
+            "target_count": prediction.get("target_count") if prediction else 0,
+            "people_count": (prediction.get("people_count") if prediction else manifest_chunk.get("people_count", 0)),
+            "labels": (prediction.get("labels") if prediction else manifest_chunk.get("labels", [])),
+            "sleep_proximity": (prediction.get("sleep_proximity") if prediction else manifest_chunk.get("sleep_proximity")),
+            "join": (prediction.get("join") if prediction else manifest_chunk.get("join")),
             "detected_frames": (
                 prediction.get("detected_frames") if prediction
                 else manifest_chunk.get("detected_frames")
@@ -531,7 +551,7 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
         "expected_chunks": progress.get("expected_chunks"),
         "progress": progress,
         "labels": labels,
-        "occupancy": manifest.get("auto_occupancy_label") if isinstance(manifest, dict) else None,
+        "occupancy": ((manifest.get("minute_summary") or {}).get("occupancy") or manifest.get("auto_occupancy_label")) if isinstance(manifest, dict) else None,
         "predictions": bool(files["predictions"] and files["predictions"].exists()),
         "files": {
             "video": bool(files["video"] and files["video"].exists()),

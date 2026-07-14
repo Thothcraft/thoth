@@ -19,19 +19,21 @@ DEFAULT_CAPTURE_SCRIPT = Path(
     os.environ.get("THOTH_CAPTURE_SCRIPT", THOTH_ROOT / "src" / "backend" / "minute_collector.py")
 )
 DEFAULT_PYTHON = os.environ.get("THOTH_CAPTURE_PYTHON", sys.executable)
+PREPARE_LEAD_SECONDS = 5.0
 CAPTURE_SETTINGS_PATH = Path(
     os.environ.get("THOTH_CAPTURE_SETTINGS", THOTH_ROOT / "config" / "capture_settings.json")
 )
 PAUSE_PATH = Path(os.environ.get("THOTH_COLLECTOR_PAUSE", THOTH_ROOT / "config" / "collector.pause"))
-active_capture: subprocess.Popen | None = None
+active_captures: list[subprocess.Popen] = []
 shutdown_requested = False
 
 sys.path.insert(0, str(THOTH_ROOT / "src"))
-from backend.capture_manager import cleanup_old_minutes  # noqa: E402
 
 
 DEFAULT_CAPTURE_SETTINGS = {
     "labels": [],
+    "chunk_seconds": 10.0,
+    "system_mode": "balanced",
     "sensors": {
         "usb_camera": True,
         "dreamhat_radar": True,
@@ -78,8 +80,7 @@ def requested_pause() -> bool:
 def handle_shutdown(_signum, _frame) -> None:
     global shutdown_requested
     shutdown_requested = True
-    if active_capture and active_capture.poll() is None:
-        active_capture.terminate()
+    terminate_captures()
 
 
 def load_capture_settings() -> dict:
@@ -97,6 +98,9 @@ def load_capture_settings() -> dict:
         for key, value in (loaded.get("sensors") or {}).items():
             if key in SENSOR_FLAGS:
                 settings["sensors"][key] = bool(value)
+        settings["chunk_seconds"] = min(30.0, max(2.0, float(loaded.get("chunk_seconds", 10.0))))
+        mode = str(loaded.get("system_mode", "balanced")).strip().lower()
+        settings["system_mode"] = mode if mode in {"responsive", "balanced", "precision"} else "balanced"
     except FileNotFoundError:
         pass
     except Exception as exc:
@@ -104,29 +108,59 @@ def load_capture_settings() -> dict:
     return settings
 
 
-def run_capture(python: str, capture_script: str) -> int:
-    global active_capture
+def terminate_captures() -> None:
+    for capture in list(active_captures):
+        if capture.poll() is None:
+            capture.terminate()
+    deadline = time.monotonic() + 10
+    for capture in list(active_captures):
+        if capture.poll() is not None:
+            continue
+        try:
+            capture.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            capture.kill()
+    reap_captures()
+
+
+def reap_captures() -> None:
+    for capture in list(active_captures):
+        result = capture.poll()
+        if result is None:
+            continue
+        active_captures.remove(capture)
+        if result != 0:
+            print(f"Capture exited with code {result}", file=sys.stderr)
+
+
+def start_capture(python: str, capture_script: str, target: datetime) -> subprocess.Popen:
     settings = load_capture_settings()
-    command = [python, capture_script, "--start-now", "--duration", "59.5"]
+    command = [
+        python, capture_script, "--duration", "59.5",
+        "--chunk-seconds", str(settings["chunk_seconds"]),
+        "--scheduled-start", target.isoformat(),
+    ]
+    preferred_csi = os.environ.get("THOTH_CSI_PORT")
+    if not preferred_csi:
+        preferred_csi = next((
+            str(path) for pattern in ("ttyACM*", "ttyUSB*")
+            for path in sorted(Path("/dev").glob(pattern))
+        ), None)
+    if preferred_csi:
+        command.extend(["--csi-port", preferred_csi])
     for label in settings["labels"]:
         command.extend(["--label", label])
     for sensor, flag in SENSOR_FLAGS.items():
         if settings["sensors"].get(sensor) is False:
             command.append(flag)
-    print(f"Capture settings: labels={settings['labels'] or ['unlabeled']} sensors={settings['sensors']}", flush=True)
-    active_capture = subprocess.Popen(command, start_new_session=True)
-    while active_capture.poll() is None:
-        if shutdown_requested or requested_pause():
-            active_capture.terminate()
-            try:
-                active_capture.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                active_capture.kill()
-            break
-        time.sleep(0.25)
-    result = active_capture.returncode or 0
-    active_capture = None
-    return result
+    print(
+        f"Capture settings for {target.isoformat(timespec='seconds')}: "
+        f"labels={settings['labels'] or ['unlabeled']} sensors={settings['sensors']}",
+        flush=True,
+    )
+    capture = subprocess.Popen(command, start_new_session=True)
+    active_captures.append(capture)
+    return capture
 
 
 def main() -> int:
@@ -137,30 +171,45 @@ def main() -> int:
         return 1
 
     print(f"Thoth collector using {capture_script}")
-    print(f"Keeping the latest {args.keep_minutes} minute folders")
+    print(f"Retention limit is {args.keep_minutes} minute folders (enforced by the dashboard cleanup job)")
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
-    # Start the first capture immediately so the dashboard shows activity as soon
-    # as collection is enabled. Subsequent captures still advance on minute
-    # boundaries to preserve the existing naming and retention behavior.
-    target = datetime.now().astimezone()
+    # Always start on an actual wall-clock minute boundary. Starting a full
+    # minute immediately after process boot permanently offsets every folder.
+    target = next_minute_boundary()
+    if target.timestamp() - time.time() < PREPARE_LEAD_SECONDS:
+        target += timedelta(minutes=1)
     while not shutdown_requested:
         if requested_pause():
+            terminate_captures()
             time.sleep(0.5)
             target = next_minute_boundary()
+            if target.timestamp() - time.time() < PREPARE_LEAD_SECONDS:
+                target += timedelta(minutes=1)
             continue
-        print(f"Waiting for {target.isoformat(timespec='seconds')}")
-        sleep_until(target)
+        prepare_at = target - timedelta(seconds=PREPARE_LEAD_SECONDS)
+        print(f"Preparing capture for {target.isoformat(timespec='seconds')}")
+        while not shutdown_requested and not requested_pause():
+            reap_captures()
+            remaining = prepare_at.timestamp() - time.time()
+            if remaining <= 0:
+                break
+            time.sleep(min(remaining, 0.25))
         if requested_pause() or shutdown_requested:
             continue
-        print(f"Starting capture minute at {datetime.now().astimezone().isoformat(timespec='seconds')}")
-        result = run_capture(args.python, capture_script)
-        if result != 0:
-            print(f"Capture exited with code {result}", file=sys.stderr)
-        cleanup_old_minutes(args.keep_minutes)
+        # The child imports and configures during the lead time, then sleeps on
+        # its explicit target. At most two children coexist for a few seconds:
+        # one finishing the prior minute and one waiting for the next boundary.
+        reap_captures()
+        start_capture(args.python, capture_script, target)
         target += timedelta(minutes=1)
-        if target.timestamp() + 60 < time.time():
+        if target.timestamp() + 5 < time.time():
             target = next_minute_boundary()
+            if target.timestamp() - time.time() < PREPARE_LEAD_SECONDS:
+                target += timedelta(minutes=1)
+
+    terminate_captures()
+    return 0
 
 
 if __name__ == "__main__":
