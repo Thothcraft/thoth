@@ -273,16 +273,74 @@ class DeviceManager:
         settings.update({k: self._coerce_setting_value(k, v) for k, v in device_updates.items()})
         self._write_json_atomic(self._settings_path(), settings)
         self.device_settings = settings
+        desired_capture_settings = None
         if capture_updates:
-            self.save_capture_settings(capture_updates, local_change=True)
+            desired_capture_settings = self.save_capture_settings(capture_updates, local_change=True)
         if self.registered and self.auth_token:
+            capture_synchronized = True
+            if desired_capture_settings is not None:
+                capture_synchronized = self._sync_capture_settings_to_brain(desired_capture_settings)
             synchronized = self.update_status({'online': True, 'hardware_info': self._build_hardware_info()})
+            if desired_capture_settings is not None:
+                current_capture_settings = self.load_capture_settings()
+                desired_values_preserved = all(
+                    current_capture_settings.get(key) == desired_capture_settings.get(key)
+                    for key in capture_updates
+                )
+                synchronized = synchronized and capture_synchronized and desired_values_preserved
             self._settings_sync_pending = not synchronized
-            self._settings_sync_error = None if synchronized else 'Brain synchronization failed; the local change will retry on heartbeat.'
+            self._settings_sync_error = None if synchronized else 'Brain did not confirm the settings update; the local change is saved and will retry.'
         else:
             self._settings_sync_pending = True
             self._settings_sync_error = None
         return self.get_device_settings()
+
+    def _sync_capture_settings_to_brain(self, desired: Dict[str, Any]) -> bool:
+        """Rebase a local dashboard edit onto Brain's canonical revision.
+
+        Heartbeat reconciliation intentionally rejects stale revisions. A device
+        dashboard can therefore be behind a recent Portal edit even though its
+        local write succeeded. Read the canonical revision and use the same
+        conflict-aware endpoint as Portal so the user's explicit save is never
+        silently replaced by the next heartbeat.
+        """
+        if not self.registered or not self.auth_token:
+            return False
+        url = f"{self.config.BRAIN_SERVER_URL}/api/device/{self.device_id}/capture-settings"
+        headers = {
+            "Authorization": f"Bearer {self.auth_token}",
+            "Content-Type": "application/json",
+        }
+        for attempt in range(2):
+            try:
+                current_response = self.session.get(url, headers=headers, timeout=5)
+                if current_response.status_code != 200:
+                    logger.warning("Unable to read canonical capture settings: %s", current_response.status_code)
+                    return False
+                current_payload = current_response.json()
+                current = current_payload.get("capture_settings") if isinstance(current_payload, dict) else None
+                if not isinstance(current, dict):
+                    return False
+                update = {
+                    **desired,
+                    "revision": int(current.get("revision") or 0),
+                }
+                response = self.session.put(url, json=update, headers=headers, timeout=5)
+                if response.status_code == 409 and attempt == 0:
+                    continue
+                if response.status_code != 200:
+                    logger.warning("Unable to write canonical capture settings: %s %s", response.status_code, response.text)
+                    return False
+                result = response.json()
+                canonical = result.get("capture_settings") if isinstance(result, dict) else None
+                if not isinstance(canonical, dict):
+                    return False
+                self.save_capture_settings(canonical, local_change=False)
+                return all(self.load_capture_settings().get(key) == desired.get(key) for key in desired if key not in {"revision", "updated_at"})
+            except (requests.exceptions.RequestException, TypeError, ValueError) as exc:
+                logger.warning("Capture settings synchronization failed: %s", exc)
+                return False
+        return False
 
     def _build_hardware_info(self) -> Dict[str, Any]:
         import platform
@@ -459,9 +517,11 @@ class DeviceManager:
         """Persist locally first, then attempt a device-authenticated Brain sync."""
         saved = self.save_capture_settings(settings, local_change=True)
         if self.registered and self.auth_token:
+            canonical_synchronized = self._sync_capture_settings_to_brain(saved)
             synchronized = self.update_status({'online': True, 'hardware_info': self._build_hardware_info()})
+            synchronized = synchronized and canonical_synchronized
             self._settings_sync_pending = not synchronized
-            self._settings_sync_error = None if synchronized else 'Brain synchronization failed; the local change will retry on heartbeat.'
+            self._settings_sync_error = None if synchronized else 'Brain did not confirm the settings update; the local change is saved and will retry.'
         return {
             **self.load_capture_settings(),
             'sync_pending': self._settings_sync_pending,

@@ -49,6 +49,8 @@ class SettingsTests(unittest.TestCase):
             saved = manager.save_capture_settings({
                 "radar_detection_threshold_db": 12.5,
                 "occupancy_threshold_percent": 62,
+                "yellow_threshold_percent": 27,
+                "green_threshold_percent": 71,
                 "auto_occupancy_label_enabled": False,
                 "chunk_seconds": 5,
                 "system_mode": "responsive",
@@ -62,6 +64,8 @@ class SettingsTests(unittest.TestCase):
             reloaded = DeviceManager(_Config(root)).load_capture_settings()
             self.assertEqual(reloaded["radar_detection_threshold_db"], 12.5)
             self.assertEqual(reloaded["occupancy_threshold_percent"], 62.0)
+            self.assertEqual(reloaded["yellow_threshold_percent"], 27.0)
+            self.assertEqual(reloaded["green_threshold_percent"], 71.0)
             self.assertFalse(reloaded["auto_occupancy_label_enabled"])
             self.assertEqual(reloaded["chunk_seconds"], 5.0)
             self.assertEqual(reloaded["system_mode"], "responsive")
@@ -80,6 +84,40 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(saved["labels"], ["bedroom", "participant-1"])
             self.assertFalse(saved["sensors"]["usb_camera"])
             self.assertTrue(saved["sensors"]["dreamhat_radar"])
+
+    def test_dashboard_rebases_detection_regions_onto_brain_revision(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = DeviceManager(_Config(root))
+            manager.registered = True
+            manager.auth_token = "device-token"
+            manager.device_id = "device-1"
+            remote = {**manager.default_capture_settings(), "revision": 7}
+            canonical = {
+                **remote,
+                "yellow_threshold_percent": 31.0,
+                "green_threshold_percent": 74.0,
+                "revision": 8,
+                "updated_at": "2026-07-14T12:00:00+00:00",
+            }
+            get_response = mock.Mock(status_code=200)
+            get_response.json.return_value = {"capture_settings": remote}
+            put_response = mock.Mock(status_code=200)
+            put_response.json.return_value = {"capture_settings": canonical}
+            with mock.patch.object(manager.session, "get", return_value=get_response), mock.patch.object(
+                manager.session, "put", return_value=put_response
+            ) as put, mock.patch.object(manager, "update_status", return_value=True):
+                saved = manager.save_device_settings({
+                    "yellow_threshold_percent": 31,
+                    "green_threshold_percent": 74,
+                })
+            sent = put.call_args.kwargs["json"]
+            self.assertEqual(sent["revision"], 7)
+            self.assertEqual(sent["yellow_threshold_percent"], 31.0)
+            self.assertEqual(sent["green_threshold_percent"], 74.0)
+            self.assertEqual(saved["revision"], 8)
+            self.assertEqual(saved["yellow_threshold_percent"], 31.0)
+            self.assertEqual(saved["green_threshold_percent"], 74.0)
+            self.assertFalse(saved["sync_pending"])
 
     def test_frequent_heartbeat_does_not_rescan_complete_inventory(self):
         with tempfile.TemporaryDirectory() as root:
