@@ -556,7 +556,30 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
     progress = _minute_progress(manifest, files, seconds_recorded)
     folder_label = _label_for_minute_dir(minute_dir)
     manifest_labels = list(manifest.get("labels") or []) if isinstance(manifest, dict) else []
-    labels = manifest_labels or ([folder_label] if folder_label else [])
+    minute_result = manifest.get("minute_summary") if isinstance(manifest, dict) else {}
+    result_labels = list((minute_result or {}).get("labels") or []) if isinstance(minute_result, dict) else []
+    if result_labels:
+        manifest_labels = [label for label in manifest_labels if label != "collecting"]
+    labels = list(dict.fromkeys([*manifest_labels, *result_labels]))
+    if not labels and folder_label:
+        labels = [folder_label]
+    if not labels:
+        completed_chunks = [
+            chunk for chunk in (progress.get("chunks") or [])
+            if chunk.get("state") in {"occupied", "empty"}
+        ]
+        if completed_chunks:
+            latest = completed_chunks[-1]
+            labels = list(latest.get("labels") or [])
+            if not labels:
+                labels = [
+                    str(latest["state"]),
+                    "present" if latest["state"] == "occupied" else "absent",
+                ]
+        elif isinstance(manifest, dict) and manifest.get("capture_finished"):
+            labels = ["no-radar-data"]
+        else:
+            labels = ["collecting"]
 
     return {
         "minute": minute_dir.name,

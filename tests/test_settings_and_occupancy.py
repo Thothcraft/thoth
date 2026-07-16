@@ -1,3 +1,4 @@
+import json
 import os
 import queue
 import sys
@@ -17,6 +18,7 @@ if "dotenv" not in sys.modules:
 
 from backend.device_manager import DeviceManager
 from backend import home_assistant
+from backend.capture_manager import minute_summary
 from backend.radar_analysis import PersistentTargetIdentity, SigProc, StreamingChunkAnalyzer, occupancy_label, occupancy_region
 from backend.calibration import derive_thresholds
 from backend.minute_collector import (
@@ -91,6 +93,37 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(saved["labels"], ["bedroom", "participant-1"])
             self.assertFalse(saved["sensors"]["usb_camera"])
             self.assertTrue(saved["sensors"]["dreamhat_radar"])
+
+    def test_minute_summary_never_returns_an_unlabeled_minute(self):
+        with tempfile.TemporaryDirectory() as root:
+            minute_dir = Path(root) / "20260716_1200"
+            minute_dir.mkdir()
+            (minute_dir / "manifest.json").write_text(json.dumps({
+                "capture_finished": "2026-07-16T12:01:00Z",
+                "expected_chunks": 1,
+                "labels": [],
+                "outputs": {
+                    "radar": {
+                        "chunks": [{
+                            "chunk_index": 0,
+                            "status": "occupied",
+                            "labels": [],
+                            "detected_frames": 8,
+                            "evaluated_frames": 10,
+                        }],
+                    },
+                },
+            }), encoding="utf-8")
+            self.assertEqual(minute_summary(minute_dir)["labels"], ["occupied", "present"])
+
+            empty_dir = Path(root) / "20260716_1201"
+            empty_dir.mkdir()
+            (empty_dir / "manifest.json").write_text(json.dumps({
+                "capture_finished": "2026-07-16T12:02:00Z",
+                "labels": [],
+                "outputs": {},
+            }), encoding="utf-8")
+            self.assertEqual(minute_summary(empty_dir)["labels"], ["no-radar-data"])
 
     def test_dashboard_saves_detection_regions_without_waiting_for_brain(self):
         with tempfile.TemporaryDirectory() as root:

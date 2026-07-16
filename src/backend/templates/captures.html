@@ -161,7 +161,7 @@
                             {% if minute.labels %}
                                 {{ minute.labels|join(', ') }}
                             {% else %}
-                                <span class="text-gray-400">Unlabeled</span>
+                                <span class="text-gray-500">collecting</span>
                             {% endif %}
                             {% if minute.progress %}
                                 {% set latest = namespace(chunk=none) %}
@@ -451,7 +451,7 @@ function renderCaptureRow(minute) {
   const name = escapeHtml(minute.minute);
   const labels = Array.isArray(minute.labels) && minute.labels.length
     ? minute.labels.map(escapeHtml).join(', ')
-    : '<span class="text-gray-400">Unlabeled</span>';
+    : '<span class="text-gray-500">collecting</span>';
   const urls = minute.urls || {};
   const occupancy = '';
   const openUrl = urls.open || `/captures/${encodeURIComponent(minute.minute)}`;

@@ -742,11 +742,11 @@ def main() -> int:
         "chunk_seconds": chunk_seconds,
         "chunk_frames": RADAR_FRAMES_PER_CHUNK,
         "expected_chunks": expected_chunks,
-        "labels": preset_labels,
+        "labels": preset_labels or ["collecting"],
         "outputs": {},
         "errors": [],
         "warnings": [],
-        "primary_label": preset_labels[0] if preset_labels else None,
+        "primary_label": preset_labels[0] if preset_labels else "collecting",
         "relative_path": str(output_dir.relative_to(DATA_ROOT)),
         "sensors_enabled": {
             "usb_camera": not args.no_camera,
@@ -827,6 +827,8 @@ def main() -> int:
                 if isinstance(item.get("settings"), dict)
             ), load_processing_settings())
             minute_summary = summarize_minute_results(completed, active_settings, preset_labels)
+            manifest["labels"] = minute_summary["labels"]
+            manifest["primary_label"] = minute_summary["labels"][0]
             manifest["minute_summary"] = minute_summary
             manifest["auto_occupancy_label"] = minute_summary["occupancy"]
             write_live_manifest()
@@ -1237,11 +1239,33 @@ def main() -> int:
             minute_summary = summarize_minute_results(completed_chunks, minute_settings, preset_labels)
             manifest["preset_labels"] = preset_labels
             manifest["labels"] = minute_summary["labels"]
+            manifest["primary_label"] = minute_summary["labels"][0]
             manifest["minute_summary"] = minute_summary
             manifest["chunk_metadata_schema_version"] = 3
             minute_entry = {"finished": iso_now()}
             enqueue_home_assistant(minute_entry, minute_summary["occupancy"], minute_summary, scope="minute")
             manifest["home_assistant"] = minute_entry.get("home_assistant")
+        else:
+            manifest["preset_labels"] = preset_labels
+            manifest["labels"] = preset_labels or ["no-radar-data"]
+            manifest["primary_label"] = manifest["labels"][0]
+            manifest["minute_summary"] = {
+                "occupancy": {
+                    "label": "unavailable",
+                    "classification": "blue",
+                    "occupied_chunks": 0,
+                    "evaluated_chunks": 0,
+                    "detected_frames": 0,
+                    "evaluated_frames": 0,
+                    "ratio": 0.0,
+                },
+                "labels": manifest["labels"],
+                "activity_labels": ["no-radar-data"],
+                "people_count": 0,
+                "targets": [],
+                "location": None,
+                "score": None,
+            }
 
         radar_files = sorted(str(path) for path in output_dir.glob("radar_*.bin"))
         if radar_files:
