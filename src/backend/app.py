@@ -29,7 +29,6 @@ import tempfile
 import zipfile
 import gzip
 import pickle
-import queue
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections import deque
@@ -167,54 +166,6 @@ os.makedirs(Config.CAPTURE_DATA_DIR, exist_ok=True)
 auth_manager = AuthManager(Config)
 device_manager = DeviceManager(Config)
 terminal_manager = SSHTerminalManager(socketio, Config)
-
-# Chunk predictions are synchronized by the long-lived web process so the
-# one-minute capture subprocess never waits on Brain or loses its final update
-# while exiting. Keeping a single bounded worker also prevents network retries
-# from creating unbounded threads.
-_capture_timeline_queue: queue.Queue[str] = queue.Queue(maxsize=12)
-
-
-def _capture_timeline_worker() -> None:
-    while True:
-        minute = _capture_timeline_queue.get()
-        started = time.monotonic()
-        try:
-            synchronized = device_manager.update_capture_timeline(minute)
-            if not synchronized:
-                logger.warning('Live timeline synchronization failed for %s', minute)
-            else:
-                logger.info(
-                    'Live timeline synchronized for %s in %.0f ms',
-                    minute,
-                    (time.monotonic() - started) * 1000,
-                )
-        except Exception:
-            logger.exception('Live timeline synchronization failed for %s', minute)
-        finally:
-            _capture_timeline_queue.task_done()
-
-
-def _enqueue_capture_timeline(minute: str) -> None:
-    try:
-        _capture_timeline_queue.put_nowait(minute)
-        return
-    except queue.Full:
-        # Prefer the latest manifest snapshot. A later heartbeat includes all
-        # completed chunks, so superseded work can be safely discarded.
-        try:
-            _capture_timeline_queue.get_nowait()
-            _capture_timeline_queue.task_done()
-        except queue.Empty:
-            pass
-    _capture_timeline_queue.put_nowait(minute)
-
-
-threading.Thread(
-    target=_capture_timeline_worker,
-    name='CaptureTimelineSync',
-    daemon=True,
-).start()
 
 # Global state
 collection_active = False
@@ -831,12 +782,8 @@ def _radar_plot_payload(radar_path: Path, plot: str) -> Dict[str, Any]:
     except (TypeError, ValueError):
         threshold_percent = 50.0
     occupancy['threshold_percent'] = threshold_percent
-    yellow = float(settings.get('yellow_threshold_percent', 20.0))
-    green = float(settings.get('green_threshold_percent', 60.0))
     ratio_percent = occupancy['ratio'] * 100.0
-    occupancy['yellow_threshold_percent'] = yellow
-    occupancy['green_threshold_percent'] = green
-    occupancy['classification'] = 'green' if evaluated_frames and ratio_percent >= green else ('yellow' if evaluated_frames and ratio_percent >= yellow else 'red')
+    occupancy['classification'] = 'green' if evaluated_frames and ratio_percent >= threshold_percent else 'red'
     occupancy['label'] = 'occupied' if occupancy['classification'] == 'green' else 'empty'
     payload['occupancy'] = occupancy
     # Live collection owns persistence, automatic labeling, and Home Assistant
@@ -1724,6 +1671,18 @@ def api_home_assistant_test():
     return jsonify(result), (200 if result.get('success') else 502)
 
 
+@app.route('/api/internal/capture-chunk', methods=['POST'])
+def api_internal_capture_chunk():
+    """Forward one compact analyzed chunk to Brain."""
+    if request.remote_addr not in {'127.0.0.1', '::1', None}:
+        return jsonify({'success': False, 'message': 'Local requests only'}), 403
+    payload = request.get_json(silent=True) or {}
+    if not payload.get('minute') or payload.get('chunk_index') is None:
+        return jsonify({'success': False, 'message': 'minute and chunk_index are required'}), 400
+    success = device_manager.publish_capture_chunk(payload)
+    return jsonify({'success': success}), (202 if success else 503)
+
+
 @app.route('/api/internal/home-assistant/publish', methods=['POST'])
 def api_internal_home_assistant_publish():
     """Accept a live chunk from the local collector and return immediately."""
@@ -1862,6 +1821,9 @@ def capture_detail(minute):
 
     files = capture_files(minute_dir)
     detail = minute_summary(minute_dir)
+    manifest_view = json.loads(json.dumps(detail))
+    for chunk in (manifest_view.get("progress") or {}).get("chunks", []):
+        chunk.pop("xy_map", None)
     metrics = minute_metrics(minute_dir)
     video_preview = f"/api/captures/{minute}/file/video" if files.get("video") else None
     radar_preview = preview_text(files.get("radar"), 12000)
@@ -1873,6 +1835,7 @@ def capture_detail(minute):
         minute=minute_dir.name,
         capture=minute_dir,
         minute_info=detail,
+        manifest_view=manifest_view,
         files=files,
         capture_metrics=metrics,
         video_url=video_preview,
@@ -2259,18 +2222,6 @@ def upload_capture_minute(minute):
     if not minute_dir:
         return jsonify({'status': 'error', 'message': 'Minute folder not found'}), 404
 
-    incremental = request.args.get('incremental') in {'1', 'true', 'yes'}
-    if incremental:
-        _enqueue_capture_timeline(minute_dir.name)
-        return jsonify({
-            'status': 'success',
-            'minute': minute_dir.name,
-            'timeline_sync': 'queued',
-            'uploaded': [],
-            'skipped': [],
-            'errors': [],
-        }), 202
-
     summary = minute_summary(minute_dir)
     device_id = getattr(device_manager, 'device_id', None)
     uploaded = []
@@ -2278,7 +2229,16 @@ def upload_capture_minute(minute):
     skipped = []
     import base64
 
-    all_files = sorted(path for path in minute_dir.iterdir() if path.is_file() and not path.name.endswith('.tmp'))
+    all_files = sorted(
+        path for path in minute_dir.iterdir()
+        if path.is_file()
+        and (
+            path.name == 'manifest.json'
+            or path.name == 'wifi_csi.csv'
+            or (path.name.startswith('radar_') and path.suffix == '.bin')
+            or (path.name.startswith('camera_') and path.suffix.lower() in {'.jpg', '.jpeg'})
+        )
+    )
 
     for path in all_files:
         if path.name == 'usb_camera.ffmpeg.log' and path.stat().st_size == 0:
@@ -2290,19 +2250,21 @@ def upload_capture_minute(minute):
             key = 'predictions'
         elif path.name == 'manifest.json':
             key = 'manifest'
-        elif path.name.startswith('mmw_radar_raw_'):
+        elif path.name.startswith('radar_') or path.name.startswith('mmw_radar_raw_'):
             key = 'radar-bin'
         elif path.name.startswith('mmw_radar_xy_'):
             key = 'radar-csv'
-        elif path.name == 'usb_camera.mp4':
-            key = 'video'
+        elif path.name.startswith('camera_'):
+            key = 'camera-image'
         else:
             key = path.stem
         try:
             with open(path, 'rb') as handle:
                 content = base64.b64encode(handle.read()).decode('utf-8')
             suffix = path.suffix.lower()
-            if suffix == '.mp4':
+            if suffix in {'.jpg', '.jpeg'}:
+                content_type = 'image/jpeg'
+            elif suffix == '.mp4':
                 content_type = 'video/mp4'
             elif suffix == '.csv':
                 content_type = 'text/csv'

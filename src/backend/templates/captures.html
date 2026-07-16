@@ -164,14 +164,19 @@
                                 <span class="text-gray-400">Unlabeled</span>
                             {% endif %}
                             {% if minute.progress %}
-                                <div class="mt-3 flex items-start gap-1" aria-label="Chunk timeline" data-chunk-timeline="{{ minute.minute }}">
-                                        {% for chunk in minute.progress.chunks %}
-                                        {% set chunk_detail %}Chunk {{ chunk.index + 1 }}; {{ chunk.prediction if chunk.prediction else chunk.state }}{% if chunk.detected_frames is defined and chunk.detected_frames is not none and chunk.evaluated_frames is defined and chunk.evaluated_frames is not none %}; {{ chunk.detected_frames }} / {{ chunk.evaluated_frames }} frames{% endif %}{% if chunk.ratio is defined and chunk.ratio is not none %}; ratio {{ (chunk.ratio * 100)|round(1) }}%{% endif %}{% if chunk.error is defined and chunk.error %}; {{ chunk.error }}{% endif %}{% endset %}
-                                        <div class="min-w-0 flex-1 text-center" title="{{ chunk_detail|trim }}">
-                                            {% set ratio = chunk.ratio|default(0, true)|float %}{% set thinking = chunk.progress|default(0, true)|float %}
-                                            <div role="img" tabindex="0" title="{{ chunk_detail|trim }}" aria-label="{{ chunk_detail|trim }}" class="mx-auto h-2.5 w-2.5 rounded-full" style="background:{% if chunk.state == 'occupied' %}hsl(145 72% {{ 82-ratio*44 }}%){% elif chunk.state == 'empty' %}hsl(4 78% {{ 44+ratio*40 }}%){% elif chunk.state == 'collecting' %}hsl(217 88% {{ 82-thinking*38 }}%){% elif chunk.state in ['stored','analyzing'] %}hsl(190 82% {{ 80-thinking*35 }}%){% elif chunk.state == 'error' %}hsl(38 92% 52%){% else %}hsl(215 16% 78%){% endif %};transition:background-color .45s ease"></div>
-                                        </div>
-                                        {% endfor %}
+                                {% set latest = namespace(chunk=none) %}
+                                {% for chunk in minute.progress.chunks %}
+                                    {% if chunk.state in ['occupied', 'empty'] %}{% set latest.chunk = chunk %}{% endif %}
+                                {% endfor %}
+                                <div class="mt-3" aria-label="Latest chunk prediction" data-chunk-timeline="{{ minute.minute }}">
+                                    {% if latest.chunk %}
+                                    {% set chunk = latest.chunk %}
+                                    {% set chunk_detail %}Chunk {{ chunk.index + 1 }}; {{ chunk.prediction if chunk.prediction else chunk.state }}{% if chunk.detected_frames is defined and chunk.detected_frames is not none and chunk.evaluated_frames is defined and chunk.evaluated_frames is not none %}; {{ chunk.detected_frames }} / {{ chunk.evaluated_frames }} frames{% endif %}{% if chunk.ratio is defined and chunk.ratio is not none %}; ratio {{ (chunk.ratio * 100)|round(1) }}%{% endif %}{% if chunk.error is defined and chunk.error %}; {{ chunk.error }}{% endif %}{% endset %}
+                                    <div class="inline-flex items-center gap-2" title="{{ chunk_detail|trim }}">
+                                        <div role="img" tabindex="0" title="{{ chunk_detail|trim }}" aria-label="{{ chunk_detail|trim }}" class="h-2.5 w-2.5 rounded-full ring-2 ring-white" style="background:{% if chunk.state == 'occupied' or chunk.classification == 'green' %}hsl(145 68% 39%){% elif chunk.state == 'empty' or chunk.classification == 'red' %}hsl(4 76% 51%){% else %}hsl(217 88% 55%){% endif %}"></div>
+                                        <span class="text-xs font-semibold text-slate-600">Chunk {{ chunk.index + 1 }} · {{ chunk.prediction or chunk.state }}</span>
+                                    </div>
+                                    {% endif %}
                                 </div>
                             {% endif %}
                         </td>
@@ -423,27 +428,23 @@ function closePredictionModal() {
   modal.classList.remove('flex');
 }
 
-function renderChunkDots(progress, sizeClass = 'h-2.5 w-2.5') {
-  return (progress?.chunks || []).map((chunk) => {
-    const ratio = Math.max(0, Math.min(1, Number(chunk.ratio) || 0));
-    const thinking = Math.max(0, Math.min(1, Number(chunk.progress) || 0));
-    const visual = chunk.state === 'occupied'
-      ? `hsl(145 72% ${82 - ratio * 44}%)`
-      : chunk.state === 'empty'
-        ? `hsl(4 78% ${44 + ratio * 40}%)`
-        : chunk.state === 'collecting'
-          ? `hsl(217 88% ${82 - thinking * 38}%)`
-          : ['stored', 'analyzing'].includes(chunk.state)
-            ? `hsl(190 82% ${80 - thinking * 35}%)`
-            : chunk.state === 'error' ? 'hsl(38 92% 52%)' : 'hsl(215 16% 78%)';
-    const frames = chunk.detected_frames == null || chunk.evaluated_frames == null ? '' : `; ${Number(chunk.detected_frames) || 0} / ${Number(chunk.evaluated_frames) || 0} frames`;
-    const people = `; ${Number(chunk.people_count ?? chunk.target_count ?? 0)} people`;
-    const labels = Array.isArray(chunk.labels) && chunk.labels.length ? `; labels ${chunk.labels.join(', ')}` : '';
-    const activity = Array.isArray(chunk.activity_labels) && chunk.activity_labels.length ? `; activity ${chunk.activity_labels.join(', ')}` : '';
-    const detail = 'Chunk ' + (chunk.index + 1) + '; ' + (chunk.prediction || chunk.state || 'waiting') + people + labels + activity + frames + (chunk.ratio == null ? '' : '; ratio ' + (Number(chunk.ratio) * 100).toFixed(1) + '%') + (chunk.error ? '; ' + chunk.error : '');
-    const safeDetail = escapeHtml(detail);
-    return `<div class="min-w-0 flex-1 text-center" title="${safeDetail}"><div role="img" tabindex="0" title="${safeDetail}" aria-label="${safeDetail}" class="mx-auto ${sizeClass} rounded-full ring-2 ring-white" style="background:${visual};box-shadow:0 0 0 1px color-mix(in srgb, ${visual} 55%, transparent);transition:background-color .45s ease,box-shadow .45s ease"></div></div>`;
-  }).join('');
+function renderLatestChunk(progress, sizeClass = 'h-2.5 w-2.5') {
+  const chunks = progress?.chunks || [];
+  const chunk = chunks.filter((entry) => ['occupied', 'empty'].includes(entry.state)).at(-1)
+    || chunks.filter((entry) => entry.state !== 'waiting').at(-1);
+  if (!chunk) return '';
+  const visual = chunk.state === 'occupied' || chunk.classification === 'green'
+    ? 'hsl(145 68% 39%)'
+    : chunk.state === 'empty' || chunk.classification === 'red'
+      ? 'hsl(4 76% 51%)'
+      : 'hsl(217 88% 55%)';
+  const frames = chunk.detected_frames == null || chunk.evaluated_frames == null ? '' : `; ${Number(chunk.detected_frames) || 0} / ${Number(chunk.evaluated_frames) || 0} frames`;
+  const people = `; ${Number(chunk.people_count ?? chunk.target_count ?? 0)} people`;
+  const labels = Array.isArray(chunk.labels) && chunk.labels.length ? `; labels ${chunk.labels.join(', ')}` : '';
+  const activity = Array.isArray(chunk.activity_labels) && chunk.activity_labels.length ? `; activity ${chunk.activity_labels.join(', ')}` : '';
+  const detail = 'Chunk ' + (chunk.index + 1) + '; ' + (chunk.prediction || chunk.state || 'waiting') + people + labels + activity + frames + (chunk.ratio == null ? '' : '; ratio ' + (Number(chunk.ratio) * 100).toFixed(1) + '%') + (chunk.error ? '; ' + chunk.error : '');
+  const safeDetail = escapeHtml(detail);
+  return `<div class="inline-flex items-center gap-2" title="${safeDetail}"><div role="img" tabindex="0" title="${safeDetail}" aria-label="${safeDetail}" class="${sizeClass} rounded-full ring-2 ring-white" style="background:${visual};box-shadow:0 0 0 1px color-mix(in srgb, ${visual} 55%, transparent)"></div><span class="text-xs font-semibold text-slate-600">Chunk ${Number(chunk.index) + 1} · ${escapeHtml(chunk.prediction || chunk.state || 'loading')}</span></div>`;
 }
 
 function renderCaptureRow(minute) {
@@ -456,7 +457,7 @@ function renderCaptureRow(minute) {
   const openUrl = urls.open || `/captures/${encodeURIComponent(minute.minute)}`;
   const downloadUrl = urls.download || `/captures/${encodeURIComponent(minute.minute)}/download`;
   const progress = minute.progress;
-  const progressHtml = progress ? `<div class="mt-3 flex items-start gap-1" aria-label="Chunk timeline" data-chunk-timeline="${name}">${renderChunkDots(progress)}</div>` : '';
+  const progressHtml = progress ? `<div class="mt-3" aria-label="Latest chunk prediction" data-chunk-timeline="${name}">${renderLatestChunk(progress)}</div>` : '';
   return `
     <tr data-minute="${name}" class="${minute.minute === activeMinute ? 'bg-blue-50' : ''}">
       <td class="py-3 pr-4"><input type="checkbox" class="capture-select h-4 w-4" value="${name}" aria-label="Select capture ${name}" ${selectedMinutes.has(minute.minute) ? 'checked' : ''}></td>
@@ -582,7 +583,7 @@ async function refreshActiveTimeline() {
     const response = await fetch(`/api/captures/${encodeURIComponent(activeMinute)}`, { cache: 'no-store' });
     const result = await response.json().catch(() => ({}));
     if (response.ok && result.capture?.progress) {
-      timeline.innerHTML = renderChunkDots(result.capture.progress);
+      timeline.innerHTML = renderLatestChunk(result.capture.progress);
     }
   } finally {
     activeTimelineBusy = false;

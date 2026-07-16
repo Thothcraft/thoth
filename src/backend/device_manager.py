@@ -1007,32 +1007,22 @@ class DeviceManager:
             logger.error(f"Error preparing heartbeat file payload: {e}")
         return None
 
-    def update_capture_timeline(self, minute: str) -> bool:
-        """Publish one minute's metadata immediately as a partial heartbeat."""
+    def publish_capture_chunk(self, payload: Dict[str, Any]) -> bool:
+        """Upsert one analyzed 10-frame chunk through the lightweight live API."""
         if not self.registered or not self.auth_token:
-            return False
-        minute_dir = get_minute(minute)
-        record = self._minute_file_record(minute_dir) if minute_dir else None
-        if record is None:
             return False
         try:
             response = self.session.post(
-                f"{self.config.BRAIN_SERVER_URL}/api/device/heartbeat",
-                json={
-                    "device_id": self.device_id, "online": True,
-                    "collection_active": True, "files": [record],
-                    "inventory_complete": False,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
+                f"{self.config.BRAIN_SERVER_URL}/api/device/{self.device_id}/live-chunks",
+                json=payload,
                 headers={"Authorization": f"Bearer {self.auth_token}", "Content-Type": "application/json"},
                 timeout=5,
             )
-            if response.status_code == 200:
-                self._apply_response_settings(response.json())
+            if response.status_code in (200, 201):
                 return True
-            logger.warning("Live timeline update failed: %s %s", response.status_code, response.text)
+            logger.warning("Live chunk update failed: %s %s", response.status_code, response.text)
         except requests.exceptions.RequestException as exc:
-            logger.warning("Live timeline update failed: %s", exc)
+            logger.warning("Live chunk update failed: %s", exc)
         return False
 
     def _save_registration_info(self, device_info: Dict[str, Any], auth_token: str) -> None:

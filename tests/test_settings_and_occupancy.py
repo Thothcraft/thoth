@@ -221,6 +221,7 @@ class OccupancyTests(unittest.TestCase):
             detected_frames=3,
             yellow_threshold_percent=20,
             green_threshold_percent=60,
+            occupancy_threshold_percent=50,
             last_position=(1.25, 2.5),
             last_score=0.87,
             last_targets=[{"id": 4}, {"id": 8}],
@@ -269,8 +270,8 @@ class OccupancyTests(unittest.TestCase):
         self.assertEqual(occupancy_label(49, 100, 50), "empty")
         self.assertEqual(occupancy_label(0, 0, 0), "empty")
         self.assertEqual(occupancy_region(19, 100, 20, 60), "red")
-        self.assertEqual(occupancy_region(20, 100, 20, 60), "yellow")
-        self.assertEqual(occupancy_region(59, 100, 20, 60), "yellow")
+        self.assertEqual(occupancy_region(20, 100, 20, 60), "red")
+        self.assertEqual(occupancy_region(59, 100, 20, 60), "red")
         self.assertEqual(occupancy_region(60, 100, 20, 60), "green")
 
     def test_radar_peak_gate_uses_normalized_presence_value(self):
@@ -357,6 +358,56 @@ class OccupancyTests(unittest.TestCase):
             self.assertEqual(result["frame_interval_ms"], 5000)
             self.assertTrue(csv_path.exists())
             self.assertFalse(csv_path.with_suffix(".csv.tmp").exists())
+
+    def test_streaming_analyzer_can_analyze_without_creating_radar_csv(self):
+        class Processor:
+            normalized_threshold = 0.45
+            last_detection = {}
+            last_motion_shadow = {"points": [], "intensity": []}
+            last_intensity_views = {}
+
+            def update(self, _frame):
+                self.last_detection = {
+                    "detected": False,
+                    "threshold_normalized": self.normalized_threshold,
+                    "normalized_peak": 0.0,
+                }
+                return []
+
+        room = {"width_m": 4, "depth_m": 5, "height_m": 3, "sensor_wall": "Back", "sensor_position_m": 2, "sensor_height_m": 1}
+        with mock.patch("backend.radar_analysis.load_radar_config", return_value={}):
+            analyzer = StreamingChunkAnalyzer(Processor(), None, 0, 1, room, 0.5, 50, 0, 50, live_state_path=None)
+            with mock.patch("backend.radar_analysis.decode_radar_frame", return_value=(1, object())):
+                for _ in range(10):
+                    self.assertTrue(analyzer.process(b"frame"))
+            result = analyzer.finish()
+        self.assertEqual(result["occupancy"]["evaluated_frames"], 10)
+        self.assertEqual(result["occupancy"]["classification"], "red")
+
+    def test_occupancy_does_not_count_a_track_without_current_map_candidate(self):
+        class Processor:
+            normalized_threshold = 0.45
+            last_detection = {}
+            last_motion_shadow = {"points": [], "intensity": []}
+            last_intensity_views = {}
+
+            def update(self, _frame):
+                self.last_detection = {
+                    "detected": True,
+                    "candidate_count": 0,
+                    "threshold_normalized": self.normalized_threshold,
+                }
+                return [{"id": 1, "lateral_m": 0.2, "forward_m": 1.2, "vertical_m": 1.0}]
+
+        room = {"width_m": 4, "depth_m": 5, "height_m": 3, "sensor_wall": "Back", "sensor_position_m": 2, "sensor_height_m": 1}
+        with mock.patch("backend.radar_analysis.load_radar_config", return_value={}):
+            analyzer = StreamingChunkAnalyzer(Processor(), None, 0, 1, room, 0.5, 50, 0, 50, live_state_path=None)
+            with mock.patch("backend.radar_analysis.decode_radar_frame", return_value=(1, object())):
+                for _ in range(10):
+                    analyzer.process(b"frame")
+            result = analyzer.finish()
+        self.assertEqual(result["occupancy"]["detected_frames"], 0)
+        self.assertEqual(result["occupancy"]["label"], "empty")
 
     def test_chunk_labels_join_metadata_and_minute_vote(self):
         room = {"zones": [{"id": "bed", "label": "Bedroom", "x": 0.5, "y": 0.5, "width": 1.5, "depth": 1.5}]}

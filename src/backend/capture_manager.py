@@ -394,7 +394,7 @@ def list_minute_folders() -> List[Path]:
 
 def _file_map(minute_dir: Path) -> Dict[str, Path]:
     files = {item.name: item for item in minute_dir.iterdir() if item.is_file()}
-    csi_csv = files.get("wifi_csi_raw.csv")
+    csi_csv = files.get("wifi_csi.csv") or files.get("wifi_csi_raw.csv")
     csi_timestamped = files.get("wifi_csi_timestamped.csv")
     csi_serial = files.get("wifi_csi_serial_all.jsonl")
     xy_tracking = files.get("xy-tracking.json")
@@ -412,13 +412,25 @@ def _file_map(minute_dir: Path) -> Dict[str, Path]:
         "csi": csi_timestamped or csi_csv or csi_serial,
     }
     radar_candidates = sorted(
-        [item for item in minute_dir.iterdir() if item.is_file() and item.name.startswith("mmw_radar_raw_") and item.suffix == ".bin"],
+        [
+            item for item in minute_dir.iterdir()
+            if item.is_file()
+            and item.suffix == ".bin"
+            and (item.name.startswith("radar_") or item.name.startswith("mmw_radar_raw_"))
+        ],
         key=lambda p: p.name,
     )
     result["radar"] = radar_candidates[0] if radar_candidates else None
     result["radar_bins"] = radar_candidates
     result["radar_csvs"] = sorted(
         [item for item in minute_dir.iterdir() if item.is_file() and item.name.startswith("mmw_radar_xy_") and item.suffix == ".csv"],
+        key=lambda p: p.name,
+    )
+    result["camera_images"] = sorted(
+        [
+            item for item in minute_dir.iterdir()
+            if item.is_file() and item.name.startswith("camera_") and item.suffix.lower() in {".jpg", ".jpeg"}
+        ],
         key=lambda p: p.name,
     )
     return result
@@ -437,8 +449,7 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
         expected_chunks = max(len(radar_bins), len(radar_csvs), len((predictions or {}).get("timeline") or []), 6)
     expected_chunks = max(1, expected_chunks)
 
-    stored_chunks = min(len(radar_bins), len(radar_csvs)) if radar_bins or radar_csvs else 0
-    analyzed_chunks = len((predictions or {}).get("timeline") or [])
+    stored_chunks = len(radar_bins)
     prediction_entries = {
         int(entry.get("chunk_index")): entry
         for entry in ((predictions or {}).get("timeline") or [])
@@ -453,6 +464,10 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
                 for entry in (radar_output.get("chunks") or [])
                 if isinstance(entry, dict) and str(entry.get("chunk_index", "")).isdigit()
             }
+    analyzed_chunks = sum(
+        str(entry.get("status") or "") in {"occupied", "empty"}
+        for entry in manifest_chunks.values()
+    )
     chunks = []
     for index in range(expected_chunks):
         prediction = prediction_entries.get(index)
@@ -467,7 +482,9 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
             state = "error"
         elif prediction:
             state = "occupied" if prediction.get("occupied") is True else "empty"
-        elif manifest_status == "collecting":
+        elif manifest_status in {"occupied", "empty"}:
+            state = manifest_status
+        elif manifest_status in {"loading", "collecting", "analyzing"}:
             state = "collecting"
         elif manifest_status == "stored":
             state = "stored"
@@ -497,8 +514,6 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
             "score": prediction.get("score") if prediction else manifest_chunk.get("score"),
             "ratio": prediction.get("ratio") if prediction else manifest_chunk.get("ratio"),
             "classification": prediction.get("classification") if prediction else manifest_chunk.get("classification"),
-            "yellow_threshold_percent": prediction.get("yellow_threshold_percent") if prediction else manifest_chunk.get("yellow_threshold_percent", 20.0),
-            "green_threshold_percent": prediction.get("green_threshold_percent") if prediction else manifest_chunk.get("green_threshold_percent", 60.0),
             "progress": visual_progress,
             "targets": prediction.get("targets") if prediction else manifest_chunk.get("targets", []),
             "target_count": prediction.get("target_count") if prediction else len(manifest_chunk.get("targets") or []),
@@ -515,6 +530,8 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
                 prediction.get("evaluated_frames") if prediction
                 else manifest_chunk.get("evaluated_frames")
             ),
+            "xy_map": ((manifest_chunk.get("analysis") or {}).get("xy_map") if isinstance(manifest_chunk.get("analysis"), dict) else None),
+            "camera_filename": Path(str(manifest_chunk.get("camera_path") or "")).name or None,
             "error": manifest_chunk.get("error"),
         })
     storage_percent = min(100.0, (stored_chunks / expected_chunks) * 100.0) if expected_chunks else 0.0
@@ -558,7 +575,7 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
         "occupancy": ((manifest.get("minute_summary") or {}).get("occupancy") or manifest.get("auto_occupancy_label")) if isinstance(manifest, dict) else None,
         "predictions": bool(files["predictions"] and files["predictions"].exists()),
         "files": {
-            "video": bool(files["video"] and files["video"].exists()),
+            "video": bool((files["video"] and files["video"].exists()) or files.get("camera_images")),
             "radar": bool(files["radar"] and files["radar"].exists()),
             "xy_tracking": bool(files.get("xy_tracking") and files["xy_tracking"].exists()),
             "csi": bool((files["csi_csv"] and files["csi_csv"].exists()) or (files["csi_timestamped"] and files["csi_timestamped"].exists()) or (files["csi_serial"] and files["csi_serial"].exists())),
@@ -567,8 +584,8 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
             "predictions": bool(files["predictions"] and files["predictions"].exists()),
         },
         "sizes": {
-            "video": files["video"].stat().st_size if files["video"] and files["video"].exists() else 0,
-            "radar": files["radar"].stat().st_size if files["radar"] and files["radar"].exists() else 0,
+            "video": sum(path.stat().st_size for path in (files.get("camera_images") or [])) or (files["video"].stat().st_size if files["video"] and files["video"].exists() else 0),
+            "radar": sum(path.stat().st_size for path in (files.get("radar_bins") or [])),
             "xy_tracking": files["xy_tracking"].stat().st_size if files.get("xy_tracking") and files["xy_tracking"].exists() else 0,
             "csi_csv": files["csi_csv"].stat().st_size if files["csi_csv"] and files["csi_csv"].exists() else 0,
             "csi_timestamped": files["csi_timestamped"].stat().st_size if files["csi_timestamped"] and files["csi_timestamped"].exists() else 0,

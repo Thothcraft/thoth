@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import math
 import os
@@ -211,7 +212,13 @@ def _live_intensity_payload(processor: Any, room: Dict[str, Any]) -> Dict[str, A
     elevation = np.asarray(views.get("elevation_deg"), dtype=float)
     xy_values = np.asarray(views.get("xy"), dtype=float)
     yz_values = np.asarray(views.get("yz"), dtype=float)
-    if not ranges.size or xy_values.shape != (len(ranges), len(azimuth)):
+    if (
+        ranges.ndim != 1
+        or azimuth.ndim != 1
+        or not ranges.size
+        or not azimuth.size
+        or xy_values.shape != (ranges.size, azimuth.size)
+    ):
         return {}
 
     width = float(room.get("width_m") or 5.0)
@@ -303,16 +310,10 @@ def occupancy_region(
     yellow_threshold_percent: float,
     green_threshold_percent: float,
 ) -> str:
-    """Classify a completed chunk from its evaluated-frame detection ratio."""
-    yellow, green = validate_region_thresholds(yellow_threshold_percent, green_threshold_percent)
-    if evaluated_frames <= 0:
-        return "red"
-    ratio_percent = max(0, detected_frames) * 100.0 / evaluated_frames
-    if ratio_percent >= green:
-        return "green"
-    if ratio_percent >= yellow:
-        return "yellow"
-    return "red"
+    """Return the legacy binary color using the occupied threshold."""
+    return "green" if occupancy_label(
+        detected_frames, evaluated_frames, green_threshold_percent
+    ) == "occupied" else "red"
 
 
 def occupancy_label(detected_frames: int, evaluated_frames: int, threshold_percent: float) -> str:
@@ -414,7 +415,7 @@ class StreamingChunkAnalyzer:
     def __init__(
         self,
         processor: Any,
-        csv_path: Path,
+        csv_path: Optional[Path],
         chunk_index: int,
         chunk_seconds: float,
         room: Dict[str, Any],
@@ -431,7 +432,7 @@ class StreamingChunkAnalyzer:
         )
         self.radar_config = getattr(processor, "radar_config", None) or load_radar_config()
         self.csv_path = csv_path
-        self.csv_temporary = csv_path.with_suffix(f"{csv_path.suffix}.tmp")
+        self.csv_temporary = csv_path.with_suffix(f"{csv_path.suffix}.tmp") if csv_path else None
         self.chunk_index = chunk_index
         self.chunk_seconds = chunk_seconds
         self.room = room
@@ -452,27 +453,33 @@ class StreamingChunkAnalyzer:
         self.max_processing_seconds = 0.0
         self.max_queue_lag_ms = 0.0
         self.playback_frames: List[Dict[str, Any]] = []
+        self.invalid_frames = 0
         self.live_state_path = live_state_path
         self.last_live_publish = 0.0
         self.frame_times: deque[float] = deque(maxlen=60)
         self.configured_frame_rate_hz = float(self.radar_config.get("frame_rate") or 0.0)
         self.max_visualization_frames = 48
         self.max_point_frames = 32
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = open(self.csv_temporary, "w", encoding="utf-8", newline="", buffering=64 * 1024)
+        if csv_path and self.csv_temporary:
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            self.handle = open(self.csv_temporary, "w", encoding="utf-8", newline="", buffering=64 * 1024)
+        else:
+            self.handle = io.StringIO()
         self.writer = csv.DictWriter(self.handle, fieldnames=self.FIELDNAMES)
         self.writer.writeheader()
 
-    def process(self, full_frame: bytes) -> None:
+    def process(self, full_frame: bytes) -> bool:
         processing_started = time.perf_counter()
         decoded = decode_radar_frame(full_frame, self.radar_config)
         if decoded is None:
-            return
+            self.invalid_frames += 1
+            return False
         seq, frame = decoded
         try:
             targets = self.processor.update(frame)
         except Exception:
-            return
+            self.invalid_frames += 1
+            return False
         detection = dict(self.processor.last_detection or {})
         shadow = dict(self.processor.last_motion_shadow or {})
         shadow_points = np.asarray(shadow.get("points") if shadow.get("points") is not None else np.empty((0, 3)), dtype=float)
@@ -482,9 +489,13 @@ class StreamingChunkAnalyzer:
         self.frame_times.append(time.monotonic())
         serialized_targets = [_serialize_target(target, self.room) for target in targets]
         self.last_targets = self.identity.assign(serialized_targets) if self.identity else serialized_targets
-        # Live visualization and chunk labeling share this exact signal.
-        person_detected = bool(self.last_targets)
-        detection["signal_detected"] = bool(detection.get("detected"))
+        # Occupancy follows current normalized-map candidates, not tracks that
+        # persist briefly to smooth coordinates after a missed signal frame.
+        if "candidate_count" in detection:
+            person_detected = int(detection.get("candidate_count") or 0) > 0
+        else:
+            person_detected = bool(detection.get("detected"))
+        detection["signal_detected"] = person_detected
         detection["detected"] = person_detected
         if person_detected:
             self.detected_frames += 1
@@ -559,6 +570,7 @@ class StreamingChunkAnalyzer:
         elapsed = time.perf_counter() - processing_started
         self.processing_seconds += elapsed
         self.max_processing_seconds = max(self.max_processing_seconds, elapsed)
+        return True
 
     def _write_live_state(self, world_points: np.ndarray) -> None:
         """Publish the analyzed frame without blocking capture or the dashboard."""
@@ -618,7 +630,8 @@ class StreamingChunkAnalyzer:
         finalization_started = time.perf_counter()
         self.handle.flush()
         self.handle.close()
-        self.csv_temporary.replace(self.csv_path)
+        if self.csv_path and self.csv_temporary:
+            self.csv_temporary.replace(self.csv_path)
         if self.identity:
             self.identity.save()
         points = np.vstack(self.chunk_points) if self.chunk_points else np.empty((0, 3), dtype=float)
@@ -633,11 +646,12 @@ class StreamingChunkAnalyzer:
             for row, column, value in latest_intensity["z_sparse"]:
                 z[row][column] = value
         ratio = self.detected_frames / self.evaluated_frames if self.evaluated_frames else 0.0
-        classification = occupancy_region(
-            self.detected_frames, self.evaluated_frames,
-            self.yellow_threshold_percent, self.green_threshold_percent,
+        label = occupancy_label(
+            self.detected_frames,
+            self.evaluated_frames,
+            self.occupancy_threshold_percent,
         )
-        label = "occupied" if classification == "green" else "empty"
+        classification = "green" if label == "occupied" else "red"
         primary = self.last_targets[0] if self.last_targets else None
         frame = {
             "name": f"chunk-{self.chunk_index:02d}", "index": self.chunk_index,
@@ -660,14 +674,14 @@ class StreamingChunkAnalyzer:
             "updated": datetime.now(timezone.utc).isoformat(),
             "occupancy": {"label": label, "classification": classification, "detected_frames": self.detected_frames, "evaluated_frames": self.evaluated_frames,
                           "ratio": ratio, "threshold_percent": self.occupancy_threshold_percent,
-                          "yellow_threshold_percent": self.yellow_threshold_percent,
-                          "green_threshold_percent": self.green_threshold_percent,
                           "chunk_seconds": self.chunk_seconds},
             "location": self.last_position, "score": self.last_score, "detected": label == "occupied",
             "snr_db": frame["snr_db"], "threshold_normalized": frame["threshold_normalized"], "peak_power_db": frame["peak_power_db"],
             "noise_floor_db": frame["noise_floor_db"], "targets": self.last_targets,
             "motion_points": frame["motion_points"], "chunk_index": self.chunk_index,
             "chunk_seconds": self.chunk_seconds, "room": self.room,
+            "xy_map": (_live_intensity_payload(self.processor, self.room).get("xy") or {}),
+            "invalid_frames": self.invalid_frames,
         }
         payload["performance"] = {
             "average_processing_ms": round(self.processing_seconds * 1000 / max(1, self.evaluated_frames), 3),

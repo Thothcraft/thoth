@@ -57,9 +57,10 @@
 
       <div class="grid gap-4 md:grid-cols-2">
         <label class="block rounded-xl border border-slate-300 bg-slate-50 p-4">
-          <span class="block text-base font-semibold text-slate-950">Seconds per chunk</span>
-          <span class="mt-1 block text-sm text-slate-600">Applied at the next minute. Shorter chunks produce faster decisions and more timeline dots.</span>
-          <input type="number" name="chunk_seconds" min="2" max="30" step="0.5" value="{{ device_settings.chunk_seconds|default(10.0) }}" class="mt-3 w-full rounded-lg border border-slate-400 bg-white px-3 py-2 text-slate-950">
+          <span class="block text-base font-semibold text-slate-950">Frames per chunk</span>
+          <span class="mt-1 block text-sm text-slate-600">Fixed at 10 complete radar frames for consistent analysis.</span>
+          <div class="mt-3 rounded-lg border border-slate-400 bg-white px-3 py-2 font-mono text-slate-950">10 frames</div>
+          <input type="hidden" name="chunk_seconds" value="{{ device_settings.chunk_seconds|default(10.0) }}">
         </label>
         <label class="block rounded-xl border border-slate-300 bg-slate-50 p-4">
           <span class="block text-base font-semibold text-slate-950">System mode</span>
@@ -94,17 +95,9 @@
         <input type="checkbox" name="auto_occupancy_label_enabled" class="mt-1 h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" {% if device_settings.auto_occupancy_label_enabled|default(true) %}checked{% endif %}>
       </label>
 
-      <fieldset class="rounded-xl border border-slate-300 bg-slate-50 p-4">
-        <legend class="px-1 text-base font-semibold text-slate-950">Detection regions</legend>
-        <p class="mt-1 text-sm text-slate-600">Completed chunks are red below the yellow boundary, yellow between the boundaries, and green at or above the green boundary.</p>
-        <label class="mt-4 block text-sm text-slate-700">Yellow begins
-          <span class="mt-2 flex items-center gap-3"><input type="range" name="yellow_threshold_percent" min="0" max="99" step="1" value="{{ device_settings.yellow_threshold_percent|default(20.0) }}" class="h-2 flex-1 accent-amber-400" oninput="document.getElementById('yellow-threshold-value').textContent = Number(this.value).toFixed(0) + '%'"> <output id="yellow-threshold-value" class="w-20 text-right font-mono text-sm text-amber-700">{{ '%.0f'|format(device_settings.yellow_threshold_percent|default(20.0)|float) }}%</output></span>
-        </label>
-        <label class="mt-4 block text-sm text-slate-700">Green begins
-          <span class="mt-2 flex items-center gap-3"><input type="range" name="green_threshold_percent" min="1" max="100" step="1" value="{{ device_settings.green_threshold_percent|default(60.0) }}" class="h-2 flex-1 accent-emerald-500" oninput="document.getElementById('green-threshold-value').textContent = Number(this.value).toFixed(0) + '%'"> <output id="green-threshold-value" class="w-20 text-right font-mono text-sm text-emerald-700">{{ '%.0f'|format(device_settings.green_threshold_percent|default(60.0)|float) }}%</output></span>
-        </label>
-        <input type="hidden" name="occupancy_threshold_percent" value="{{ device_settings.occupancy_threshold_percent|default(50.0) }}">
-      </fieldset>
+      <label class="rounded-xl border border-slate-300 bg-slate-50 p-4 text-sm text-slate-700">Occupied when detected frames reach
+        <span class="mt-2 flex items-center gap-3"><input type="range" name="occupancy_threshold_percent" min="10" max="100" step="10" value="{{ device_settings.occupancy_threshold_percent|default(50.0) }}" class="h-2 flex-1 accent-emerald-500" oninput="document.getElementById('occupancy-threshold-value').textContent = Number(this.value).toFixed(0) + '%'"> <output id="occupancy-threshold-value" class="w-20 text-right font-mono text-sm text-emerald-700">{{ '%.0f'|format(device_settings.occupancy_threshold_percent|default(50.0)|float) }}%</output></span>
+      </label>
 
       <label class="flex items-start justify-between gap-4 rounded-xl border border-slate-300 bg-slate-50 p-4">
         <span>
@@ -140,8 +133,6 @@ document.getElementById('settings-form').addEventListener('submit', async (event
   payload.radar_detection_threshold_normalized = Number(event.target.radar_detection_threshold_normalized.value);
   payload.auto_occupancy_label_enabled = event.target.auto_occupancy_label_enabled.checked;
   payload.occupancy_threshold_percent = Number(event.target.occupancy_threshold_percent.value);
-  payload.yellow_threshold_percent = Number(event.target.yellow_threshold_percent.value);
-  payload.green_threshold_percent = Number(event.target.green_threshold_percent.value);
   payload.chunk_seconds = Number(event.target.chunk_seconds.value);
   payload.system_mode = event.target.system_mode.value;
   payload.labels = event.target.labels.value.split(',').map((item) => item.trim()).filter(Boolean);
@@ -152,11 +143,6 @@ document.getElementById('settings-form').addEventListener('submit', async (event
   payload.home_assistant_base_url = event.target.home_assistant_base_url.value;
   payload.home_assistant_entity_id = event.target.home_assistant_entity_id.value;
   payload.home_assistant_token = event.target.home_assistant_token.value;
-
-  if (payload.yellow_threshold_percent >= payload.green_threshold_percent) {
-    showAlert('Yellow threshold must be lower than green threshold.', 'error');
-    return;
-  }
 
   const saveStatus = document.getElementById('save-status');
   saveStatus.textContent = 'Saving…';
@@ -174,8 +160,6 @@ document.getElementById('settings-form').addEventListener('submit', async (event
     event.target.auto_occupancy_label_enabled.checked = canonical.auto_occupancy_label_enabled !== false;
     event.target.radar_detection_threshold_normalized.value = canonical.radar_detection_threshold_normalized ?? 0.45;
     event.target.occupancy_threshold_percent.value = canonical.occupancy_threshold_percent ?? 50;
-    event.target.yellow_threshold_percent.value = canonical.yellow_threshold_percent ?? 20;
-    event.target.green_threshold_percent.value = canonical.green_threshold_percent ?? 60;
     event.target.chunk_seconds.value = canonical.chunk_seconds ?? 10;
     event.target.system_mode.value = canonical.system_mode ?? 'balanced';
     event.target.labels.value = (canonical.labels || []).join(', ');
@@ -183,8 +167,7 @@ document.getElementById('settings-form').addEventListener('submit', async (event
     event.target.prediction_label_style.value = canonical.prediction_label_style ?? 'occupancy';
     event.target.people_count_label_enabled.checked = canonical.people_count_label_enabled === true;
     document.getElementById('radar-threshold-value').textContent = Number(event.target.radar_detection_threshold_normalized.value).toFixed(2);
-    document.getElementById('yellow-threshold-value').textContent = Number(event.target.yellow_threshold_percent.value).toFixed(0) + '%';
-    document.getElementById('green-threshold-value').textContent = Number(event.target.green_threshold_percent.value).toFixed(0) + '%';
+    document.getElementById('occupancy-threshold-value').textContent = Number(event.target.occupancy_threshold_percent.value).toFixed(0) + '%';
     event.target.home_assistant_token.value = '';
     saveStatus.textContent = canonical.sync_pending ? 'Saved locally · cloud sync pending' : 'Saved';
     showAlert(saveStatus.textContent, 'success');
