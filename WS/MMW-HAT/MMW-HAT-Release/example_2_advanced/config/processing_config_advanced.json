@@ -7,7 +7,7 @@
     "max_range_m": 4.8,
     "dead_zone": 0.5,
     "detection": {
-        "threshold_db": 3.0,
+        "normalized_threshold": 0.45,
         "cfar_training_range": 17,
         "cfar_training_angle": 17,
         "cfar_guard_range": 5,
@@ -37,8 +37,6 @@
         "max_misses": 70,
         "association_distance_m": 1.8,
         "track_merge_distance_m": 2.0,
-        "static_support_threshold_db": 1.5,
-        "static_reference_tolerance_db": 4.0,
         "alpha": 0.28,
         "beta": 0.045
     }

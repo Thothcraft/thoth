@@ -48,10 +48,10 @@
 
       <label class="block rounded-xl border border-slate-300 bg-slate-50 p-4">
         <span class="block text-base font-semibold text-slate-950">Radar detection threshold</span>
-        <span class="mt-1 block text-sm text-slate-400">Required signal above the measured noise floor. Raise it to reject more noise; lower it for weaker or more distant people.</span>
+        <span class="mt-1 block text-sm text-slate-600">Minimum value on the normalized /presence intensity map. Raise it to reject more noise; lower it for weaker or more distant people.</span>
         <span class="mt-4 flex items-center gap-3">
-          <input type="range" name="radar_detection_threshold_db" min="0" max="24" step="0.5" value="{{ device_settings.radar_detection_threshold_db|default(8.0) }}" class="h-2 flex-1 accent-cyan-400" oninput="document.getElementById('radar-threshold-value').textContent = Number(this.value).toFixed(1) + ' dB'">
-          <output id="radar-threshold-value" class="w-20 text-right font-mono text-sm text-cyan-300">{{ '%.1f'|format(device_settings.radar_detection_threshold_db|default(8.0)|float) }} dB</output>
+          <input type="range" name="radar_detection_threshold_normalized" min="0.05" max="0.95" step="0.01" value="{{ device_settings.radar_detection_threshold_normalized|default(0.45) }}" class="h-2 flex-1 accent-cyan-600" oninput="document.getElementById('radar-threshold-value').textContent = Number(this.value).toFixed(2)">
+          <output id="radar-threshold-value" class="w-20 text-right font-mono text-sm text-cyan-700">{{ '%.2f'|format(device_settings.radar_detection_threshold_normalized|default(0.45)|float) }}</output>
         </span>
       </label>
 
@@ -137,7 +137,7 @@ document.getElementById('settings-form').addEventListener('submit', async (event
   const payload = Object.fromEntries(form.entries());
   payload.portal_upload_allowed = event.target.portal_upload_allowed.checked;
   payload.cloud_sync_allowed = event.target.cloud_sync_allowed.checked;
-  payload.radar_detection_threshold_db = Number(event.target.radar_detection_threshold_db.value);
+  payload.radar_detection_threshold_normalized = Number(event.target.radar_detection_threshold_normalized.value);
   payload.auto_occupancy_label_enabled = event.target.auto_occupancy_label_enabled.checked;
   payload.occupancy_threshold_percent = Number(event.target.occupancy_threshold_percent.value);
   payload.yellow_threshold_percent = Number(event.target.yellow_threshold_percent.value);
@@ -172,7 +172,7 @@ document.getElementById('settings-form').addEventListener('submit', async (event
     event.target.portal_upload_allowed.checked = canonical.portal_upload_allowed !== false;
     event.target.cloud_sync_allowed.checked = canonical.cloud_sync_allowed !== false;
     event.target.auto_occupancy_label_enabled.checked = canonical.auto_occupancy_label_enabled !== false;
-    event.target.radar_detection_threshold_db.value = canonical.radar_detection_threshold_db ?? 8;
+    event.target.radar_detection_threshold_normalized.value = canonical.radar_detection_threshold_normalized ?? 0.45;
     event.target.occupancy_threshold_percent.value = canonical.occupancy_threshold_percent ?? 50;
     event.target.yellow_threshold_percent.value = canonical.yellow_threshold_percent ?? 20;
     event.target.green_threshold_percent.value = canonical.green_threshold_percent ?? 60;
@@ -182,7 +182,7 @@ document.getElementById('settings-form').addEventListener('submit', async (event
     event.target.occupancy_vote_chunks.value = canonical.occupancy_vote_chunks ?? 1;
     event.target.prediction_label_style.value = canonical.prediction_label_style ?? 'occupancy';
     event.target.people_count_label_enabled.checked = canonical.people_count_label_enabled === true;
-    document.getElementById('radar-threshold-value').textContent = Number(event.target.radar_detection_threshold_db.value).toFixed(1) + ' dB';
+    document.getElementById('radar-threshold-value').textContent = Number(event.target.radar_detection_threshold_normalized.value).toFixed(2);
     document.getElementById('yellow-threshold-value').textContent = Number(event.target.yellow_threshold_percent.value).toFixed(0) + '%';
     document.getElementById('green-threshold-value').textContent = Number(event.target.green_threshold_percent.value).toFixed(0) + '%';
     event.target.home_assistant_token.value = '';

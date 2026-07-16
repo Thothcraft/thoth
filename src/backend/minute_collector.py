@@ -178,7 +178,7 @@ def write_json_atomic(path: Path, payload: object) -> None:
 
 def load_processing_settings() -> dict[str, Any]:
     defaults: dict[str, Any] = {
-        "radar_detection_threshold_db": 8.0,
+        "radar_detection_threshold_normalized": 0.45,
         "occupancy_threshold_percent": 50.0,
         "yellow_threshold_percent": 20.0,
         "green_threshold_percent": 60.0,
@@ -191,15 +191,22 @@ def load_processing_settings() -> dict[str, Any]:
         "revision": 0,
         "updated_at": None,
     }
+    loaded: dict[str, Any] = {}
     try:
-        loaded = json.loads(CAPTURE_SETTINGS_PATH.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            defaults.update({key: loaded[key] for key in defaults if key in loaded})
+        parsed = json.loads(CAPTURE_SETTINGS_PATH.read_text(encoding="utf-8"))
+        loaded = parsed if isinstance(parsed, dict) else {}
+        defaults.update({key: loaded[key] for key in defaults if key in loaded})
     except FileNotFoundError:
         pass
     except Exception as exc:
         print(f"Unable to load processing settings: {exc}", file=sys.stderr)
-    defaults["radar_detection_threshold_db"] = min(40.0, max(0.0, float(defaults["radar_detection_threshold_db"])))
+    if "radar_detection_threshold_normalized" not in loaded:
+        legacy_db = loaded.get("radar_detection_threshold_db")
+        if legacy_db is not None:
+            defaults["radar_detection_threshold_normalized"] = float(legacy_db) / 10.0
+    defaults["radar_detection_threshold_normalized"] = min(
+        0.95, max(0.05, float(defaults["radar_detection_threshold_normalized"]))
+    )
     defaults["occupancy_threshold_percent"] = min(100.0, max(0.0, float(defaults["occupancy_threshold_percent"])))
     defaults["yellow_threshold_percent"] = min(100.0, max(0.0, float(defaults["yellow_threshold_percent"])))
     defaults["green_threshold_percent"] = min(100.0, max(0.0, float(defaults["green_threshold_percent"])))
@@ -314,7 +321,9 @@ def annotate_chunk_result(
         "settings_snapshot": {
             "revision": int(settings.get("revision") or 0),
             "system_mode": str(settings.get("system_mode") or "balanced"),
-            "radar_detection_threshold_db": float(settings.get("radar_detection_threshold_db") or 8.0),
+            "radar_detection_threshold_normalized": float(
+                settings.get("radar_detection_threshold_normalized") or 0.45
+            ),
             "yellow_threshold_percent": float(settings.get("yellow_threshold_percent") or 20.0),
             "green_threshold_percent": float(settings.get("green_threshold_percent") or 60.0),
             "chunk_seconds": float(result.get("chunk_seconds") or settings.get("chunk_seconds") or 10.0),
@@ -877,10 +886,10 @@ def main() -> int:
                 f"http://127.0.0.1:5000/api/captures/{folder_name}/upload?incremental=1&chunk={index}",
                 method="POST",
             )
-            with urllib.request.urlopen(request, timeout=120):
+            with urllib.request.urlopen(request, timeout=2.0):
                 pass
         except Exception as exc:
-            print(f"Live chunk {index} upload deferred: {exc}", file=sys.stderr)
+            print(f"Live timeline update {index} deferred: {exc}", file=sys.stderr)
 
     def enqueue_home_assistant(entry: dict[str, Any], occupancy: dict[str, Any], result: dict[str, Any], scope: str = "chunk") -> None:
         payload = json.dumps({
@@ -942,6 +951,7 @@ def main() -> int:
         identity: PersistentTargetIdentity | None = None
         entry: dict[str, Any] | None = None
         settings_snapshot: dict[str, Any] = {}
+        last_timeline_publish = 0.0
         while True:
             job = analysis_queue.get()
             try:
@@ -950,6 +960,7 @@ def main() -> int:
                 kind = job[0]
                 if kind == "start":
                     entry, settings_snapshot = job[1], job[2]
+                    last_timeline_publish = 0.0
                     if identity is None:
                         mode = str(settings_snapshot.get("system_mode") or "balanced")
                         identity = PersistentTargetIdentity(mode=mode)
@@ -958,7 +969,7 @@ def main() -> int:
                     analyzer = StreamingChunkAnalyzer(
                         processor, Path(entry["csv_path"]), int(entry["chunk_index"]),
                         float(entry["chunk_seconds"]), room_config,
-                        float(settings_snapshot["radar_detection_threshold_db"]),
+                        float(settings_snapshot["radar_detection_threshold_normalized"]),
                         float(settings_snapshot["occupancy_threshold_percent"]),
                         float(settings_snapshot["yellow_threshold_percent"]),
                         float(settings_snapshot["green_threshold_percent"]),
@@ -970,6 +981,36 @@ def main() -> int:
                     if analyzer is not None and frame_entry is entry:
                         analyzer.max_queue_lag_ms = max(analyzer.max_queue_lag_ms, (time.monotonic() - float(job[3])) * 1000)
                         analyzer.process(job[2])
+                        now = time.monotonic()
+                        if now - last_timeline_publish >= 0.75:
+                            evaluated = analyzer.evaluated_frames
+                            detected = analyzer.detected_frames
+                            ratio = detected / evaluated if evaluated else 0.0
+                            classification = occupancy_region(
+                                detected,
+                                evaluated,
+                                analyzer.yellow_threshold_percent,
+                                analyzer.green_threshold_percent,
+                            )
+                            entry.update({
+                                "status": "collecting",
+                                "detected_frames": detected,
+                                "evaluated_frames": evaluated,
+                                "ratio": ratio,
+                                "classification": classification,
+                                "occupied": classification == "green",
+                                "location": list(analyzer.last_position),
+                                "score": analyzer.last_score,
+                                "people_count": len(analyzer.last_targets),
+                                "targets": analyzer.last_targets,
+                            })
+                            with publish_lock:
+                                write_live_manifest()
+                            try:
+                                upload_queue.put_nowait(int(entry["chunk_index"]))
+                            except queue.Full:
+                                pass
+                            last_timeline_publish = now
                     continue
                 if kind != "end" or analyzer is None or entry is None:
                     continue

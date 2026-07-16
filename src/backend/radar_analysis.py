@@ -277,6 +277,26 @@ def _live_intensity_payload(processor: Any, room: Dict[str, Any]) -> Dict[str, A
     }
 
 
+def _xy_intensity_frame(processor: Any, room: Dict[str, Any]) -> Dict[str, Any]:
+    """Serialize the exact normalized XY map used by /presence."""
+    xy = (_live_intensity_payload(processor, room).get("xy") or {})
+    rows, columns = int(xy.get("rows") or 0), int(xy.get("columns") or 0)
+    values = np.asarray(xy.get("values") or [], dtype=float)
+    if not rows or not columns or values.size != rows * columns:
+        return {}
+    normalized = values.reshape(rows, columns) / 255.0
+    active = np.argwhere(normalized > 0.0)
+    return {
+        "x": np.linspace(0.0, float(room.get("width_m") or 5.0), columns).round(4).tolist(),
+        "y": np.linspace(0.0, float(room.get("depth_m") or 5.0), rows).round(4).tolist(),
+        "z_shape": [rows, columns],
+        "z_sparse": [
+            [int(row), int(column), round(float(normalized[row, column]), 4)]
+            for row, column in active
+        ],
+    }
+
+
 def occupancy_region(
     detected_frames: int,
     evaluated_frames: int,
@@ -387,7 +407,7 @@ class StreamingChunkAnalyzer:
     FIELDNAMES = [
         "chunk_index", "frame_index", "seq", "detected", "target_count", "occupied",
         "primary_target_id", "x_m", "y_m", "z_m", "width_m", "depth_m", "height_m",
-        "pose", "snr_db", "score", "noise_floor_db", "threshold_db", "peak_power_db",
+        "pose", "snr_db", "score", "noise_floor_db", "threshold_normalized", "peak_power_db",
         "motion_points", "targets_json", "shadow_points_json",
     ]
 
@@ -398,7 +418,7 @@ class StreamingChunkAnalyzer:
         chunk_index: int,
         chunk_seconds: float,
         room: Dict[str, Any],
-        radar_detection_threshold_db: float,
+        radar_detection_threshold_normalized: float,
         occupancy_threshold_percent: float,
         yellow_threshold_percent: float = 20.0,
         green_threshold_percent: float = 60.0,
@@ -406,7 +426,9 @@ class StreamingChunkAnalyzer:
         live_state_path: Optional[Path] = LIVE_OCCUPANCY_PATH,
     ):
         self.processor = processor
-        self.processor.threshold_db = min(40.0, max(0.0, float(radar_detection_threshold_db)))
+        self.processor.normalized_threshold = min(
+            0.95, max(0.05, float(radar_detection_threshold_normalized))
+        )
         self.radar_config = getattr(processor, "radar_config", None) or load_radar_config()
         self.csv_path = csv_path
         self.csv_temporary = csv_path.with_suffix(f"{csv_path.suffix}.tmp")
@@ -470,7 +492,11 @@ class StreamingChunkAnalyzer:
         if self.last_targets:
             lead = self.last_targets[0]
             self.last_position = [float(lead["position"][0]), float(lead["position"][1])]
-            self.last_score = float(lead.get("snr_db") or detection.get("cfar_peak_db") or 0.0)
+            self.last_score = float(
+                lead.get("normalized_peak")
+                or detection.get("normalized_peak")
+                or 0.0
+            )
 
         world_points = _world_points_from_local(shadow_points, self.room)
         if world_points.size:
@@ -486,6 +512,7 @@ class StreamingChunkAnalyzer:
 
         primary = self.last_targets[0] if self.last_targets else None
         self.playback_frames.append({
+            **_xy_intensity_frame(self.processor, self.room),
             "name": f"chunk-{self.chunk_index:02d}-frame-{frame_index:04d}",
             "index": frame_index,
             "chunk_index": self.chunk_index,
@@ -494,7 +521,10 @@ class StreamingChunkAnalyzer:
             "score": self.last_score,
             "detected": bool(detection.get("detected")),
             "snr_db": float(primary.get("snr_db")) if primary else float(detection.get("cfar_peak_db") or 0.0),
-            "threshold_db": float(detection.get("threshold_db") or self.processor.threshold_db),
+            "threshold_normalized": float(
+                detection.get("threshold_normalized")
+                or self.processor.normalized_threshold
+            ),
             "targets": self.last_targets,
         })
         if len(self.playback_frames) > self.max_visualization_frames:
@@ -518,7 +548,9 @@ class StreamingChunkAnalyzer:
             "snr_db": primary["snr_db"] if primary else "",
             "score": self.last_score,
             "noise_floor_db": detection.get("noise_floor_db", ""),
-            "threshold_db": detection.get("threshold_db", self.processor.threshold_db),
+            "threshold_normalized": detection.get(
+                "threshold_normalized", self.processor.normalized_threshold
+            ),
             "peak_power_db": detection.get("cfar_peak_db", ""),
             "motion_points": int(detection.get("motion_points") or 0),
             "targets_json": json.dumps(self.last_targets, separators=(",", ":")),
@@ -592,6 +624,14 @@ class StreamingChunkAnalyzer:
         points = np.vstack(self.chunk_points) if self.chunk_points else np.empty((0, 3), dtype=float)
         weights = np.concatenate(self.chunk_weights) if self.chunk_weights else np.empty(0, dtype=float)
         x_axis, y_axis, z = _bin_points(points, self.room, weights=weights, resolution=72)
+        latest_intensity = _xy_intensity_frame(self.processor, self.room)
+        if latest_intensity:
+            x_axis = latest_intensity["x"]
+            y_axis = latest_intensity["y"]
+            rows, columns = latest_intensity["z_shape"]
+            z = [[0.0] * columns for _ in range(rows)]
+            for row, column, value in latest_intensity["z_sparse"]:
+                z[row][column] = value
         ratio = self.detected_frames / self.evaluated_frames if self.evaluated_frames else 0.0
         classification = occupancy_region(
             self.detected_frames, self.evaluated_frames,
@@ -604,13 +644,17 @@ class StreamingChunkAnalyzer:
             "x": x_axis, "y": y_axis, "z": z, "location": self.last_position,
             "score": self.last_score, "detected": label == "occupied",
             "snr_db": float(primary.get("snr_db")) if primary else float(self.last_detection.get("cfar_peak_db") or 0.0),
-            "threshold_db": float(self.last_detection.get("threshold_db") or self.processor.threshold_db),
+            "threshold_normalized": float(
+                self.last_detection.get("threshold_normalized")
+                or self.processor.normalized_threshold
+            ),
             "peak_power_db": self.last_detection.get("cfar_peak_db"),
             "noise_floor_db": self.last_detection.get("noise_floor_db"),
             "targets": self.last_targets, "motion_points": int(self.last_detection.get("motion_points") or 0),
         }
         payload = {
-            "plot": "xy-tracking", "title": "X-Y localization", "x_label": "X (m)", "y_label": "Y (m)",
+            "plot": "xy-tracking", "title": "Normalized X-Y presence", "x_label": "X (m)", "y_label": "Y (m)",
+            "intensity_scale": {"minimum": 0.0, "maximum": 1.0, "label": "Normalized intensity"},
             "x": x_axis, "y": y_axis, "z": z, "frames": self.playback_frames or [frame], "frame_count": self.evaluated_frames,
             "sample_count": self.evaluated_frames, "frame_interval_ms": max(50, int(round(self.chunk_seconds * 1000 / max(1, self.evaluated_frames)))),
             "updated": datetime.now(timezone.utc).isoformat(),
@@ -620,7 +664,7 @@ class StreamingChunkAnalyzer:
                           "green_threshold_percent": self.green_threshold_percent,
                           "chunk_seconds": self.chunk_seconds},
             "location": self.last_position, "score": self.last_score, "detected": label == "occupied",
-            "snr_db": frame["snr_db"], "threshold_db": frame["threshold_db"], "peak_power_db": frame["peak_power_db"],
+            "snr_db": frame["snr_db"], "threshold_normalized": frame["threshold_normalized"], "peak_power_db": frame["peak_power_db"],
             "noise_floor_db": frame["noise_floor_db"], "targets": self.last_targets,
             "motion_points": frame["motion_points"], "chunk_index": self.chunk_index,
             "chunk_seconds": self.chunk_seconds, "room": self.room,
@@ -762,6 +806,7 @@ def _serialize_target(target: Dict[str, Any], room: Dict[str, Any]) -> Dict[str,
         "position": [round(float(value), 3) for value in world],
         "size": [round(float(value), 3) for value in world_size],
         "snr_db": round(float(target.get("snr_db", 0.0)), 2),
+        "normalized_peak": round(float(target.get("normalized_peak", 0.0)), 3),
         "confidence": round(float(target.get("confidence", target.get("snr_db", 0.0))), 2),
         "zones": zones,
     }
@@ -776,7 +821,7 @@ def analyze_radar_chunk(
     *,
     frames: Optional[Iterable[bytes]] = None,
     processor: Any = None,
-    radar_detection_threshold_db: float = 8.0,
+    radar_detection_threshold_normalized: float = 0.45,
     occupancy_threshold_percent: float = 50.0,
     yellow_threshold_percent: float = 20.0,
     green_threshold_percent: float = 60.0,
@@ -790,7 +835,9 @@ def analyze_radar_chunk(
         raise RuntimeError("Radar configuration could not be loaded.")
 
     proc = processor or SigProc(str(PROCESSING_CONFIG), radar_config)
-    proc.threshold_db = min(40.0, max(0.0, float(radar_detection_threshold_db)))
+    proc.normalized_threshold = min(
+        0.95, max(0.05, float(radar_detection_threshold_normalized))
+    )
     frame_period_s = float(getattr(proc, "frame_period_s", 0.0) or 0.0)
 
     fieldnames = [
@@ -811,7 +858,7 @@ def analyze_radar_chunk(
         "snr_db",
         "score",
         "noise_floor_db",
-        "threshold_db",
+        "threshold_normalized",
         "peak_power_db",
         "motion_points",
         "targets_json",
@@ -868,7 +915,11 @@ def analyze_radar_chunk(
             if last_targets:
                 lead = last_targets[0]
                 last_position = [float(lead["position"][0]), float(lead["position"][1])]
-                last_score = float(lead.get("snr_db") or detection.get("cfar_peak_db") or 0.0)
+                last_score = float(
+                    lead.get("normalized_peak")
+                    or detection.get("normalized_peak")
+                    or 0.0
+                )
             elif shadow_points.size:
                 world_points = np.asarray([_clip_point_to_room(world_from_local(point, room), room) for point in shadow_points], dtype=float)
                 chunk_points.append(world_points)
@@ -895,7 +946,9 @@ def analyze_radar_chunk(
                 "snr_db": row_targets[0]["snr_db"] if row_targets else "",
                 "score": float(last_score),
                 "noise_floor_db": detection.get("noise_floor_db", ""),
-                "threshold_db": detection.get("threshold_db", proc.threshold_db),
+                "threshold_normalized": detection.get(
+                    "threshold_normalized", proc.normalized_threshold
+                ),
                 "peak_power_db": detection.get("cfar_peak_db", ""),
                 "motion_points": int(detection.get("motion_points") or 0),
                 "targets_json": json.dumps(last_targets, separators=(",", ":")) if last_targets else "[]",
@@ -925,7 +978,10 @@ def analyze_radar_chunk(
                 "location": last_position,
                 "score": float(last_score),
                 "snr_db": float(row_targets[0]["snr_db"]) if row_targets else float(detection.get("cfar_peak_db") or 0.0),
-                "threshold_db": float(detection.get("threshold_db") or proc.threshold_db),
+                "threshold_normalized": float(
+                    detection.get("threshold_normalized")
+                    or proc.normalized_threshold
+                ),
                 "noise_floor_db": detection.get("noise_floor_db"),
                 "peak_power_db": detection.get("cfar_peak_db"),
                 "motion_points": int(detection.get("motion_points") or 0),
@@ -965,7 +1021,10 @@ def analyze_radar_chunk(
             "score": float(last_score),
             "detected": occupied,
             "snr_db": float(primary.get("snr_db")) if primary else float(last_detection.get("cfar_peak_db") or 0.0),
-            "threshold_db": float(last_detection.get("threshold_db") or proc.threshold_db),
+            "threshold_normalized": float(
+                last_detection.get("threshold_normalized")
+                or proc.normalized_threshold
+            ),
             "peak_power_db": last_detection.get("cfar_peak_db"),
             "noise_floor_db": last_detection.get("noise_floor_db"),
             "targets": last_targets,
@@ -990,7 +1049,10 @@ def analyze_radar_chunk(
         "score": float(last_score),
         "detected": occupied,
         "snr_db": float(primary.get("snr_db")) if primary else float(last_detection.get("cfar_peak_db") or 0.0),
-        "threshold_db": float(last_detection.get("threshold_db") or proc.threshold_db),
+        "threshold_normalized": float(
+            last_detection.get("threshold_normalized")
+            or proc.normalized_threshold
+        ),
         "peak_power_db": last_detection.get("cfar_peak_db"),
         "noise_floor_db": last_detection.get("noise_floor_db"),
         "targets": last_targets,
@@ -1029,7 +1091,7 @@ def compile_minute_xy_payload(chunk_payloads: List[Dict[str, Any]]) -> Dict[str,
             "score": 0.0,
             "detected": False,
             "snr_db": 0.0,
-            "threshold_db": 0.0,
+            "threshold_normalized": 0.0,
             "peak_power_db": 0.0,
             "noise_floor_db": 0.0,
             "targets": [],
@@ -1063,7 +1125,7 @@ def compile_minute_xy_payload(chunk_payloads: List[Dict[str, Any]]) -> Dict[str,
             "score": float(latest.get("score") or 0.0),
             "detected": bool(latest.get("detected")),
             "snr_db": float(latest.get("snr_db") or 0.0),
-            "threshold_db": float(latest.get("threshold_db") or 0.0),
+            "threshold_normalized": float(latest.get("threshold_normalized") or 0.0),
             "peak_power_db": latest.get("peak_power_db"),
             "noise_floor_db": latest.get("noise_floor_db"),
             "targets": latest.get("targets") or [],
@@ -1088,7 +1150,7 @@ def compile_minute_xy_payload(chunk_payloads: List[Dict[str, Any]]) -> Dict[str,
         "score": float(latest.get("score") or 0.0),
         "detected": bool(latest.get("detected")),
         "snr_db": float(latest.get("snr_db") or 0.0),
-        "threshold_db": float(latest.get("threshold_db") or 0.0),
+        "threshold_normalized": float(latest.get("threshold_normalized") or 0.0),
         "peak_power_db": latest.get("peak_power_db"),
         "noise_floor_db": latest.get("noise_floor_db"),
         "targets": latest.get("targets") or [],

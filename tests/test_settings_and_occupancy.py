@@ -17,7 +17,7 @@ if "dotenv" not in sys.modules:
 
 from backend.device_manager import DeviceManager
 from backend import home_assistant
-from backend.radar_analysis import PersistentTargetIdentity, StreamingChunkAnalyzer, occupancy_label, occupancy_region
+from backend.radar_analysis import PersistentTargetIdentity, SigProc, StreamingChunkAnalyzer, occupancy_label, occupancy_region
 from backend.calibration import derive_thresholds
 from backend.minute_collector import (
     annotate_chunk_result,
@@ -53,7 +53,7 @@ class SettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             manager = DeviceManager(_Config(root))
             saved = manager.save_capture_settings({
-                "radar_detection_threshold_db": 12.5,
+                "radar_detection_threshold_normalized": 0.52,
                 "occupancy_threshold_percent": 62,
                 "yellow_threshold_percent": 27,
                 "green_threshold_percent": 71,
@@ -68,7 +68,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(saved["revision"], 1)
             self.assertIsNotNone(saved["updated_at"])
             reloaded = DeviceManager(_Config(root)).load_capture_settings()
-            self.assertEqual(reloaded["radar_detection_threshold_db"], 12.5)
+            self.assertEqual(reloaded["radar_detection_threshold_normalized"], 0.52)
             self.assertEqual(reloaded["occupancy_threshold_percent"], 62.0)
             self.assertEqual(reloaded["yellow_threshold_percent"], 27.0)
             self.assertEqual(reloaded["green_threshold_percent"], 71.0)
@@ -219,6 +219,48 @@ class OccupancyTests(unittest.TestCase):
         self.assertEqual(occupancy_region(59, 100, 20, 60), "yellow")
         self.assertEqual(occupancy_region(60, 100, 20, 60), "green")
 
+    def test_radar_peak_gate_uses_normalized_presence_value(self):
+        import numpy as np
+
+        processor = SigProc.__new__(SigProc)
+        processor.range_bin = np.linspace(0.0, 1.0, 6)
+        processor.azimuth_bin = np.linspace(-20.0, 20.0, 9)
+        processor.dead_zone = 0.0
+        processor.cfar_training_range = 3
+        processor.cfar_training_angle = 3
+        processor.cfar_guard_range = 1
+        processor.cfar_guard_angle = 1
+        processor.normalized_threshold = 0.6
+        processor.min_peak_separation_m = 0.1
+        processor.min_peak_separation_deg = 2.0
+        processor.max_candidates = 2
+        processor.max_targets = 2
+        processor.cluster_min_cells = 0
+        processor.cluster_min_intensity = 0.0
+        processor._merge_person_detections = lambda detections: detections
+        processor._measure_detection = lambda *args: {
+            "range_m": float(processor.range_bin[args[3]]),
+            "azimuth_deg": float(processor.azimuth_bin[args[4]]),
+            "cluster_cells": 1,
+            "cluster_intensity": 1.0,
+            "normalized_peak": float(args[-1]),
+        }
+        energy_db = np.zeros((6, 9), dtype=float)
+        energy_db[3, 4] = 30.0
+        normalized = np.full((6, 9), 0.1, dtype=float)
+        normalized[3, 4] = 0.59
+        cube = np.zeros((6, 4, 9), dtype=complex)
+
+        self.assertEqual(
+            processor._candidate_peaks(energy_db, 0.0, cube, cube, normalized), []
+        )
+        normalized[3, 4] = 0.6
+        detections = processor._candidate_peaks(
+            energy_db, 0.0, cube, cube, normalized
+        )
+        self.assertEqual(len(detections), 1)
+        self.assertEqual(detections[0]["normalized_peak"], 0.6)
+
     def test_calibration_uses_adjacent_median_midpoints(self):
         result = derive_thresholds({"red": [4, 6, 8], "yellow": [38, 40, 42], "green": [84, 86, 88]})
         self.assertEqual(result["yellow_threshold_percent"], 23.0)
@@ -228,7 +270,7 @@ class OccupancyTests(unittest.TestCase):
 
     def test_streaming_analyzer_processes_each_live_frame_and_finalizes_csv(self):
         class Processor:
-            threshold_db = 8.0
+            normalized_threshold = 0.45
             last_detection = {}
             last_motion_shadow = {"points": [], "intensity": []}
 
@@ -237,14 +279,18 @@ class OccupancyTests(unittest.TestCase):
 
             def update(self, _frame):
                 self.calls += 1
-                self.last_detection = {"detected": self.calls == 1, "threshold_db": self.threshold_db}
+                self.last_detection = {
+                    "detected": self.calls == 1,
+                    "threshold_normalized": self.normalized_threshold,
+                    "normalized_peak": 0.8 if self.calls == 1 else 0.0,
+                }
                 return [{"id": 1, "lateral_m": 0.1, "forward_m": 1.0, "vertical_m": 1.0}] if self.calls == 1 else []
 
         room = {"width_m": 4, "depth_m": 5, "height_m": 3, "sensor_wall": "Back", "sensor_position_m": 2, "sensor_height_m": 1}
         processor = Processor()
         with tempfile.TemporaryDirectory() as root, mock.patch("backend.radar_analysis.load_radar_config", return_value={}):
             csv_path = Path(root) / "chunk.csv"
-            analyzer = StreamingChunkAnalyzer(processor, csv_path, 0, 10, room, 11, 50, 20, 50, live_state_path=None)
+            analyzer = StreamingChunkAnalyzer(processor, csv_path, 0, 10, room, 0.5, 50, 20, 50, live_state_path=None)
             with mock.patch("backend.radar_analysis.decode_radar_frame", return_value=(1, object())):
                 analyzer.process(b"frame-1")
                 analyzer.process(b"frame-2")

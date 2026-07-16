@@ -805,7 +805,7 @@ def _radar_plot_payload(radar_path: Path, plot: str) -> Dict[str, Any]:
     stat = radar_path.stat()
     settings = device_manager.get_device_settings()
     try:
-        detection_threshold_db = min(40.0, max(0.0, float(settings.get('radar_detection_threshold_db', 8.0))))
+        detection_threshold_db = min(9.5, max(0.5, float(settings.get('radar_detection_threshold_normalized', 0.45)) * 10.0))
     except (TypeError, ValueError):
         detection_threshold_db = 8.0
     # Four plot requests arrive together. Serialize the cache miss so only one
@@ -850,7 +850,7 @@ def _prewarm_latest_radar_playback() -> None:
         return
     try:
         settings = device_manager.get_device_settings()
-        threshold = min(40.0, max(0.0, float(settings.get('radar_detection_threshold_db', 8.0))))
+        threshold = min(9.5, max(0.5, float(settings.get('radar_detection_threshold_normalized', 0.45)) * 10.0))
         for summary in list_minutes()[:3]:
             if not summary.get('capture_finished'):
                 continue
@@ -1660,7 +1660,7 @@ def settings():
         updates = {
             'portal_upload_allowed': str(payload.get('portal_upload_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
             'cloud_sync_allowed': str(payload.get('cloud_sync_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
-            'radar_detection_threshold_db': payload.get('radar_detection_threshold_db', 8.0),
+            'radar_detection_threshold_normalized': payload.get('radar_detection_threshold_normalized', 0.45),
             'auto_occupancy_label_enabled': str(payload.get('auto_occupancy_label_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
             'occupancy_threshold_percent': payload.get('occupancy_threshold_percent', 50.0),
             'yellow_threshold_percent': payload.get('yellow_threshold_percent', 20.0),

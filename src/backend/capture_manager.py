@@ -456,11 +456,11 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
     chunks = []
     for index in range(expected_chunks):
         prediction = prediction_entries.get(index)
-        location = prediction.get("location") if prediction else None
+        manifest_chunk = manifest_chunks.get(index) or {}
+        location = prediction.get("location") if prediction else manifest_chunk.get("location")
         if isinstance(location, (list, tuple)) and len(location) >= 2:
             location = {"x": location[0], "y": location[1]}
         recorded = index < stored_chunks
-        manifest_chunk = manifest_chunks.get(index) or {}
         state = "waiting"
         manifest_status = str(manifest_chunk.get("status") or "")
         if manifest_status == "error":
@@ -492,16 +492,16 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
             "stored": recorded,
             "analyzed": prediction is not None,
             "prediction": prediction.get("prediction") if prediction else None,
-            "occupied": prediction.get("occupied") if prediction else None,
+            "occupied": prediction.get("occupied") if prediction else manifest_chunk.get("occupied"),
             "location": location,
-            "score": prediction.get("score") if prediction else None,
-            "ratio": prediction.get("ratio") if prediction else None,
+            "score": prediction.get("score") if prediction else manifest_chunk.get("score"),
+            "ratio": prediction.get("ratio") if prediction else manifest_chunk.get("ratio"),
             "classification": prediction.get("classification") if prediction else manifest_chunk.get("classification"),
             "yellow_threshold_percent": prediction.get("yellow_threshold_percent") if prediction else manifest_chunk.get("yellow_threshold_percent", 20.0),
             "green_threshold_percent": prediction.get("green_threshold_percent") if prediction else manifest_chunk.get("green_threshold_percent", 60.0),
             "progress": visual_progress,
-            "targets": prediction.get("targets") if prediction else [],
-            "target_count": prediction.get("target_count") if prediction else 0,
+            "targets": prediction.get("targets") if prediction else manifest_chunk.get("targets", []),
+            "target_count": prediction.get("target_count") if prediction else len(manifest_chunk.get("targets") or []),
             "people_count": (prediction.get("people_count") if prediction else manifest_chunk.get("people_count", 0)),
             "labels": (prediction.get("labels") if prediction else manifest_chunk.get("labels", [])),
             "activity_labels": (prediction.get("activity_labels") if prediction else manifest_chunk.get("activity_labels", [])),

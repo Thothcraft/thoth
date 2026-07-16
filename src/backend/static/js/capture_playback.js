@@ -169,8 +169,8 @@
     const yLabel = options.yLabel || data.y_label || 'Y';
     const intervalMs = options.intervalMs || Math.min(750, data.frame_interval_ms || 120);
     const isTracking = data.plot === 'xy-tracking';
-    const valueLabel = isTracking ? 'Track score' : 'Power';
-    const colorbarTitle = isTracking ? 'track history' : 'log power';
+    const valueLabel = isTracking ? 'Normalized intensity' : 'Power';
+    const colorbarTitle = isTracking ? 'normalized intensity' : 'log power';
 
     function renderOccupancySummary() {
       if (!isTracking || !data.occupancy) return;
@@ -200,7 +200,7 @@
       return image;
     }
 
-    function trackingMarker(targets, location, score, detected, snrDb, thresholdDb) {
+    function trackingMarker(targets, location, score, detected, snrDb, thresholdNormalized) {
       const validTargets = Array.isArray(targets) ? targets.filter((target) => Array.isArray(target?.position) && Number.isFinite(Number(target.position[0])) && Number.isFinite(Number(target.position[1]))) : [];
       const fallback = detected === true && Array.isArray(location) && Number.isFinite(location[0]) && Number.isFinite(location[1]) ? [{ id: '?', position: location, confidence: score, snr_db: snrDb, position_error_m: 0 }] : [];
       const plotted = validTargets.length ? validTargets : fallback;
@@ -214,9 +214,9 @@
         marker: { color: '#ef4444', size: 13, line: { color: '#ffffff', width: 2 } },
         error_x: { type: 'data', array: plotted.map((target) => Number(target.position_error_m || 0)), visible: true, color: '#ef4444' },
         error_y: { type: 'data', array: plotted.map((target) => Number(target.position_error_m || 0)), visible: true, color: '#ef4444' },
-        customdata: plotted.map((target) => [target.id, Number(target.position_error_m || 0), Number(target.confidence ?? score ?? 0), Number(target.snr_db ?? snrDb ?? 0), thresholdDb]),
+        customdata: plotted.map((target) => [target.id, Number(target.position_error_m || 0), Number(target.confidence ?? score ?? 0), Number(target.snr_db ?? snrDb ?? 0), thresholdNormalized]),
         name: 'Tracked targets',
-        hovertemplate: 'Target %{customdata[0]}<br>X: %{x:.2f} ± %{customdata[1]:.2f} m<br>Y: %{y:.2f} ± %{customdata[1]:.2f} m<br>Confidence: %{customdata[2]:.2f}<br>SNR: %{customdata[3]:.1f} dB<br>Threshold: %{customdata[4]:.1f} dB<extra></extra>',
+        hovertemplate: 'Target %{customdata[0]}<br>X: %{x:.2f} ± %{customdata[1]:.2f} m<br>Y: %{y:.2f} ± %{customdata[1]:.2f} m<br>Normalized peak: %{customdata[2]:.2f}<br>SNR: %{customdata[3]:.1f} dB<br>Gate: %{customdata[4]:.2f}<extra></extra>',
         showlegend: isTracking,
       };
     }
@@ -235,12 +235,14 @@
         y: yValues,
         z,
         colorscale: 'Viridis',
-        zsmooth: false,
+        zmin: isTracking ? 0 : undefined,
+        zmax: isTracking ? 1 : undefined,
+        zsmooth: isTracking ? 'best' : false,
         hoverongaps: false,
         hovertemplate: `${yLabel}: %{y}<br>${xLabel}: %{x}<br>${valueLabel} %{z:.2f}<extra></extra>`,
         colorbar: { title: colorbarTitle },
       }];
-      if (isTracking) staticTraces.push(trackingMarker(data.targets, data.location, data.score, data.detected, data.snr_db, data.threshold_db));
+      if (isTracking) staticTraces.push(trackingMarker(data.targets, data.location, data.score, data.detected, data.snr_db, data.threshold_normalized));
       if (isTracking) applyRoomLayout(staticLayout, data.room);
       await Plotly.newPlot(host, staticTraces, staticLayout, plotConfig());
       renderOccupancySummary();
@@ -254,12 +256,14 @@
         y: Array.isArray(frame.y) && frame.y.length ? frame.y : yValues,
         z: frameImage(frame),
         colorscale: 'Viridis',
-        zsmooth: false,
+        zmin: isTracking ? 0 : undefined,
+        zmax: isTracking ? 1 : undefined,
+        zsmooth: isTracking ? 'best' : false,
         hoverongaps: false,
         hovertemplate: `${yLabel}: %{y}<br>${xLabel}: %{x}<br>${valueLabel} %{z:.2f}<extra></extra>`,
         colorbar: { title: colorbarTitle },
       }];
-      if (isTracking) frameTraces.push(trackingMarker(frame.targets, frame.location, frame.score, frame.detected, frame.snr_db, frame.threshold_db));
+      if (isTracking) frameTraces.push(trackingMarker(frame.targets, frame.location, frame.score, frame.detected, frame.snr_db, frame.threshold_normalized));
       return { name: String(index), data: frameTraces };
     });
 

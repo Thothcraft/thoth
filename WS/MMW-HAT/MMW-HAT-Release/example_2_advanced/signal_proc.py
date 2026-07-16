@@ -18,6 +18,7 @@ class _Track:
         self.dimensions = detection["dimensions"].copy()
         self.dimension_history = deque([self.dimensions.copy()], maxlen=15)
         self.snr_db = detection["snr_db"]
+        self.normalized_peak = detection["normalized_peak"]
         self.radial_velocity_mps = detection["radial_velocity_mps"]
         self.hits = 1
         self.hit_streak = 1
@@ -26,7 +27,6 @@ class _Track:
         self.confidence = 0.42
         self.confirmed = False
         self.presence_mode = "motion"
-        self.static_reference_db = detection.get("static_peak_db")
 
     def predict(self, dt):
         self.position += self.velocity * dt
@@ -43,6 +43,9 @@ class _Track:
         self.dimension_history.append(detection["dimensions"].copy())
         self.dimensions = np.median(np.array(self.dimension_history), axis=0)
         self.snr_db += 0.3 * (detection["snr_db"] - self.snr_db)
+        self.normalized_peak += 0.3 * (
+            detection["normalized_peak"] - self.normalized_peak
+        )
         self.radial_velocity_mps += 0.3 * (
             detection["radial_velocity_mps"] - self.radial_velocity_mps
         )
@@ -51,22 +54,14 @@ class _Track:
         self.misses = 0
         self.confidence = min(1.0, self.confidence + 0.3)
         self.presence_mode = "motion"
-        static_peak_db = detection.get("static_peak_db")
-        if static_peak_db is not None:
-            if self.static_reference_db is None:
-                self.static_reference_db = float(static_peak_db)
-            else:
-                self.static_reference_db += 0.15 * (
-                    float(static_peak_db) - self.static_reference_db
-                )
 
-    def hold_static(self, position, support_db):
+    def hold_static(self, position, normalized_peak):
         self.position += 0.08 * (position - self.position)
         self.velocity *= 0.2
         self.misses = 0
         self.confidence = min(1.0, self.confidence + 0.025)
         self.presence_mode = "static"
-        self.snr_db += 0.08 * (support_db - self.snr_db)
+        self.normalized_peak += 0.08 * (normalized_peak - self.normalized_peak)
 
     def miss(self):
         self.misses += 1
@@ -115,7 +110,9 @@ class SigProc:
         shadow_cfg = self.processing_config["motion_shadow"]
         cluster_cfg = self.processing_config["object_cluster"]
         tracking_cfg = self.processing_config["tracking"]
-        self.threshold_db = float(detection_cfg["threshold_db"])
+        self.normalized_threshold = float(
+            detection_cfg.get("normalized_threshold", 0.45)
+        )
         self.cfar_training_range = int(detection_cfg.get("cfar_training_range", 17))
         self.cfar_training_angle = int(detection_cfg.get("cfar_training_angle", 17))
         self.cfar_guard_range = int(detection_cfg.get("cfar_guard_range", 5))
@@ -140,12 +137,6 @@ class SigProc:
         self.track_merge_distance_m = float(tracking_cfg.get("track_merge_distance_m", 2.0))
         self.track_alpha = float(tracking_cfg.get("alpha", 0.34))
         self.track_beta = float(tracking_cfg.get("beta", 0.06))
-        self.static_support_threshold_db = float(
-            tracking_cfg.get("static_support_threshold_db", 1.5)
-        )
-        self.static_reference_tolerance_db = float(
-            tracking_cfg.get("static_reference_tolerance_db", 4.0)
-        )
         self.frame_period_s = 1.0 / float(radar_config["frame_rate"])
 
         self._tracks = []
@@ -154,7 +145,7 @@ class SigProc:
             "detected": False,
             "targets": [],
             "noise_floor_db": None,
-            "threshold_db": self.threshold_db,
+            "threshold_normalized": self.normalized_threshold,
         }
         self.last_motion_shadow = {
             "points": np.empty((0, 3), dtype=float),
@@ -249,8 +240,8 @@ class SigProc:
             azimuth_energy,
             azimuth_cube,
             elevation_cube,
-            static_energy,
-            static_azimuth_cube,
+            _static_energy,
+            _static_azimuth_cube,
             static_elevation_cube,
         )
 
@@ -279,8 +270,12 @@ class SigProc:
         )
         local_snr_db = 10.0 * np.log10(np.maximum(power, np.finfo(float).tiny) / local_noise)
         self.last_cfar_peak_db = float(np.max(local_snr_db[start:, 2:-2]))
-        local_maxima = energy_db == maximum_filter(energy_db, size=(3, 7), mode="nearest")
-        peak_mask = local_maxima & (local_snr_db >= self.threshold_db)
+        # Occupancy is gated on the same normalized temporal map rendered by
+        # /presence. CFAR SNR remains diagnostic metadata only.
+        local_maxima = motion_strength == maximum_filter(
+            motion_strength, size=(3, 7), mode="nearest"
+        )
+        peak_mask = local_maxima & (motion_strength >= self.normalized_threshold)
         peak_mask[:start] = False
         peak_mask[:, :2] = False
         peak_mask[:, -2:] = False
@@ -288,6 +283,7 @@ class SigProc:
         for range_idx, azimuth_idx in zip(*np.nonzero(peak_mask)):
             peaks.append(
                 (
+                    float(motion_strength[range_idx, azimuth_idx]),
                     float(local_snr_db[range_idx, azimuth_idx]),
                     float(energy_db[range_idx, azimuth_idx]),
                     int(range_idx),
@@ -296,7 +292,7 @@ class SigProc:
             )
 
         selected = []
-        for local_snr, peak_db, range_idx, azimuth_idx in sorted(peaks, reverse=True):
+        for normalized_peak, local_snr, peak_db, range_idx, azimuth_idx in sorted(peaks, reverse=True):
             range_m = float(self.range_bin[range_idx])
             azimuth_deg = float(self.azimuth_bin[azimuth_idx])
             if any(
@@ -315,6 +311,7 @@ class SigProc:
                 elevation_cube,
                 local_snr,
                 motion_strength,
+                normalized_peak,
             )
             if (
                 detection["cluster_cells"] >= self.cluster_min_cells
@@ -357,6 +354,7 @@ class SigProc:
         elevation_cube,
         local_snr,
         motion_strength,
+        normalized_peak,
     ):
         range_radius = max(2, int(math.ceil(0.55 / (self.range_bin[1] - self.range_bin[0]))))
         azimuth_radius = max(
@@ -455,6 +453,7 @@ class SigProc:
             "azimuth_deg": azimuth_deg,
             "elevation_deg": elevation_deg,
             "snr_db": float(local_snr),
+            "normalized_peak": float(normalized_peak),
             "radial_velocity_mps": float(self.velocity_bin[doppler_idx]),
             "cluster_cells": int(cluster_values.size),
             "cluster_intensity": float(np.sum(cluster_values)),
@@ -462,7 +461,9 @@ class SigProc:
 
     def _merge_person_detections(self, detections):
         groups = []
-        for detection in sorted(detections, key=lambda item: item["snr_db"], reverse=True):
+        for detection in sorted(
+            detections, key=lambda item: item["normalized_peak"], reverse=True
+        ):
             group = next(
                 (
                     candidate
@@ -501,6 +502,7 @@ class SigProc:
                         math.degrees(math.atan2(center[2], math.hypot(center[0], center[1])))
                     ),
                     "snr_db": max(item["snr_db"] for item in group),
+                    "normalized_peak": max(item["normalized_peak"] for item in group),
                     "radial_velocity_mps": float(
                         np.average(
                             [item["radial_velocity_mps"] for item in group], weights=weights
@@ -512,9 +514,9 @@ class SigProc:
                     ),
                 }
             )
-        return sorted(merged, key=lambda item: item["snr_db"], reverse=True)
+        return sorted(merged, key=lambda item: item["normalized_peak"], reverse=True)
 
-    def _static_track_support(self, track, static_energy_db, static_elevation_cube):
+    def _static_track_support(self, track, motion_strength, static_elevation_cube):
         lateral, forward, vertical = track.position
         range_m = float(np.linalg.norm(track.position))
         if range_m < self.dead_zone or range_m > float(self.processing_config["max_range_m"]):
@@ -532,21 +534,14 @@ class SigProc:
         a0, a1 = max(0, azimuth_idx - angle_half), min(
             len(self.azimuth_bin), azimuth_idx + angle_half + 1
         )
-        patch = static_energy_db[r0:r1, a0:a1]
+        patch = motion_strength[r0:r1, a0:a1]
         if patch.size == 0:
             return None
         peak_local = np.unravel_index(int(np.argmax(patch)), patch.shape)
         peak_range_idx = r0 + peak_local[0]
         peak_azimuth_idx = a0 + peak_local[1]
-        peak_db = float(static_energy_db[peak_range_idx, peak_azimuth_idx])
-        local_background = float(np.percentile(static_energy_db[r0:r1], 45))
-        support_db = peak_db - local_background
-        if support_db < self.static_support_threshold_db:
-            return None
-        if (
-            track.static_reference_db is not None
-            and peak_db < float(track.static_reference_db) - self.static_reference_tolerance_db
-        ):
+        normalized_peak = float(motion_strength[peak_range_idx, peak_azimuth_idx])
+        if normalized_peak < self.normalized_threshold:
             return None
 
         elevation_profile = np.linalg.norm(
@@ -564,9 +559,9 @@ class SigProc:
                 measured_range * math.sin(measured_elevation),
             ]
         )
-        return position, support_db, peak_db
+        return position, normalized_peak
 
-    def _update_tracks(self, detections, static_energy_db, static_elevation_cube):
+    def _update_tracks(self, detections, motion_strength, static_elevation_cube):
         dt = self.frame_period_s
         for track in self._tracks:
             track.predict(dt)
@@ -596,14 +591,12 @@ class SigProc:
             if not track.confirmed:
                 continue
             support = self._static_track_support(
-                track, static_energy_db, static_elevation_cube
+                track, motion_strength, static_elevation_cube
             )
             if support is None:
                 continue
-            position, support_db, peak_db = support
-            track.hold_static(position, support_db)
-            if track.static_reference_db is None:
-                track.static_reference_db = peak_db
+            position, normalized_peak = support
+            track.hold_static(position, normalized_peak)
             static_holds.add(track_idx)
         unmatched_tracks -= static_holds
         for track_idx in unmatched_tracks:
@@ -676,6 +669,7 @@ class SigProc:
                     "velocity_vertical_mps": float(track.velocity[2]),
                     "radial_velocity_mps": float(track.radial_velocity_mps),
                     "snr_db": float(track.snr_db),
+                    "normalized_peak": float(track.normalized_peak),
                     "coasting": bool(track.misses > 0),
                     "presence_mode": track.presence_mode,
                 }
@@ -742,9 +736,6 @@ class SigProc:
             static_elevation_cube,
         ) = self.range_angle_products(frame)
         energy_db = 20.0 * np.log10(np.maximum(azimuth_energy, np.finfo(float).tiny))
-        static_energy_db = 20.0 * np.log10(
-            np.maximum(static_energy, np.finfo(float).tiny)
-        )
         shadow_points, shadow_intensity, motion_strength = self._motion_shadow(
             energy_db, azimuth_cube, elevation_cube
         )
@@ -755,7 +746,7 @@ class SigProc:
             "range_m": self.range_bin.copy(),
             "azimuth_deg": self.azimuth_bin.copy(),
             "elevation_deg": self.elevation_bin.copy(),
-            "xy": self._display_intensity(azimuth_energy),
+            "xy": motion_strength,
             "yz": self._display_intensity(elevation_energy),
         }
         start = int(np.searchsorted(self.range_bin, self.dead_zone))
@@ -763,21 +754,17 @@ class SigProc:
         detections = self._candidate_peaks(
             energy_db, noise_floor_db, azimuth_cube, elevation_cube, motion_strength
         )
-        for detection in detections:
-            lateral, forward, _ = detection["position"]
-            detection_range = float(np.linalg.norm(detection["position"]))
-            detection_azimuth = math.degrees(math.atan2(lateral, forward))
-            range_idx = int(np.argmin(np.abs(self.range_bin - detection_range)))
-            azimuth_idx = int(np.argmin(np.abs(self.azimuth_bin - detection_azimuth)))
-            detection["static_peak_db"] = float(static_energy_db[range_idx, azimuth_idx])
         targets = self._update_tracks(
-            detections, static_energy_db, static_elevation_cube
+            detections, motion_strength, static_elevation_cube
         )
         self.last_detection = {
             "detected": bool(targets),
             "targets": targets,
             "noise_floor_db": noise_floor_db,
-            "threshold_db": self.threshold_db,
+            "threshold_normalized": self.normalized_threshold,
+            "normalized_peak": max(
+                (target["normalized_peak"] for target in targets), default=0.0
+            ),
             "candidate_count": len(detections),
             "cfar_peak_db": self.last_cfar_peak_db,
             "motion_points": len(shadow_points),
