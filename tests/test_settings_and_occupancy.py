@@ -5,8 +5,11 @@ import sys
 import tempfile
 import types
 import unittest
+from collections import deque
 from pathlib import Path
 from unittest import mock
+
+import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +22,14 @@ if "dotenv" not in sys.modules:
 from backend.device_manager import DeviceManager
 from backend import home_assistant
 from backend.capture_manager import minute_summary
-from backend.radar_analysis import PersistentTargetIdentity, SigProc, StreamingChunkAnalyzer, occupancy_label, occupancy_region
+from backend.radar_analysis import (
+    PersistentTargetIdentity,
+    SigProc,
+    StreamingChunkAnalyzer,
+    _update_example2_xy_plot,
+    occupancy_label,
+    occupancy_region,
+)
 from backend.calibration import derive_thresholds
 from backend.minute_collector import (
     annotate_chunk_result,
@@ -124,6 +134,34 @@ class SettingsTests(unittest.TestCase):
                 "outputs": {},
             }), encoding="utf-8")
             self.assertEqual(minute_summary(empty_dir)["labels"], ["no-radar-data"])
+
+    def test_presence_example2_plot_uses_native_processor_and_grid(self):
+        native_map = np.zeros((200, 400), dtype=float)
+        native_map[40:48, 216:224] = 1.0
+        exact = types.SimpleNamespace(
+            dbf=types.SimpleNamespace(run=lambda _spectrum: np.ones((8, 4, 55))),
+            num_beams=55,
+            target_detection=mock.Mock(return_value=(native_map, np.array([1.0, 0.5]), 1.0)),
+            x_bin=np.arange(0.0, 5.0, 0.025),
+            y_bin=np.arange(-5.0, 5.0, 0.025),
+            xy_map_buffer=deque(maxlen=10),
+            buffer_decay=0.8,
+            xy_marker_half_width_cells=4,
+            processing_config={"spatial_resolution": 0.025},
+        )
+        processor = types.SimpleNamespace(
+            _rd_spectrum=np.ones((8, 4, 3)),
+            _thoth_example2_processor=exact,
+        )
+        first = _update_example2_xy_plot(processor)
+        self.assertEqual((first["rows"], first["columns"]), (200, 400))
+        self.assertEqual(first["levels"], [0.0, 1.0])
+        self.assertTrue(first["transpose"])
+        self.assertTrue(first["mirror_x"])
+        self.assertTrue(first["mirror_y"])
+        self.assertEqual(max(value for _index, value in first["values_sparse"]), 255)
+        exact.target_detection.assert_called_once()
+        self.assertEqual(first["source"], "example_2_track/location_gui.py")
 
     def test_dashboard_saves_detection_regions_without_waiting_for_brain(self):
         with tempfile.TemporaryDirectory() as root:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import importlib.util
 import io
 import json
 import math
@@ -23,6 +24,8 @@ MMW_RELEASE = THOTH_ROOT / "WS" / "MMW-HAT" / "MMW-HAT-Release"
 TRACK_EXAMPLE_DIR = MMW_RELEASE / "example_2_advanced"
 ROOM_CONFIG = TRACK_EXAMPLE_DIR / "config" / "room_config.json"
 PROCESSING_CONFIG = TRACK_EXAMPLE_DIR / "config" / "processing_config_advanced.json"
+EXAMPLE2_PROCESSING_CONFIG = MMW_RELEASE / "example_2_track" / "config" / "processing_config.json"
+EXAMPLE2_SIGNAL_PROC = MMW_RELEASE / "example_2_track" / "signal_proc.py"
 RADAR_CONFIG_DIR = MMW_RELEASE / "radar_config" / "config_3rx_3m"
 TARGET_IDENTITY_PATH = THOTH_ROOT / "config" / "radar_target_identity.json"
 LIVE_OCCUPANCY_PATH = THOTH_ROOT / "config" / "radar_occupancy.json"
@@ -202,6 +205,71 @@ def _spread_intensity(grid: np.ndarray, radius: int = 1) -> np.ndarray:
     return spread
 
 
+def _example2_processor(processor: Any) -> Any:
+    cached = getattr(processor, "_thoth_example2_processor", None)
+    if cached is not None:
+        return cached
+    radar_config = getattr(processor, "radar_config", None)
+    if not isinstance(radar_config, dict) or not EXAMPLE2_SIGNAL_PROC.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "thoth_example2_track_signal_proc", EXAMPLE2_SIGNAL_PROC
+        )
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        cached = module.SigProc(str(EXAMPLE2_PROCESSING_CONFIG), radar_config)
+    except Exception:
+        return None
+    setattr(processor, "_thoth_example2_processor", cached)
+    return cached
+
+
+def _update_example2_xy_plot(processor: Any) -> Dict[str, Any]:
+    """Run example_2_track's native DBF, detection, buffering, and XY map."""
+    exact = _example2_processor(processor)
+    rd_spectrum = getattr(processor, "_rd_spectrum", None)
+    if exact is None or not isinstance(rd_spectrum, np.ndarray) or rd_spectrum.ndim != 3:
+        return {}
+    try:
+        beam_formed = exact.dbf.run(rd_spectrum)
+        beam_range_energy = np.linalg.norm(beam_formed, axis=1) / np.sqrt(exact.num_beams)
+        final_map, _location, _score = exact.target_detection(beam_range_energy)
+    except Exception:
+        return {}
+
+    x_axis = np.asarray(exact.x_bin, dtype=float)
+    y_axis = np.asarray(exact.y_bin, dtype=float)
+    final_map = np.asarray(final_map, dtype=float)
+    encoded = np.rint(np.clip(final_map, 0.0, 1.0) * 255.0).astype(np.uint8).ravel()
+    active = np.flatnonzero(encoded)
+    payload = {
+        "rows": int(final_map.shape[0]),
+        "columns": int(final_map.shape[1]),
+        "values_sparse": [
+            [int(index), int(encoded[index])]
+            for index in active
+        ],
+        "x_axis": x_axis.round(4).tolist(),
+        "y_axis": y_axis.round(4).tolist(),
+        "levels": [0.0, 1.0],
+        "transpose": True,
+        "mirror_x": True,
+        "mirror_y": True,
+        "buffer_len": int(exact.xy_map_buffer.maxlen or 0),
+        "buffer_decay": float(exact.buffer_decay),
+        "marker_half_width_m": float(
+            exact.xy_marker_half_width_cells
+            * exact.processing_config["spatial_resolution"]
+        ),
+        "source": "example_2_track/location_gui.py",
+    }
+    setattr(processor, "_thoth_example2_xy_payload", payload)
+    return payload
+
+
 def _live_intensity_payload(processor: Any, room: Dict[str, Any]) -> Dict[str, Any]:
     """Project MMW-HAT azimuth/elevation responses into browser-ready XY/YZ maps."""
     views = getattr(processor, "last_intensity_views", None)
@@ -270,6 +338,7 @@ def _live_intensity_payload(processor: Any, room: Dict[str, Any]) -> Dict[str, A
 
     return {
         "scale": {"minimum": 0.0, "maximum": 1.0, "label": "Normalized intensity"},
+        "example2_xy": getattr(processor, "_thoth_example2_xy_payload", {}),
         "xy": {
             "rows": int(xy_grid.shape[0]), "columns": int(xy_grid.shape[1]),
             "values": np.rint(np.clip(xy_grid, 0.0, 1.0) * 255.0).astype(np.uint8).ravel().tolist(),
@@ -480,6 +549,7 @@ class StreamingChunkAnalyzer:
         except Exception:
             self.invalid_frames += 1
             return False
+        _update_example2_xy_plot(self.processor)
         detection = dict(self.processor.last_detection or {})
         shadow = dict(self.processor.last_motion_shadow or {})
         shadow_points = np.asarray(shadow.get("points") if shadow.get("points") is not None else np.empty((0, 3)), dtype=float)
