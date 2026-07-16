@@ -1,106 +1,46 @@
 {% extends "base.html" %}
-
-{% block title %}Dashboard - {{ super() }}{% endblock %}
-
+{% block title %}Home - {{ super() }}{% endblock %}
+{% block extra_head %}
+<style>
+  .home-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(300px,.65fr);gap:18px;min-height:calc(100vh - 190px)}
+  .assistant-stage{position:relative;overflow:hidden;background:#11110f;color:#f5f1e8;border-radius:28px;padding:clamp(28px,5vw,72px);display:flex;flex-direction:column}
+  .assistant-stage:before{content:"";position:absolute;width:520px;height:520px;border:1px solid #383831;border-radius:50%;right:-180px;top:-220px;box-shadow:0 0 0 70px rgba(255,255,255,.018),0 0 0 140px rgba(255,255,255,.012)}
+  .assistant-kicker{font:700 10px ui-monospace,monospace;letter-spacing:.22em;text-transform:uppercase;color:#a8a49b}
+  .assistant-title{position:relative;margin-top:22px;max-width:780px;font-family:Georgia,"Times New Roman",serif;font-size:clamp(52px,7vw,104px);font-weight:400;line-height:.88;letter-spacing:-.065em}
+  .assistant-copy{position:relative;margin-top:24px;max-width:590px;color:#aaa69d;line-height:1.65}
+  .assistant-log{position:relative;flex:1;min-height:140px;max-height:320px;overflow:auto;margin-top:32px;padding-right:8px}
+  .assistant-message{max-width:82%;margin:10px 0;padding:12px 15px;border:1px solid #393933;border-radius:14px;color:#d7d2c8;font-size:14px;line-height:1.5}
+  .assistant-message.user{margin-left:auto;background:#f4f1e9;color:#11110f;border-color:#f4f1e9}
+  .assistant-form{position:relative;display:flex;gap:10px;margin-top:24px;border-top:1px solid #383831;padding-top:20px}
+  .assistant-form input{flex:1;border:1px solid #47473f;background:#1a1a17;color:#fff;border-radius:999px;padding:14px 18px;outline:none}
+  .assistant-form button{width:48px;height:48px;border:0;border-radius:50%;background:#d9e6bb;color:#11110f;font-size:20px}
+  .home-rail{display:flex;flex-direction:column;gap:18px}
+  .rail-card{background:#faf8f2;border:1px solid #c9c4b9;border-radius:20px;padding:22px}
+  .rail-card h2{font-family:Georgia,serif;font-size:28px;font-weight:400}
+  .metric{display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid #ddd8ce;font-size:13px}.metric:last-child{border:0}
+  .quick-command{display:block;width:100%;margin-top:9px;border:1px solid #aaa59b;background:transparent;border-radius:999px;padding:10px 12px;text-align:left;font-size:12px;font-weight:700}
+  @media(max-width:900px){.home-grid{grid-template-columns:1fr}.assistant-stage{min-height:620px}}
+</style>
+{% endblock %}
 {% block content %}
-{% set collecting = system_status.collection_active %}
-<div class="mx-auto max-w-6xl space-y-6">
-  <section class="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
-    <div class="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-      <div>
-        <div class="text-sm font-medium text-slate-500">Thoth</div>
-        <h1 class="mt-2 text-4xl font-semibold tracking-normal text-slate-950">Data collection</h1>
-        <p class="mt-2 max-w-2xl text-base leading-7 text-slate-500">
-          Record synchronized one-minute captures from the sensors attached to this Raspberry Pi.
-        </p>
-      </div>
-      <div class="rounded-full px-4 py-2 text-sm font-medium {{ 'bg-emerald-50 text-emerald-700' if collecting else 'bg-slate-100 text-slate-600' }}">
-        {{ 'Recording now' if collecting else 'Ready' }}
-      </div>
-    </div>
+<div class="home-grid">
+  <section class="assistant-stage">
+    <div class="assistant-kicker">Thoth intelligence · device {{ device_info.device_id[:8] if device_info.device_id else 'local' }}</div>
+    <h1 class="assistant-title">Ask your sensing environment.</h1>
+    <p class="assistant-copy">The same account-scoped assistant used by Portal can inspect your system and call secure device functions. Ask it to start or stop collection, or label the current 10-frame stream.</p>
+    <div id="assistant-log" class="assistant-log"><div class="assistant-message">I can control this device and explain its live state. Try “start collection” or “label the current stream cooking”.</div></div>
+    <form id="assistant-form" class="assistant-form"><input id="assistant-input" autocomplete="off" placeholder="Message Thoth..." aria-label="Message Thoth assistant"><button aria-label="Send">↑</button></form>
   </section>
-
-  <section class="overflow-hidden rounded-3xl border border-slate-200 bg-slate-950 shadow-sm">
-    <div class="flex items-center justify-between px-6 py-4 text-white">
-      <div>
-        <h2 class="text-xl font-semibold">Live presence</h2>
-        <p class="mt-1 text-sm text-slate-400">Static presence, 2D localization, and 3D room view.</p>
-      </div>
-      <a href="{{ url_for('presence_view') }}" class="rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800">Open full view</a>
-    </div>
-    <iframe src="{{ url_for('presence_view') }}?embed=1" title="Live presence" class="h-[560px] w-full border-0"></iframe>
-  </section>
-
-  <section class="grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
-    <aside class="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-      <h2 class="text-2xl font-semibold text-slate-950">Device</h2>
-      <div class="mt-5 space-y-4 text-sm">
-        <div class="flex justify-between gap-4"><span class="text-slate-500">WiFi</span><span class="font-medium text-slate-950">{{ 'Connected' if system_status.wifi_connected else 'Disconnected' }}</span></div>
-        <div class="flex justify-between gap-4"><span class="text-slate-500">IP</span><span class="font-medium text-slate-950">{{ wifi_state.ip_address if wifi_state and wifi_state.ip_address else system_status.ip_address or 'N/A' }}</span></div>
-        <div class="flex justify-between gap-4"><span class="text-slate-500">Saved minutes</span><span class="font-medium text-slate-950">{{ capture_overview.minute_count }}</span></div>
-        <div class="flex justify-between gap-4"><span class="text-slate-500">Disk</span><span class="font-medium text-slate-950">{{ system_status.disk_usage['percent_used'] if system_status.disk_usage else 0 }}%</span></div>
-      </div>
-      <div class="mt-5 rounded-2xl bg-slate-50 p-4 text-xs leading-5 text-slate-500">
-        {{ capture_overview.capture_dir }}
-      </div>
-    </aside>
-
-    <div class="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-      <div class="flex items-center justify-between gap-4">
-        <div>
-          <h2 class="text-2xl font-semibold text-slate-950">Recent data</h2>
-          <p class="mt-1 text-sm text-slate-500">Latest synchronized minute folders.</p>
-        </div>
-        <a href="{{ url_for('captures') }}" class="rounded-2xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">View all</a>
-      </div>
-
-      <div class="mt-5 divide-y divide-slate-100">
-        {% for minute in recent_minutes %}
-        <a href="{{ url_for('capture_detail', minute=minute.minute) }}" class="flex items-center justify-between gap-4 py-4">
-          <div>
-            <div class="font-mono text-sm font-semibold text-slate-950">{{ minute.relative_path or minute.minute }}</div>
-            <div class="mt-1 flex flex-wrap gap-2 text-xs text-slate-500">
-              <span>Video data {{ 'saved' if minute.files.video else 'missing' }}</span>
-              <span>Radar data {{ 'saved' if minute.files.radar else 'missing' }}</span>
-              <span>CSI data {{ 'saved' if minute.files.csi else 'missing' }}</span>
-              <span>Sense HAT data {{ 'saved' if minute.files.sense_hat else 'missing' }}</span>
-            </div>
-            {% if minute.progress %}
-            <div class="mt-2 w-full max-w-md">
-              <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
-                <span>Storage</span>
-                <span>{{ minute.progress.storage_percent|round(0) }}%</span>
-              </div>
-              <div class="mt-1 h-2 overflow-hidden rounded-full bg-slate-100">
-                <div class="h-full rounded-full bg-cyan-500" style="width: {{ minute.progress.storage_percent|round(2) }}%"></div>
-              </div>
-              <div class="mt-2 flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
-                <span>Predictions</span>
-                <span>{{ minute.progress.prediction_percent|round(0) }}%</span>
-              </div>
-              <div class="mt-1 h-2 overflow-hidden rounded-full bg-slate-100">
-                <div class="h-full rounded-full bg-emerald-500" style="width: {{ minute.progress.prediction_percent|round(2) }}%"></div>
-              </div>
-            </div>
-            {% endif %}
-          </div>
-          <div class="text-right">
-            {% if minute.labels %}
-            <div class="text-right">
-              <div class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">{{ minute.labels|join(', ') }}</div>
-              {% if minute.occupancy and minute.occupancy.evaluated_frames %}<div class="mt-1 text-xs text-slate-500">{{ minute.occupancy.detected_frames }} / {{ minute.occupancy.evaluated_frames }} detected</div>{% endif %}
-            </div>
-            {% else %}
-            <div class="text-xs text-slate-400">Unlabeled</div>
-            {% endif %}
-          </div>
-        </a>
-        {% endfor %}
-        {% if not recent_minutes %}
-        <div class="py-8 text-sm text-slate-500">No captures yet.</div>
-        {% endif %}
-      </div>
-    </div>
-  </section>
+  <aside class="home-rail">
+    <section class="rail-card"><div class="assistant-kicker">Live system</div><h2>{{ 'Collecting' if system_status.collection_active else 'Ready' }}</h2><div class="mt-4"><div class="metric"><span>WiFi</span><strong>{{ 'Connected' if system_status.wifi_connected else 'Offline' }}</strong></div><div class="metric"><span>Saved minutes</span><strong>{{ capture_overview.minute_count }}</strong></div><div class="metric"><span>Disk used</span><strong>{{ system_status.disk_usage['percent_used'] if system_status.disk_usage else 0 }}%</strong></div></div></section>
+    <section class="rail-card"><div class="assistant-kicker">Suggested functions</div><button class="quick-command" data-command="Start data collection">Start collection</button><button class="quick-command" data-command="Stop data collection">Stop collection</button><button class="quick-command" data-command="Label the current data collection stream occupied">Label current chunk</button><a href="{{ url_for('presence_view') }}" class="quick-command">Open live presence</a><a href="{{ url_for('captures') }}" class="quick-command">Browse captures</a></section>
+  </aside>
 </div>
+<script>
+const form=document.getElementById('assistant-form'),input=document.getElementById('assistant-input'),log=document.getElementById('assistant-log');let chatId=null,busy=false;
+function append(text,role='assistant'){const item=document.createElement('div');item.className=`assistant-message ${role}`;item.textContent=text;log.appendChild(item);log.scrollTop=log.scrollHeight}
+async function ask(text){if(!text||busy)return;busy=true;append(text,'user');input.value='';append('Thinking and checking device state...');const pending=log.lastElementChild;try{const response=await fetch('/api/assistant',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:text,chat_id:chatId})}),body=await response.json();pending.remove();if(!response.ok)throw new Error(body.detail||body.message||'Assistant unavailable');chatId=body.chat_id||chatId;append(body.response||'Command accepted.')}catch(error){pending.textContent=error.message}finally{busy=false;input.focus()}}
+form.addEventListener('submit',event=>{event.preventDefault();ask(input.value.trim())});
+document.querySelectorAll('[data-command]').forEach(button=>button.addEventListener('click',()=>ask(button.dataset.command)));
+</script>
 {% endblock %}

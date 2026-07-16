@@ -61,6 +61,7 @@ from backend.sensor_detection import detect_sensor_inventory
 from backend.home_assistant import get_home_assistant_publisher, load_home_assistant_config, save_home_assistant_config, test_home_assistant_connection
 from backend.capture_manager import (
     list_minutes,
+    list_minute_folders,
     get_minute,
     capture_files,
     current_minute,
@@ -171,6 +172,7 @@ terminal_manager = SSHTerminalManager(socketio, Config)
 collection_active = False
 collection_process: Optional[subprocess.Popen] = None
 COLLECTOR_PAUSE_PATH = THOTH_ROOT / 'config' / 'collector.pause'
+_capture_timeline_cache: Dict[str, Any] = {'at': 0.0, 'limit': 0, 'items': []}
 wifi_manager = None
 
 # Mock user for local authentication (in production, use a proper user database)
@@ -1449,6 +1451,38 @@ def status():
         return redirect(url_for('index'))
 
 
+@app.route('/api/assistant', methods=['POST'])
+def assistant_query():
+    """Use the same authenticated Brain assistant as Research Portal."""
+    token = getattr(device_manager, 'auth_token', None) or getattr(Config, 'USER_AUTH_TOKEN', None)
+    if not token:
+        return jsonify({'success': False, 'message': 'Log in to use the assistant'}), 401
+    payload = request.get_json(silent=True) or {}
+    query = str(payload.get('query') or '').strip()
+    if not query:
+        return jsonify({'success': False, 'message': 'Query is required'}), 400
+    try:
+        response = requests.post(
+            f"{Config.BRAIN_SERVER_URL}/api/query",
+            json={
+                'query': query,
+                'chat_id': payload.get('chat_id'),
+                'context': {
+                    'surface': 'thoth-device-dashboard',
+                    'device_id': device_manager.device_id,
+                    'collection_active': get_system_status(update_remote=False).collection_active,
+                },
+            },
+            headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+            timeout=90,
+        )
+        body = response.json()
+        return jsonify(body), response.status_code
+    except Exception as exc:
+        logger.exception('Assistant request failed: %s', exc)
+        return jsonify({'success': False, 'message': 'Assistant unavailable'}), 502
+
+
 def _read_json_file(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
     try:
         with path.open('r') as handle:
@@ -1744,7 +1778,7 @@ def api_internal_home_assistant_publish():
 @app.route('/captures')
 def captures():
     """Show the minute capture browser."""
-    minutes = list_minutes()
+    minutes = _capture_timeline_items(limit=90)
     active = current_minute()
     system_status = get_system_status(update_remote=False)
     sensors = detect_sensor_inventory()
@@ -1761,6 +1795,56 @@ def captures():
         sensors=sensors,
         capture_settings=capture_settings,
     )
+
+
+def _capture_timeline_items(limit: int = 90) -> list[Dict[str, Any]]:
+    """Return only the fields needed to draw the capture timeline."""
+    normalized_limit = max(1, min(1000, int(limit)))
+    now = time.monotonic()
+    if (
+        _capture_timeline_cache['limit'] == normalized_limit
+        and now - float(_capture_timeline_cache['at']) < 2.0
+    ):
+        return list(_capture_timeline_cache['items'])
+    compact = []
+    for minute_dir in list_minute_folders()[:normalized_limit]:
+        manifest = _read_json_file(minute_dir / 'manifest.json', {})
+        chunks = (((manifest.get('outputs') or {}).get('radar') or {}).get('chunks') or [])
+        latest = chunks[-1] if chunks else None
+        labels = list(manifest.get('labels') or [])
+        if labels == ['collecting'] and manifest.get('capture_finished'):
+            labels = []
+        compact.append({
+            'minute': minute_dir.name,
+            'modified': datetime.fromtimestamp(minute_dir.stat().st_mtime).isoformat(),
+            'labels': labels,
+            'latest_chunk': {
+                'index': latest.get('chunk_index'),
+                'state': 'error' if latest.get('error') else latest.get('status'),
+                'classification': latest.get('classification') or (
+                    'green' if latest.get('status') == 'occupied'
+                    else 'red' if latest.get('status') == 'empty'
+                    else None
+                ),
+                'prediction': ((latest.get('analysis') or {}).get('occupancy') or {}).get('label')
+                or latest.get('status'),
+            } if isinstance(latest, dict) else None,
+        })
+    _capture_timeline_cache.update(
+        {'at': time.monotonic(), 'limit': normalized_limit, 'items': compact}
+    )
+    return list(compact)
+
+
+@app.route('/api/captures/timeline', methods=['GET'])
+def api_capture_timeline():
+    minutes = _capture_timeline_items(request.args.get('limit', 90))
+    return jsonify({
+        'status': 'success',
+        'minutes': minutes,
+        'count': len(minutes),
+        'active_minute': current_minute().name if current_minute() else None,
+    })
 
 
 def _capture_runtime_stats() -> Dict[str, Any]:

@@ -1,707 +1,82 @@
 {% extends "base.html" %}
-
 {% block title %}Captures - {{ super() }}{% endblock %}
-
+{% block extra_head %}
+<style>
+  .capture-page{min-height:calc(100vh - 180px);display:flex;flex-direction:column;justify-content:center}
+  .capture-head{display:flex;align-items:flex-end;justify-content:space-between;gap:28px;margin-bottom:58px}
+  .capture-kicker{font:700 10px ui-monospace,monospace;letter-spacing:.22em;text-transform:uppercase;color:#77736b}
+  .capture-title{font-family:Georgia,"Times New Roman",serif;font-size:clamp(58px,9vw,132px);font-weight:400;line-height:.78;letter-spacing:-.075em;color:#11110f}
+  .capture-subtitle{max-width:420px;font-size:15px;line-height:1.6;color:#6b675f}
+  .capture-controls{display:flex;align-items:center;gap:8px;margin-top:18px}
+  .capture-control{border:1px solid #b9b4aa;background:transparent;border-radius:999px;padding:9px 14px;font-size:12px;font-weight:700}
+  .capture-control.primary{background:#11110f;color:#fff;border-color:#11110f}
+  .capture-control.hidden{display:none}
+  .timeline-shell{position:relative;padding:84px 2vw 100px;overflow:hidden;border-top:1px solid #bdb8ae;border-bottom:1px solid #bdb8ae}
+  .timeline-shell:before{content:"";position:absolute;left:0;right:0;top:50%;height:1px;background:#aaa59b}
+  .timeline{display:flex;align-items:center;gap:clamp(18px,3.2vw,58px);overflow-x:auto;overflow-y:hidden;padding:64px 9vw;scrollbar-width:none}
+  .timeline::-webkit-scrollbar{display:none}
+  .capture-minute{--focus:0;position:relative;flex:0 0 58px;height:58px;display:grid;place-items:center;text-decoration:none;transform:scale(calc(1 + var(--focus)*1.45));transition:transform .16s cubic-bezier(.2,.8,.2,1),opacity .2s;transform-origin:center;z-index:2}
+  .capture-minute:hover{animation:minute-magnify 2.6s cubic-bezier(.2,.8,.2,1) forwards}
+  @keyframes minute-magnify{to{transform:scale(calc(1.25 + var(--focus)*1.95))}}
+  .capture-dot{width:14px;height:14px;border-radius:50%;background:var(--dot);box-shadow:0 0 0 7px #f4f1e9,0 0 0 8px #aaa59b}
+  .capture-minute[data-active="true"] .capture-dot{box-shadow:0 0 0 7px #f4f1e9,0 0 0 10px rgba(31,110,255,.25)}
+  .capture-label{position:absolute;top:48px;left:50%;transform:translateX(-50%);width:150px;text-align:center;opacity:calc(.45 + var(--focus)*.55);transition:opacity .2s}
+  .capture-label strong{display:block;font:700 11px ui-monospace,monospace;color:#11110f}
+  .capture-label span{display:block;margin-top:5px;font-size:10px;color:#77736b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .timeline-empty{text-align:center;color:#77736b;padding:70px}
+  .timeline-legend{display:flex;flex-wrap:wrap;justify-content:center;gap:18px;margin-top:28px;font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:#6b675f}
+  .timeline-legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+  .capture-status{min-height:20px;margin-top:12px;font-size:12px;color:#6b675f}
+  @media(max-width:700px){.capture-head{align-items:flex-start;flex-direction:column;margin-bottom:30px}.capture-title{font-size:64px}.timeline-shell{margin-inline:-1rem}.capture-label{width:112px}}
+</style>
+{% endblock %}
 {% block content %}
-<div class="space-y-6">
-    <div class="card overflow-hidden">
-        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-            <div>
-                <div class="text-xs font-semibold uppercase tracking-widest text-blue-600">Thoth sensing</div>
-                <h2 class="mt-2 text-4xl font-semibold tracking-tight text-gray-950">Captures</h2>
-                <p class="text-sm text-gray-500 mt-2">Every synchronized minute, live from this Raspberry Pi.</p>
-            </div>
-            <div class="flex flex-wrap items-center gap-3">
-                <div class="rounded-lg border border-gray-300 bg-gray-50 px-4 py-2">
-                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-500">Saved minutes</div>
-                    <div id="capture-count" class="text-2xl font-semibold text-gray-950">{{ minutes|length }}</div>
-                </div>
-                <button id="start-capturing" class="apple-primary px-4 py-2.5 text-sm font-semibold {{ 'hidden' if system_status.collection_active else '' }}"><i class="fas fa-play mr-2"></i>Start capturing</button>
-                <button id="stop-capturing" class="apple-danger px-4 py-2.5 text-sm font-semibold {{ '' if system_status.collection_active else 'hidden' }}"><i class="fas fa-stop mr-2"></i>Stop capturing</button>
-                <button id="refresh-captures" class="border border-gray-200 bg-white px-3 py-2.5 text-sm font-semibold text-gray-700 shadow-sm hover:bg-gray-50"><i class="fas fa-rotate mr-2"></i>Refresh</button>
-            </div>
-        </div>
-    </div>
-
-    <div class="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
-        <div class="card">
-            <div class="flex items-center justify-between gap-3">
-                <div>
-                    <h3 class="text-xl font-semibold text-gray-950">Ongoing stream</h3>
-                    <p class="mt-1 text-sm text-gray-600">These settings apply to the current and upcoming minute captures.</p>
-                </div>
-                <span id="capture-state" class="rounded-full px-3 py-1 text-xs font-semibold {{ 'bg-green-100 text-green-800' if system_status.collection_active else 'bg-gray-100 text-gray-700' }}">
-                    {{ 'Collecting' if system_status.collection_active else 'Idle' }}
-                </span>
-            </div>
-
-            <label class="mt-5 block text-sm font-semibold text-gray-900">
-                Label
-                <input
-                    id="ongoing-label"
-                    value="{{ capture_settings.labels|join(', ') if capture_settings.labels else '' }}"
-                    placeholder="comma-separated labels"
-                    class="mt-2 h-11 w-full border border-gray-400 bg-white px-3 text-sm text-gray-950 outline-none focus:border-gray-950"
-                >
-            </label>
-
-            <div class="mt-5 grid gap-3 sm:grid-cols-2">
-                {% for sensor in sensors %}
-                {% set enabled = sensor.enabled if sensor.enabled is not none else capture_settings.sensors.get(sensor.key, True) %}
-                <label class="flex min-h-14 items-center justify-between gap-3 border border-gray-300 bg-gray-50 px-3 py-2 text-sm">
-                    <span>
-                        <span class="block font-semibold text-gray-950">{{ sensor.name }}</span>
-                        <span class="text-xs {{ 'text-green-700' if sensor.online else 'text-gray-600' }}">{{ 'Connected' if sensor.online else 'Not detected' }}</span>
-                    </span>
-                    <input type="checkbox" class="ongoing-sensor h-5 w-5" data-sensor="{{ sensor.key }}" {% if enabled %}checked{% endif %}>
-                </label>
-                {% endfor %}
-            </div>
-
-            <div class="mt-5 flex items-center gap-3">
-                <button id="save-ongoing-settings" class="bg-gray-950 px-4 py-2.5 text-sm font-semibold text-white hover:bg-gray-800">
-                    Apply settings
-                </button>
-                <span id="settings-status" class="text-sm text-gray-600"></span>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="flex items-center justify-between gap-3">
-                <div>
-                    <h3 class="text-xl font-semibold text-gray-950">Realtime statistics</h3>
-                    <p class="mt-1 text-sm text-gray-600">Updated while the collector is running.</p>
-                </div>
-                <button id="refresh-stats" class="border border-gray-400 px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50">Refresh</button>
-            </div>
-
-            <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                <div class="border border-gray-300 bg-gray-50 p-3">
-                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">CPU</div>
-                    <div id="stat-cpu" class="mt-1 text-2xl font-semibold text-gray-950">--</div>
-                </div>
-                <div class="border border-gray-300 bg-gray-50 p-3">
-                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">Memory</div>
-                    <div id="stat-memory" class="mt-1 text-2xl font-semibold text-gray-950">--</div>
-                </div>
-                <div class="border border-gray-300 bg-gray-50 p-3">
-                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">Disk</div>
-                    <div id="stat-disk" class="mt-1 text-2xl font-semibold text-gray-950">--</div>
-                </div>
-                <div class="border border-gray-300 bg-gray-50 p-3">
-                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">Temp</div>
-                    <div id="stat-temp" class="mt-1 text-2xl font-semibold text-gray-950">--</div>
-                </div>
-            </div>
-
-            <div class="mt-4 grid gap-3 md:grid-cols-3">
-                <div class="border border-gray-300 p-3">
-                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">CSI rate</div>
-                    <div id="stat-csi" class="mt-1 text-lg font-semibold text-gray-950">--</div>
-                </div>
-                <div class="border border-gray-300 p-3">
-                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">Radar rate</div>
-                    <div id="stat-radar" class="mt-1 text-lg font-semibold text-gray-950">--</div>
-                </div>
-                <div class="border border-gray-300 p-3">
-                    <div class="text-xs font-semibold uppercase tracking-wide text-gray-600">Video FPS</div>
-                    <div id="stat-video" class="mt-1 text-lg font-semibold text-gray-950">--</div>
-                </div>
-            </div>
-
-            <div class="mt-4 grid gap-3 md:grid-cols-2">
-                <div class="border border-gray-300 p-3 text-sm text-gray-700">
-                    <span class="font-semibold text-gray-950">Disk I/O</span>
-                    <span id="stat-disk-io" class="ml-2">--</span>
-                </div>
-                <div class="border border-gray-300 p-3 text-sm text-gray-700">
-                    <span class="font-semibold text-gray-950">Network</span>
-                    <span id="stat-network" class="ml-2">--</span>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div class="card">
-        <div class="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 pb-4">
-            <div class="text-sm text-gray-700"><span id="selected-capture-count" class="font-semibold text-gray-950">0</span> selected</div>
-            <div class="flex flex-wrap items-center gap-2">
-                <button id="download-selected" type="button" disabled class="inline-flex items-center gap-2 border border-slate-950 bg-slate-950 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40">
-                    <i class="fas fa-download"></i> Download selected
-                </button>
-                <button id="delete-selected" type="button" disabled class="inline-flex items-center gap-2 border border-red-300 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40">
-                    <i class="fas fa-trash"></i> Delete selected
-                </button>
-            </div>
-        </div>
-        <div class="overflow-x-auto">
-            <table class="min-w-full divide-y divide-gray-200">
-                <thead>
-                    <tr class="text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
-                        <th class="py-3 pr-4">
-                            <input id="select-all-captures" type="checkbox" class="h-4 w-4" aria-label="Select all captures">
-                        </th>
-                        <th class="py-3 pr-4">Minute</th>
-                        <th class="py-3 pr-4">Label</th>
-                        <th class="py-3 pr-4">Video</th>
-                        <th class="py-3 pr-4">Radar</th>
-                        <th class="py-3 pr-4">CSI</th>
-                        <th class="py-3 pr-4">Updated</th>
-                        <th class="py-3 pr-4"></th>
-                    </tr>
-                </thead>
-                <tbody id="captures-table-body" class="divide-y divide-gray-100">
-                    {% for minute in minutes %}
-                    <tr data-minute="{{ minute.minute }}" class="{% if minute.minute == active_minute %}bg-blue-50{% endif %}">
-                        <td class="py-3 pr-4">
-                            <input type="checkbox" class="capture-select h-4 w-4" value="{{ minute.minute }}" aria-label="Select capture {{ minute.minute }}">
-                        </td>
-                        <td class="py-3 pr-4 font-mono text-sm text-gray-900">{{ minute.minute }}</td>
-                        <td class="py-3 pr-4 text-sm text-gray-700">
-                            {% if minute.labels %}
-                                {{ minute.labels|join(', ') }}
-                            {% else %}
-                                <span class="text-gray-500">collecting</span>
-                            {% endif %}
-                            {% if minute.progress %}
-                                {% set latest = namespace(chunk=none) %}
-                                {% for chunk in minute.progress.chunks %}
-                                    {% if chunk.state in ['occupied', 'empty'] %}{% set latest.chunk = chunk %}{% endif %}
-                                {% endfor %}
-                                <div class="mt-3" aria-label="Latest chunk prediction" data-chunk-timeline="{{ minute.minute }}">
-                                    {% if latest.chunk %}
-                                    {% set chunk = latest.chunk %}
-                                    {% set chunk_detail %}Chunk {{ chunk.index + 1 }}; {{ chunk.prediction if chunk.prediction else chunk.state }}{% if chunk.detected_frames is defined and chunk.detected_frames is not none and chunk.evaluated_frames is defined and chunk.evaluated_frames is not none %}; {{ chunk.detected_frames }} / {{ chunk.evaluated_frames }} frames{% endif %}{% if chunk.ratio is defined and chunk.ratio is not none %}; ratio {{ (chunk.ratio * 100)|round(1) }}%{% endif %}{% if chunk.error is defined and chunk.error %}; {{ chunk.error }}{% endif %}{% endset %}
-                                    <div class="inline-flex items-center gap-2" title="{{ chunk_detail|trim }}">
-                                        <div role="img" tabindex="0" title="{{ chunk_detail|trim }}" aria-label="{{ chunk_detail|trim }}" class="h-2.5 w-2.5 rounded-full ring-2 ring-white" style="background:{% if chunk.state == 'occupied' or chunk.classification == 'green' %}hsl(145 68% 39%){% elif chunk.state == 'empty' or chunk.classification == 'red' %}hsl(4 76% 51%){% else %}hsl(217 88% 55%){% endif %}"></div>
-                                        <span class="text-xs font-semibold text-slate-600">Chunk {{ chunk.index + 1 }} · {{ chunk.prediction or chunk.state }}</span>
-                                    </div>
-                                    {% endif %}
-                                </div>
-                            {% endif %}
-                        </td>
-                        <td class="py-3 pr-4">
-                            <span class="inline-flex items-center text-sm {% if minute.files.video %}text-green-700{% else %}text-gray-400{% endif %}">
-                                <span class="h-2 w-2 rounded-full mr-2 {% if minute.files.video %}bg-green-500{% else %}bg-gray-300{% endif %}"></span>
-                                {{ 'Yes' if minute.files.video else 'No' }}
-                            </span>
-                        </td>
-                        <td class="py-3 pr-4">
-                            <span class="inline-flex items-center text-sm {% if minute.files.radar %}text-green-700{% else %}text-gray-400{% endif %}">
-                                <span class="h-2 w-2 rounded-full mr-2 {% if minute.files.radar %}bg-green-500{% else %}bg-gray-300{% endif %}"></span>
-                                {{ 'Yes' if minute.files.radar else 'No' }}
-                            </span>
-                        </td>
-                        <td class="py-3 pr-4">
-                            <span class="inline-flex items-center text-sm {% if minute.files.csi %}text-green-700{% else %}text-gray-400{% endif %}">
-                                <span class="h-2 w-2 rounded-full mr-2 {% if minute.files.csi %}bg-green-500{% else %}bg-gray-300{% endif %}"></span>
-                                {{ 'Yes' if minute.files.csi else 'No' }}
-                            </span>
-                        </td>
-                        <td class="py-3 pr-4 text-sm text-gray-600">{{ minute.modified }}</td>
-                        <td class="py-3 pr-4">
-                            <div class="flex flex-wrap justify-end gap-2">
-                                <a href="{{ url_for('capture_detail', minute=minute.minute) }}" class="inline-flex items-center gap-1 border border-gray-300 px-2.5 py-1.5 text-xs font-semibold text-gray-800 hover:bg-gray-50">
-                                    <i class="fas fa-folder-open"></i> Open
-                                </a>
-                                <a href="{{ url_for('download_capture_minute', minute=minute.minute) }}" class="inline-flex items-center gap-1 border border-slate-950 bg-slate-950 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-slate-800">
-                                    <i class="fas fa-download"></i> ZIP
-                                </a>
-                                {% if minute.files.predictions %}
-                                <button type="button" class="capture-predictions inline-flex items-center gap-1 border border-cyan-300 px-2.5 py-1.5 text-xs font-semibold text-cyan-700 hover:bg-cyan-50" data-minute="{{ minute.minute }}">
-                                    <i class="fas fa-chart-line"></i> Predictions
-                                </button>
-                                {% endif %}
-                                <button type="button" class="capture-upload inline-flex items-center gap-1 border border-blue-300 px-2.5 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50" data-minute="{{ minute.minute }}">
-                                    <i class="fas fa-cloud-upload-alt"></i> Upload
-                                </button>
-                                <button type="button" class="capture-delete inline-flex items-center gap-1 border border-red-300 px-2.5 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50" data-minute="{{ minute.minute }}">
-                                    <i class="fas fa-trash"></i> Delete
-                                </button>
-                            </div>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                    {% if not minutes %}
-                    <tr>
-                        <td colspan="8" class="py-8 text-center text-sm text-gray-500">No timestamp folders found in the capture directory.</td>
-                    </tr>
-                    {% endif %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-</div>
-<div id="prediction-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-950/60 p-4">
-  <div class="max-h-[85vh] w-full max-w-4xl overflow-y-auto border border-slate-300 bg-white shadow-2xl">
-    <div class="flex items-start justify-between gap-4 border-b border-slate-300 p-5">
-      <div>
-        <div class="text-xs font-semibold uppercase tracking-wide text-slate-600">Minute predictions</div>
-        <h3 id="prediction-modal-title" class="mt-1 font-mono text-2xl font-semibold text-slate-950">Predictions</h3>
+<div class="capture-page">
+  <header class="capture-head">
+    <div>
+      <div class="capture-kicker">Synchronized sensor archive</div>
+      <h1 class="capture-title">Captures</h1>
+      <div class="capture-controls">
+        <button id="start-capturing" class="capture-control primary {{ 'hidden' if system_status.collection_active else '' }}">Start collection</button>
+        <button id="stop-capturing" class="capture-control {{ '' if system_status.collection_active else 'hidden' }}">Stop collection</button>
+        <button id="refresh-captures" class="capture-control">Refresh</button>
       </div>
-      <button type="button" id="prediction-modal-close" class="border border-slate-300 p-2 text-slate-700 hover:bg-slate-100" aria-label="Close predictions">
-        <i class="fas fa-times"></i>
-      </button>
+      <div id="capture-status" class="capture-status">{{ 'Collecting one-second sensor windows' if system_status.collection_active else 'Collection paused' }}</div>
     </div>
-    <div id="prediction-modal-body" class="p-5 text-sm text-slate-700"></div>
+    <p class="capture-subtitle">Move the cursor along the timeline to progressively magnify nearby minutes. Select a point to open its synchronized radar, camera, CSI, labels, and predictions.</p>
+  </header>
+
+  <section class="timeline-shell" aria-label="Captured minute timeline">
+    <div id="capture-timeline" class="timeline">
+      {% for minute in minutes %}
+      {% set state = minute.latest_chunk.state if minute.latest_chunk else 'unclassified' %}
+      {% set color = '#238653' if state == 'occupied' else '#d3463b' if state == 'empty' else '#246bfd' if state in ['collecting','stored','analyzing','loading'] else '#7651c9' if minute.labels and minute.labels|length else '#11110f' if state == 'error' else '#9b978f' %}
+      <a href="{{ url_for('capture_detail', minute=minute.minute) }}" class="capture-minute" data-minute="{{ minute.minute }}" data-active="{{ 'true' if minute.minute == active_minute else 'false' }}" style="--dot:{{ color }}">
+        <span class="capture-dot"></span>
+        <span class="capture-label"><strong>{{ minute.minute[9:11] }}:{{ minute.minute[11:13] }}</strong><span>{{ minute.latest_chunk.prediction if minute.latest_chunk and minute.latest_chunk.prediction else minute.labels|join(', ') if minute.labels else 'unclassified' }}</span></span>
+      </a>
+      {% endfor %}
+      {% if not minutes %}<div class="timeline-empty">No captured minutes yet.</div>{% endif %}
+    </div>
+  </section>
+  <div class="timeline-legend">
+    <span><i style="background:#9b978f"></i>Unclassified</span><span><i style="background:#d3463b"></i>Empty</span><span><i style="background:#238653"></i>Occupied</span><span><i style="background:#246bfd"></i>Collecting</span><span><i style="background:#7651c9"></i>Labeled</span><span><i style="background:#11110f"></i>Error</span>
   </div>
 </div>
-
 <script>
-const settingsStatus = document.getElementById('settings-status');
-const capturesBody = document.getElementById('captures-table-body');
-const captureCount = document.getElementById('capture-count');
-const captureState = document.getElementById('capture-state');
-const startCapturing = document.getElementById('start-capturing');
-const stopCapturing = document.getElementById('stop-capturing');
-let activeMinute = {{ active_minute|tojson }};
-let capturesBusy = false;
-const selectedMinutes = new Set();
-
-function updateBulkControls() {
-  const checkboxes = Array.from(document.querySelectorAll('.capture-select'));
-  const selectedCount = selectedMinutes.size;
-  document.getElementById('selected-capture-count').textContent = String(selectedCount);
-  document.getElementById('download-selected').disabled = selectedCount === 0;
-  document.getElementById('delete-selected').disabled = selectedCount === 0;
-  const selectAll = document.getElementById('select-all-captures');
-  if (selectAll) {
-    selectAll.checked = checkboxes.length > 0 && checkboxes.every((input) => input.checked);
-    selectAll.indeterminate = checkboxes.some((input) => input.checked) && !selectAll.checked;
-  }
-}
-
-function selectedOngoingSensors() {
-  const sensors = {};
-  document.querySelectorAll('.ongoing-sensor').forEach((input) => {
-    sensors[input.dataset.sensor] = input.checked;
-  });
-  return sensors;
-}
-
-function setCaptureState(active) {
-  captureState.textContent = active ? 'Collecting' : 'Paused';
-  captureState.className = `rounded-full px-3 py-1 text-xs font-semibold ${active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-700'}`;
-  startCapturing.classList.toggle('hidden', active);
-  stopCapturing.classList.toggle('hidden', !active);
-}
-
-async function controlCapture(action) {
-  const button = action === 'start' ? startCapturing : stopCapturing;
-  button.disabled = true;
-  try {
-    const response = await fetch(`/api/collection/${action}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        label: document.getElementById('ongoing-label').value.split(',')[0]?.trim() || '',
-        sensors: selectedOngoingSensors(),
-      }),
-    });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.message || `Unable to ${action} capturing`);
-    setCaptureState(action === 'start');
-    showAlert(result.message || `Capturing ${action === 'start' ? 'started' : 'stopped'}`);
-    await refreshCaptures();
-    await refreshStats();
-  } catch (error) {
-    showAlert(error.message || 'Capture control failed', 'error');
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function saveOngoingSettings() {
-  settingsStatus.textContent = 'Saving...';
-  const payload = {
-    labels: document.getElementById('ongoing-label').value.split(',').map((item) => item.trim()).filter(Boolean),
-    sensors: selectedOngoingSensors(),
-  };
-  const response = await fetch('/api/capture-settings', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const result = await response.json().catch(() => ({}));
-  settingsStatus.textContent = response.ok && result.success ? 'Applied' : (result.message || 'Save failed');
-}
-
-function fmtPercent(value) {
-  return Number.isFinite(Number(value)) ? `${Number(value).toFixed(0)}%` : '--';
-}
-
-function fmtRate(value, suffix) {
-  return Number.isFinite(Number(value)) && Number(value) > 0 ? `${Number(value).toFixed(1)} ${suffix}` : '--';
-}
-
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-  }[char]));
-}
-
-function fmtTime(value) {
-  if (!value) return '--';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-
-function statusCell(enabled) {
-  return `
-    <span class="inline-flex items-center text-sm ${enabled ? 'text-green-700' : 'text-gray-400'}">
-      <span class="h-2 w-2 rounded-full mr-2 ${enabled ? 'bg-green-500' : 'bg-gray-300'}"></span>
-      ${enabled ? 'Yes' : 'No'}
-    </span>
-  `;
-}
-
-
-function predictionEntries(predictions) {
-  if (!predictions) return [];
-  if (Array.isArray(predictions.timeline) && predictions.timeline.length) return predictions.timeline;
-  if (Array.isArray(predictions.deployed_models) && predictions.deployed_models.length) return predictions.deployed_models;
-  if (predictions.prediction || predictions.status || predictions.error) return [predictions];
-  return [];
-}
-
-function predictionName(entry) {
-  return escapeHtml(entry.model_name || entry.model || entry.deployment_name || 'Model');
-}
-
-function predictionValue(entry) {
-  if (entry.status === 'skipped') return 'Skipped';
-  if (entry.status === 'error') return 'Error';
-  if (entry.prediction === true) return 'occupied';
-  if (entry.prediction === false) return 'empty';
-  return escapeHtml(entry.prediction ?? 'No prediction');
-}
-
-function probabilityValue(entry) {
-  const value = typeof entry.confidence === 'number' ? entry.confidence : entry.probability;
-  return Number.isFinite(Number(value)) ? Number(value) : null;
-}
-
-async function openPredictionModal(minute) {
-  const modal = document.getElementById('prediction-modal');
-  const title = document.getElementById('prediction-modal-title');
-  const body = document.getElementById('prediction-modal-body');
-  title.textContent = minute;
-  body.innerHTML = '<div class="border border-slate-300 bg-slate-50 p-4">Loading predictions...</div>';
-  modal.classList.remove('hidden');
-  modal.classList.add('flex');
-  try {
-    const response = await fetch(`/api/captures/${encodeURIComponent(minute)}/file/predictions`, { cache: 'no-store' });
-    const predictions = await response.json();
-    if (!response.ok) throw new Error(predictions.message || 'Failed to load predictions');
-    const entries = predictionEntries(predictions);
-    if (!entries.length) {
-      body.innerHTML = '<div class="border border-dashed border-slate-300 bg-slate-50 p-6">This minute has a predictions file, but no model entries yet.</div>';
-      return;
-    }
-    body.innerHTML = `<div class="grid gap-3 md:grid-cols-2">${entries.map((entry) => {
-      const probability = probabilityValue(entry);
-      const statusClass = entry.status === 'error' ? 'border-red-300 bg-red-50 text-red-700' : entry.status === 'skipped' ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-emerald-300 bg-emerald-50 text-emerald-800';
-      return `<article class="border border-slate-300 bg-slate-50 p-4">
-        <div class="flex items-start justify-between gap-3">
-          <div>
-            <div class="text-sm font-semibold text-slate-950">${predictionName(entry)}</div>
-            <div class="mt-1 text-xs uppercase tracking-wide text-slate-600">${escapeHtml(entry.data_type || 'model')} · ${escapeHtml(entry.status || 'ok')}</div>
-          </div>
-          <span class="border px-2 py-1 text-xs font-semibold ${statusClass}">${predictionValue(entry)}</span>
-        </div>
-        <div class="mt-3 text-sm text-slate-700">${probability === null ? 'No probability reported' : `${Math.round(probability * 1000) / 10}% probability`}</div>
-        ${entry.error ? `<div class="mt-3 border border-red-200 bg-white p-2 text-xs text-red-700">${escapeHtml(entry.error)}</div>` : ''}
-      </article>`;
-    }).join('')}</div>`;
-  } catch (error) {
-    body.innerHTML = `<div class="border border-red-300 bg-red-50 p-4 text-red-700">${escapeHtml(error.message || 'Failed to load predictions')}</div>`;
-  }
-}
-
-function closePredictionModal() {
-  const modal = document.getElementById('prediction-modal');
-  modal.classList.add('hidden');
-  modal.classList.remove('flex');
-}
-
-function renderLatestChunk(progress, sizeClass = 'h-2.5 w-2.5') {
-  const chunks = progress?.chunks || [];
-  const chunk = chunks.filter((entry) => ['occupied', 'empty'].includes(entry.state)).at(-1)
-    || chunks.filter((entry) => entry.state !== 'waiting').at(-1);
-  if (!chunk) return '';
-  const visual = chunk.state === 'occupied' || chunk.classification === 'green'
-    ? 'hsl(145 68% 39%)'
-    : chunk.state === 'empty' || chunk.classification === 'red'
-      ? 'hsl(4 76% 51%)'
-      : 'hsl(217 88% 55%)';
-  const frames = chunk.detected_frames == null || chunk.evaluated_frames == null ? '' : `; ${Number(chunk.detected_frames) || 0} / ${Number(chunk.evaluated_frames) || 0} frames`;
-  const people = `; ${Number(chunk.people_count ?? chunk.target_count ?? 0)} people`;
-  const labels = Array.isArray(chunk.labels) && chunk.labels.length ? `; labels ${chunk.labels.join(', ')}` : '';
-  const activity = Array.isArray(chunk.activity_labels) && chunk.activity_labels.length ? `; activity ${chunk.activity_labels.join(', ')}` : '';
-  const detail = 'Chunk ' + (chunk.index + 1) + '; ' + (chunk.prediction || chunk.state || 'waiting') + people + labels + activity + frames + (chunk.ratio == null ? '' : '; ratio ' + (Number(chunk.ratio) * 100).toFixed(1) + '%') + (chunk.error ? '; ' + chunk.error : '');
-  const safeDetail = escapeHtml(detail);
-  return `<div class="inline-flex items-center gap-2" title="${safeDetail}"><div role="img" tabindex="0" title="${safeDetail}" aria-label="${safeDetail}" class="${sizeClass} rounded-full ring-2 ring-white" style="background:${visual};box-shadow:0 0 0 1px color-mix(in srgb, ${visual} 55%, transparent)"></div><span class="text-xs font-semibold text-slate-600">Chunk ${Number(chunk.index) + 1} · ${escapeHtml(chunk.prediction || chunk.state || 'loading')}</span></div>`;
-}
-
-function renderCaptureRow(minute) {
-  const name = escapeHtml(minute.minute);
-  const labels = Array.isArray(minute.labels) && minute.labels.length
-    ? minute.labels.map(escapeHtml).join(', ')
-    : '<span class="text-gray-500">collecting</span>';
-  const urls = minute.urls || {};
-  const occupancy = '';
-  const openUrl = urls.open || `/captures/${encodeURIComponent(minute.minute)}`;
-  const downloadUrl = urls.download || `/captures/${encodeURIComponent(minute.minute)}/download`;
-  const progress = minute.progress;
-  const progressHtml = progress ? `<div class="mt-3" aria-label="Latest chunk prediction" data-chunk-timeline="${name}">${renderLatestChunk(progress)}</div>` : '';
-  return `
-    <tr data-minute="${name}" class="${minute.minute === activeMinute ? 'bg-blue-50' : ''}">
-      <td class="py-3 pr-4"><input type="checkbox" class="capture-select h-4 w-4" value="${name}" aria-label="Select capture ${name}" ${selectedMinutes.has(minute.minute) ? 'checked' : ''}></td>
-      <td class="py-3 pr-4 font-mono text-sm text-gray-900">${name}</td>
-      <td class="py-3 pr-4 text-sm text-gray-700">${labels}${occupancy}${progressHtml}</td>
-      <td class="py-3 pr-4">${statusCell(Boolean(minute.files?.video))}</td>
-      <td class="py-3 pr-4">${statusCell(Boolean(minute.files?.radar))}</td>
-      <td class="py-3 pr-4">${statusCell(Boolean(minute.files?.csi))}</td>
-      <td class="py-3 pr-4 text-sm text-gray-600">${escapeHtml(fmtTime(minute.modified))}</td>
-      <td class="py-3 pr-4">
-        <div class="flex flex-wrap justify-end gap-2">
-          <a href="${openUrl}" class="inline-flex items-center gap-1 border border-gray-300 px-2.5 py-1.5 text-xs font-semibold text-gray-800 hover:bg-gray-50"><i class="fas fa-folder-open"></i> Open</a>
-          <a href="${downloadUrl}" class="inline-flex items-center gap-1 border border-slate-950 bg-slate-950 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"><i class="fas fa-download"></i> ZIP</a>
-          ${minute.files?.predictions ? `<button type="button" class="capture-predictions inline-flex items-center gap-1 border border-cyan-300 px-2.5 py-1.5 text-xs font-semibold text-cyan-700 hover:bg-cyan-50" data-minute="${name}"><i class="fas fa-chart-line"></i> Predictions</button>` : ''}
-          <button type="button" class="capture-upload inline-flex items-center gap-1 border border-blue-300 px-2.5 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50" data-minute="${name}"><i class="fas fa-cloud-upload-alt"></i> Upload</button>
-          <button type="button" class="capture-delete inline-flex items-center gap-1 border border-red-300 px-2.5 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50" data-minute="${name}"><i class="fas fa-trash"></i> Delete</button>
-        </div>
-      </td>
-    </tr>
-  `;
-}
-
-function renderCaptureRows(minutes) {
-  if (!capturesBody) return;
-  if (!minutes.length) {
-    capturesBody.innerHTML = '<tr><td colspan="8" class="py-8 text-center text-sm text-gray-500">No timestamp folders found in the capture directory.</td></tr>';
-    selectedMinutes.clear();
-    updateBulkControls();
-    return;
-  }
-  const available = new Set(minutes.map((minute) => minute.minute));
-  selectedMinutes.forEach((minute) => {
-    if (!available.has(minute)) selectedMinutes.delete(minute);
-  });
-  capturesBody.innerHTML = minutes.map(renderCaptureRow).join('');
-  updateBulkControls();
-}
-
-async function bulkDownloadCaptures() {
-  const button = document.getElementById('download-selected');
-  const original = button.innerHTML;
-  button.disabled = true;
-  button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Preparing ZIP';
-  try {
-    const response = await fetch('/api/captures/bulk-download', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ minutes: Array.from(selectedMinutes) }),
-    });
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      showAlert(data.message || 'Bulk download failed', 'error');
-      return;
-    }
-    const blob = await response.blob();
-    const disposition = response.headers.get('Content-Disposition') || '';
-    const match = disposition.match(/filename="?([^";]+)"?/i);
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = match?.[1] || 'thoth-captures.zip';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(link.href);
-  } finally {
-    button.innerHTML = original;
-    updateBulkControls();
-  }
-}
-
-async function bulkDeleteCaptures() {
-  const minutes = Array.from(selectedMinutes);
-  if (!minutes.length || !confirm(`Delete ${minutes.length} selected captures? This permanently removes their folders from disk.`)) return;
-  const button = document.getElementById('delete-selected');
-  const original = button.innerHTML;
-  button.disabled = true;
-  button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Deleting';
-  try {
-    const response = await fetch('/api/captures/bulk-delete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ minutes }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      showAlert(data.message || 'Bulk delete failed', 'error');
-      return;
-    }
-    selectedMinutes.clear();
-    showAlert(`Deleted ${data.count ?? minutes.length} captures`, 'success');
-    await refreshCaptures();
-  } finally {
-    button.innerHTML = original;
-    updateBulkControls();
-  }
-}
-
-async function refreshCaptures() {
-  if (capturesBusy) return;
-  capturesBusy = true;
-  try {
-    const response = await fetch('/api/captures', { cache: 'no-store' });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok || result.status !== 'success') {
-      showAlert(result.message || 'Unable to refresh captures', 'error');
-      return;
-    }
-    activeMinute = result.active_minute;
-    captureCount.textContent = String(result.count ?? result.minutes?.length ?? 0);
-    renderCaptureRows(result.minutes || []);
-  } finally {
-    capturesBusy = false;
-  }
-}
-
-let activeTimelineBusy = false;
-async function refreshActiveTimeline() {
-  if (!activeMinute || activeTimelineBusy) return;
-  const timeline = document.querySelector(`[data-chunk-timeline="${activeMinute}"]`);
-  if (!timeline) return;
-  activeTimelineBusy = true;
-  try {
-    const response = await fetch(`/api/captures/${encodeURIComponent(activeMinute)}`, { cache: 'no-store' });
-    const result = await response.json().catch(() => ({}));
-    if (response.ok && result.capture?.progress) {
-      timeline.innerHTML = renderLatestChunk(result.capture.progress);
-    }
-  } finally {
-    activeTimelineBusy = false;
-  }
-}
-
-async function refreshStats() {
-  const response = await fetch('/api/captures/stats', { cache: 'no-store' });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok || !result.success) return;
-  const stats = result.stats || {};
-  setCaptureState(Boolean(stats.collection_active));
-  const metrics = stats.latest_metrics || {};
-
-  document.getElementById('stat-cpu').textContent = fmtPercent(stats.cpu_percent);
-  document.getElementById('stat-memory').textContent = fmtPercent(stats.memory_percent);
-  document.getElementById('stat-disk').textContent = fmtPercent(stats.disk_percent);
-  document.getElementById('stat-temp').textContent = Number.isFinite(Number(stats.temperature_c)) ? `${Number(stats.temperature_c).toFixed(1)} C` : '--';
-  document.getElementById('stat-csi').textContent = fmtRate(metrics.csi?.effective_rate_hz, 'Hz');
-  document.getElementById('stat-radar').textContent = fmtRate(metrics.radar?.effective_fps, 'fps');
-  document.getElementById('stat-video').textContent = fmtRate(metrics.video?.fps, 'fps');
-  document.getElementById('stat-disk-io').textContent = `${stats.disk_read_mb || 0} MB read / ${stats.disk_write_mb || 0} MB written`;
-  document.getElementById('stat-network').textContent = `${stats.network_rx_mb || 0} MB rx / ${stats.network_tx_mb || 0} MB tx`;
-}
-
-async function uploadCapture(minute, button) {
-  const original = button?.innerHTML;
-  if (button) {
-    button.disabled = true;
-    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading';
-  }
-  try {
-    const response = await fetch(`/api/captures/${encodeURIComponent(minute)}/upload`, { method: 'POST' });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      showAlert(data.message || 'Upload failed', 'error');
-      return;
-    }
-    const uploaded = Array.isArray(data.uploaded) ? data.uploaded.length : 0;
-    const errors = Array.isArray(data.errors) ? data.errors.length : 0;
-    showAlert(`Uploaded ${uploaded} files${errors ? ` with ${errors} errors` : ''}`, errors ? 'error' : 'success');
-  } finally {
-    if (button) {
-      button.disabled = false;
-      button.innerHTML = original;
-    }
-  }
-}
-
-async function deleteCapture(minute, button) {
-  if (!confirm(`Delete capture ${minute}? This removes the minute folder from disk.`)) return;
-  const original = button?.innerHTML;
-  if (button) {
-    button.disabled = true;
-    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Deleting';
-  }
-  try {
-    const response = await fetch(`/api/captures/${encodeURIComponent(minute)}`, { method: 'DELETE' });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      showAlert(data.message || 'Delete failed', 'error');
-      return;
-    }
-    showAlert(`Deleted ${minute}`, 'success');
-    await refreshCaptures();
-  } finally {
-    if (button) {
-      button.disabled = false;
-      button.innerHTML = original;
-    }
-  }
-}
-
-document.getElementById('save-ongoing-settings')?.addEventListener('click', saveOngoingSettings);
-startCapturing?.addEventListener('click', () => controlCapture('start'));
-stopCapturing?.addEventListener('click', () => controlCapture('stop'));
-document.getElementById('refresh-stats')?.addEventListener('click', refreshStats);
-document.getElementById('refresh-captures')?.addEventListener('click', refreshCaptures);
-document.getElementById('download-selected')?.addEventListener('click', bulkDownloadCaptures);
-document.getElementById('delete-selected')?.addEventListener('click', bulkDeleteCaptures);
-document.getElementById('select-all-captures')?.addEventListener('change', (event) => {
-  document.querySelectorAll('.capture-select').forEach((input) => {
-    input.checked = event.target.checked;
-    if (input.checked) selectedMinutes.add(input.value);
-    else selectedMinutes.delete(input.value);
-  });
-  updateBulkControls();
-});
-capturesBody?.addEventListener('change', (event) => {
-  if (!event.target.matches('.capture-select')) return;
-  if (event.target.checked) selectedMinutes.add(event.target.value);
-  else selectedMinutes.delete(event.target.value);
-  updateBulkControls();
-});
-capturesBody?.addEventListener('click', (event) => {
-  const predictionsButton = event.target.closest('.capture-predictions');
-  if (predictionsButton) {
-    openPredictionModal(predictionsButton.dataset.minute);
-    return;
-  }
-  const uploadButton = event.target.closest('.capture-upload');
-  if (uploadButton) {
-    uploadCapture(uploadButton.dataset.minute, uploadButton);
-    return;
-  }
-  const deleteButton = event.target.closest('.capture-delete');
-  if (deleteButton) {
-    deleteCapture(deleteButton.dataset.minute, deleteButton);
-  }
-});
-document.getElementById('prediction-modal-close')?.addEventListener('click', closePredictionModal);
-document.getElementById('prediction-modal')?.addEventListener('click', (event) => {
-  if (event.target.id === 'prediction-modal') closePredictionModal();
-});
-refreshStats();
-refreshCaptures();
-window.setInterval(refreshStats, 2500);
-window.setInterval(refreshCaptures, 3500);
-window.setInterval(refreshActiveTimeline, 500);
+const timeline=document.getElementById('capture-timeline');
+const status=document.getElementById('capture-status');
+function colorFor(minute){const state=minute.latest_chunk?.state;if(state==='occupied')return'#238653';if(state==='empty')return'#d3463b';if(['collecting','stored','analyzing','loading'].includes(state))return'#246bfd';if(state==='error')return'#11110f';if(minute.labels?.length)return'#7651c9';return'#9b978f'}
+function minuteLabel(minute){return minute.latest_chunk?.prediction||minute.latest_chunk?.state||minute.labels?.join(', ')||'unclassified'}
+function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[character]))}
+function render(minutes,active){timeline.innerHTML=minutes.length?minutes.map(minute=>`<a href="/captures/${encodeURIComponent(minute.minute)}" class="capture-minute" data-minute="${escapeHtml(minute.minute)}" data-active="${minute.minute===active}" style="--dot:${colorFor(minute)}"><span class="capture-dot"></span><span class="capture-label"><strong>${escapeHtml(minute.minute.slice(9,11))}:${escapeHtml(minute.minute.slice(11,13))}</strong><span>${escapeHtml(minuteLabel(minute))}</span></span></a>`).join(''):'<div class="timeline-empty">No captured minutes yet.</div>'}
+timeline?.addEventListener('pointermove',event=>{for(const item of timeline.querySelectorAll('.capture-minute')){const box=item.getBoundingClientRect(),center=box.left+box.width/2,distance=Math.abs(event.clientX-center),focus=Math.max(0,1-distance/190);item.style.setProperty('--focus',focus.toFixed(3));}})
+timeline?.addEventListener('pointerleave',()=>timeline.querySelectorAll('.capture-minute').forEach(item=>item.style.setProperty('--focus','0')))
+async function control(action){const button=document.getElementById(`${action}-capturing`);button.disabled=true;try{const response=await fetch(`/api/collection/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),body=await response.json();if(!response.ok)throw new Error(body.message||'Command failed');status.textContent=body.message;document.getElementById('start-capturing').classList.toggle('hidden',action==='start');document.getElementById('stop-capturing').classList.toggle('hidden',action==='stop')}catch(error){status.textContent=error.message}finally{button.disabled=false}}
+async function refresh(){const response=await fetch('/api/captures/timeline?limit=90',{cache:'no-store'}),body=await response.json();if(response.ok)render(body.minutes||[],body.active_minute)}
+document.getElementById('start-capturing')?.addEventListener('click',()=>control('start'));
+document.getElementById('stop-capturing')?.addEventListener('click',()=>control('stop'));
+document.getElementById('refresh-captures')?.addEventListener('click',refresh);
+window.setInterval(refresh,5000);
 </script>
 {% endblock %}

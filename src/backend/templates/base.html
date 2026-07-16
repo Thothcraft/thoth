@@ -112,7 +112,7 @@
             </h1>
             <nav class="site-nav flex items-center space-x-4" aria-label="Primary navigation">
                 <a href="{{ url_for('status') }}" class="text-sm text-slate-500 hover:text-slate-950">
-                    Dashboard
+                    Home
                 </a>
                 <a href="{{ url_for('captures') }}" class="text-sm text-slate-500 hover:text-slate-950">
                     Captures
@@ -121,18 +121,16 @@
                 <a href="{{ url_for('presence_view') }}" class="text-sm text-slate-500 hover:text-slate-950">
                     Presence
                 </a>
-                <a href="{{ url_for('settings') }}" class="text-sm text-slate-500 hover:text-slate-950">
-                    Settings
-                </a>
-                <a href="{{ url_for('connect') }}" class="text-sm text-slate-500 hover:text-slate-950">
-                    Connect
-                </a>
-                <span class="text-sm text-slate-400">
-                    {{ session.get('username', 'User') }}
-                </span>
-                <a href="/logout" class="text-sm text-slate-500 hover:text-slate-950">
-                    Logout
-                </a>
+                <details class="relative">
+                    <summary class="cursor-pointer list-none text-sm text-slate-500 hover:text-slate-950">More ▾</summary>
+                    <div class="absolute right-0 mt-3 w-52 rounded-xl border border-slate-300 bg-white p-2 shadow-xl">
+                        <div class="px-3 py-2 text-xs font-semibold text-slate-500">{{ session.get('username', 'User') }}</div>
+                        <a href="https://portal-three-rho.vercel.app/profile" class="block rounded-lg px-3 py-2 text-sm hover:bg-slate-100">User profile</a>
+                        <a href="{{ url_for('settings') }}" class="block rounded-lg px-3 py-2 text-sm hover:bg-slate-100">Settings</a>
+                        <a href="{{ url_for('connect') }}" class="block rounded-lg px-3 py-2 text-sm hover:bg-slate-100">Connect</a>
+                        <a href="/logout" class="block rounded-lg px-3 py-2 text-sm text-red-700 hover:bg-red-50">Logout</a>
+                    </div>
+                </details>
                 {% else %}
                 <a href="{{ url_for('login') }}" class="text-sm text-slate-500 hover:text-slate-950">
                     Login

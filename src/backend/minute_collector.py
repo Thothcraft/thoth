@@ -214,6 +214,7 @@ def write_json_atomic(path: Path, payload: object) -> None:
 
 def load_processing_settings() -> dict[str, Any]:
     defaults: dict[str, Any] = {
+        "labels": [],
         "radar_detection_threshold_normalized": 0.45,
         "occupancy_threshold_percent": 50.0,
         "yellow_threshold_percent": 20.0,
@@ -256,6 +257,7 @@ def load_processing_settings() -> dict[str, Any]:
     defaults["prediction_label_style"] = style if style in {"occupancy", "presence"} else "occupancy"
     defaults["people_count_label_enabled"] = bool(defaults.get("people_count_label_enabled"))
     defaults["sleep_study_enabled"] = bool(defaults.get("sleep_study_enabled"))
+    defaults["labels"] = normalize_labels(defaults.get("labels"))
     return defaults
 
 
@@ -736,6 +738,9 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=False)
 
     manifest: dict[str, Any] = {
+        "schema": "thoth-minute-manifest/v4",
+        "collection_unit": "minute",
+        "sample_unit": "one-second synchronized sensor window",
         "folder_minute": folder_name,
         "scheduled_start": target_start.isoformat(timespec="seconds"),
         "duration_seconds": args.duration,
@@ -744,6 +749,7 @@ def main() -> int:
         "expected_chunks": expected_chunks,
         "labels": preset_labels or ["collecting"],
         "outputs": {},
+        "assets": [],
         "errors": [],
         "warnings": [],
         "primary_label": preset_labels[0] if preset_labels else "collecting",
@@ -802,6 +808,45 @@ def main() -> int:
 
     def write_live_manifest() -> None:
         merge_home_assistant_status()
+        assets: list[dict[str, Any]] = []
+        for entry in radar_chunk_results:
+            index = int(entry.get("chunk_index") or 0)
+            result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+            occupancy = result.get("occupancy") if isinstance(result.get("occupancy"), dict) else {}
+            common = {
+                "second_index": index,
+                "started_at": entry.get("started"),
+                "finished_at": entry.get("finished_capture"),
+                "duration_seconds": entry.get("chunk_seconds"),
+                "labels": result.get("labels") or entry.get("labels") or [],
+                "prediction": occupancy.get("label") or entry.get("status"),
+                "properties": {
+                    "frame_count": entry.get("chunk_frames"),
+                    "detected_frames": occupancy.get("detected_frames"),
+                    "evaluated_frames": occupancy.get("evaluated_frames"),
+                    "ratio": occupancy.get("ratio"),
+                    "people_count": result.get("people_count", entry.get("people_count", 0)),
+                },
+            }
+            radar_name = Path(str(entry.get("bin_path") or "")).name
+            if radar_name:
+                assets.append({**common, "sensor": "radar", "filename": radar_name, "content_type": "application/octet-stream"})
+            camera_name = Path(str(entry.get("camera_path") or "")).name
+            if camera_name:
+                assets.append({**common, "sensor": "camera", "filename": camera_name, "content_type": "image/jpeg"})
+        csi_output = (manifest.get("outputs") or {}).get("wifi_csi")
+        if isinstance(csi_output, dict) and csi_output.get("path"):
+            assets.append({
+                "sensor": "wifi_csi",
+                "filename": Path(str(csi_output["path"])).name,
+                "content_type": "text/csv",
+                "started_at": csi_output.get("started"),
+                "duration_seconds": args.duration,
+                "coverage": "continuous minute stream",
+                "labels": manifest.get("labels") or [],
+                "properties": {"baud": csi_output.get("baud"), "device": csi_output.get("device")},
+            })
+        manifest["assets"] = assets
         snapshot = dict(manifest)
         snapshot["capture_started"] = capture_started
         snapshot["status"] = "collecting"
@@ -917,7 +962,9 @@ def main() -> int:
                 entry = item
                 if not camera:
                     continue
-                image_path = output_dir / f"camera_{int(entry['chunk_index']):03d}.jpg"
+                stamp = str(entry.get("started") or iso_now()).replace("-", "").replace(":", "").replace("T", "_")
+                stamp = stamp.replace("+", "_").replace(".", "_")[:19]
+                image_path = output_dir / f"camera_{int(entry['chunk_index']):03d}_{stamp}.jpg"
                 try:
                     capture_camera_image(camera, image_path)
                     entry["camera_path"] = str(image_path)
@@ -990,8 +1037,9 @@ def main() -> int:
                     int(((item.get("result") or {}).get("occupancy") or {}).get("evaluated_frames") or 0)
                     for item in radar_chunk_results if item is not entry
                 )
+                chunk_labels = normalize_labels(settings_snapshot.get("labels")) or preset_labels
                 annotate_chunk_result(
-                    result, settings_snapshot, room_config, preset_labels,
+                    result, settings_snapshot, room_config, chunk_labels,
                     folder_name, expected_chunks, previous_frames,
                 )
                 entry["result"] = result

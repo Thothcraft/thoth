@@ -35,6 +35,7 @@ from backend.minute_collector import (
     annotate_chunk_result,
     enqueue_latest_chunk_frame,
     live_chunk_statistics,
+    load_processing_settings,
     minute_start,
     summarize_minute_results,
 )
@@ -162,6 +163,43 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(max(value for _index, value in first["values_sparse"]), 255)
         exact.target_detection.assert_called_once()
         self.assertEqual(first["source"], "example_2_track/location_gui.py")
+
+    @mock.patch("backend.device_manager.requests.put")
+    def test_device_command_labels_current_chunk_and_acknowledges(self, local_put):
+        with tempfile.TemporaryDirectory() as root:
+            manager = DeviceManager(_Config(root))
+            manager.auth_token = "device-token"
+            manager.registered = True
+            local_put.return_value = mock.Mock(
+                ok=True,
+                headers={"content-type": "application/json"},
+                json=lambda: {"success": True, "message": "Capture settings updated"},
+                text="",
+            )
+            manager.session.post = mock.Mock(return_value=mock.Mock(status_code=200))
+
+            manager._apply_device_command({
+                "id": 42,
+                "command": "label_current_chunk",
+                "payload": {"label": "cooking"},
+            })
+
+            local_put.assert_called_once()
+            self.assertEqual(local_put.call_args.kwargs["json"], {"labels": ["cooking"]})
+            ack = manager.session.post.call_args
+            self.assertIn("/commands/42/ack", ack.args[0])
+            self.assertTrue(ack.kwargs["json"]["success"])
+
+    def test_processing_settings_include_live_chunk_labels(self):
+        with tempfile.TemporaryDirectory() as root:
+            settings_path = Path(root) / "capture_settings.json"
+            settings_path.write_text(
+                json.dumps({"labels": ["cooking", "participant-4"]}),
+                encoding="utf-8",
+            )
+            with mock.patch("backend.minute_collector.CAPTURE_SETTINGS_PATH", settings_path):
+                settings = load_processing_settings()
+        self.assertEqual(settings["labels"], ["cooking", "participant-4"])
 
     def test_dashboard_saves_detection_regions_without_waiting_for_brain(self):
         with tempfile.TemporaryDirectory() as root:

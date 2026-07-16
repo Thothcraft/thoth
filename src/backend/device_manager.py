@@ -579,6 +579,61 @@ class DeviceManager:
                     name=f"MinuteUpload-{minute}",
                     daemon=True,
                 ).start()
+        commands = result.get('pending_commands')
+        if commands is None and isinstance(data, dict):
+            commands = data.get('pending_commands')
+        if isinstance(commands, list):
+            for command in commands:
+                if not isinstance(command, dict):
+                    continue
+                threading.Thread(
+                    target=self._apply_device_command,
+                    args=(command,),
+                    name=f"DeviceCommand-{command.get('id', 'unknown')}",
+                    daemon=True,
+                ).start()
+
+    def _apply_device_command(self, command: Dict[str, Any]) -> None:
+        command_id = command.get('id')
+        name = str(command.get('command') or '')
+        payload = command.get('payload') if isinstance(command.get('payload'), dict) else {}
+        success = False
+        message = 'Unsupported command'
+        try:
+            port = int(getattr(self.config, 'PORT', 5000) or 5000)
+            if name in {'start_collection', 'stop_collection'}:
+                action = 'start' if name == 'start_collection' else 'stop'
+                response = requests.post(
+                    f"http://127.0.0.1:{port}/api/collection/{action}",
+                    json={},
+                    timeout=15,
+                )
+            elif name == 'label_current_chunk':
+                label = str(payload.get('label') or '').strip()
+                response = requests.put(
+                    f"http://127.0.0.1:{port}/api/capture-settings",
+                    json={'labels': [label] if label else []},
+                    timeout=15,
+                )
+            else:
+                response = None
+            if response is not None:
+                success = response.ok
+                body = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
+                message = str(body.get('message') or body.get('status') or response.text or name)
+        except Exception as exc:
+            message = str(exc)
+        if not command_id or not self.auth_token:
+            return
+        try:
+            self.session.post(
+                f"{self.config.BRAIN_SERVER_URL}/api/device/{self.device_id}/commands/{command_id}/ack",
+                json={'success': success, 'message': message},
+                headers={"Authorization": f"Bearer {self.auth_token}", "Content-Type": "application/json"},
+                timeout=5,
+            )
+        except requests.exceptions.RequestException as exc:
+            logger.warning("Unable to acknowledge device command %s: %s", command_id, exc)
 
     def _upload_requested_minute(self, minute: str) -> None:
         """Ask the local web app to prepare and upload one complete capture."""
@@ -963,6 +1018,14 @@ class DeviceManager:
             file_count = sum(1 for file_path in minute_files.values() if file_path and file_path.exists())
             sizes = summary.get('sizes') if isinstance(summary, dict) else {}
             total_size = sum(int(value or 0) for value in (sizes.values() if isinstance(sizes, dict) else []))
+            manifest = {}
+            manifest_path = minute_dir / 'manifest.json'
+            if manifest_path.exists():
+                try:
+                    loaded = json.loads(manifest_path.read_text(encoding='utf-8'))
+                    manifest = loaded if isinstance(loaded, dict) else {}
+                except (OSError, ValueError):
+                    manifest = {}
             stat = minute_dir.stat()
             return {
                 'name': relative_path, 'size': total_size,
@@ -976,6 +1039,9 @@ class DeviceManager:
                 'minute_files': file_count, 'label': summary.get('label'),
                 'labels': summary.get('labels', []), 'occupancy': summary.get('occupancy'),
                 'progress': summary.get('progress'),
+                'manifest_schema': manifest.get('schema'),
+                'collection_unit': manifest.get('collection_unit', 'minute'),
+                'assets': manifest.get('assets') if isinstance(manifest.get('assets'), list) else [],
             }
         except (OSError, ValueError) as exc:
             logger.warning("Unable to summarize live minute %s: %s", minute_dir, exc)
@@ -996,6 +1062,8 @@ class DeviceManager:
                     item.get('labels'),
                     item.get('occupancy'),
                     item.get('progress'),
+                    item.get('manifest_schema'),
+                    item.get('assets'),
                 ) for item in files],
                 sort_keys=True,
             )
