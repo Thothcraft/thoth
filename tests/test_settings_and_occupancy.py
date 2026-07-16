@@ -184,6 +184,37 @@ class SettingsTests(unittest.TestCase):
 
 
 class OccupancyTests(unittest.TestCase):
+    def test_range_angle_products_returns_computed_static_views(self):
+        import numpy as np
+
+        class Doppler:
+            range_window = np.ones(3)
+
+            @staticmethod
+            def compute_doppler_map(_frame, _antenna):
+                return np.zeros((4, 3), dtype=complex)
+
+        class Beamformer:
+            @staticmethod
+            def run(_spectrum):
+                return np.ones((4, 3, 5), dtype=complex)
+
+        processor = SigProc.__new__(SigProc)
+        processor._rd_spectrum = np.zeros((4, 3, 3), dtype=complex)
+        processor._static_spectrum = np.zeros((4, 3, 3), dtype=complex)
+        processor.doppler = Doppler()
+        processor.azimuth_dbf = Beamformer()
+        processor.elevation_dbf = Beamformer()
+        processor.num_azimuth_beams = 5
+        frame = np.zeros((3, 3, 4), dtype=float)
+
+        with mock.patch("signal_proc.fft_spectrum", return_value=np.zeros((3, 4))):
+            products = processor.range_angle_products(frame)
+
+        self.assertEqual(len(products), 6)
+        self.assertEqual(products[3].shape, (4, 5))
+        self.assertEqual(products[4].shape, (4, 3, 5))
+
     def test_live_chunk_statistics_classifies_in_progress_frames(self):
         analyzer = types.SimpleNamespace(
             evaluated_frames=5,

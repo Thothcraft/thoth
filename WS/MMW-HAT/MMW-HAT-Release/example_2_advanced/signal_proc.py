@@ -240,8 +240,8 @@ class SigProc:
             azimuth_energy,
             azimuth_cube,
             elevation_cube,
-            _static_energy,
-            _static_azimuth_cube,
+            static_energy,
+            static_azimuth_cube,
             static_elevation_cube,
         )
 
