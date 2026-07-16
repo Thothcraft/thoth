@@ -178,7 +178,7 @@
         </div>
 
         <div id="tab-manifest" class="tab-panel hidden pt-5">
-            <pre class="overflow-x-auto whitespace-pre-wrap rounded-2xl bg-slate-950 p-4 text-xs text-emerald-200">{{ manifest_view|tojson(indent=2) }}</pre>
+            <pre class="overflow-x-auto whitespace-pre-wrap rounded-2xl bg-slate-950 p-4 text-xs text-emerald-200">{{ manifest_view|default(minute_info, true)|tojson(indent=2) }}</pre>
         </div>
     </section>
 </div>
