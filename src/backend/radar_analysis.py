@@ -10,6 +10,7 @@ import struct
 import threading
 import sys
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -180,6 +181,102 @@ def validate_region_thresholds(yellow_threshold_percent: float, green_threshold_
     return yellow, green
 
 
+def _spread_intensity(grid: np.ndarray, radius: int = 1) -> np.ndarray:
+    """Match the MMW-HAT map's visible marker footprint without SciPy."""
+    spread = grid.copy()
+    for row_shift in range(-radius, radius + 1):
+        for column_shift in range(-radius, radius + 1):
+            if not row_shift and not column_shift:
+                continue
+            shifted = np.roll(grid, (row_shift, column_shift), axis=(0, 1))
+            if row_shift > 0:
+                shifted[:row_shift, :] = 0
+            elif row_shift < 0:
+                shifted[row_shift:, :] = 0
+            if column_shift > 0:
+                shifted[:, :column_shift] = 0
+            elif column_shift < 0:
+                shifted[:, column_shift:] = 0
+            spread = np.maximum(spread, shifted)
+    return spread
+
+
+def _live_intensity_payload(processor: Any, room: Dict[str, Any]) -> Dict[str, Any]:
+    """Project MMW-HAT azimuth/elevation responses into browser-ready XY/YZ maps."""
+    views = getattr(processor, "last_intensity_views", None)
+    if not isinstance(views, dict):
+        return {}
+    ranges = np.asarray(views.get("range_m"), dtype=float)
+    azimuth = np.asarray(views.get("azimuth_deg"), dtype=float)
+    elevation = np.asarray(views.get("elevation_deg"), dtype=float)
+    xy_values = np.asarray(views.get("xy"), dtype=float)
+    yz_values = np.asarray(views.get("yz"), dtype=float)
+    if not ranges.size or xy_values.shape != (len(ranges), len(azimuth)):
+        return {}
+
+    width = float(room.get("width_m") or 5.0)
+    depth = float(room.get("depth_m") or 5.0)
+    height = float(room.get("height_m") or 2.7)
+    sensor_height = float(room.get("sensor_height_m") or 1.0)
+    sensor_position = float(room.get("sensor_position_m") or 0.0)
+    wall = str(room.get("sensor_wall") or "Back")
+
+    xy_grid = np.zeros((64, 64), dtype=float)
+    range_grid, angle_grid = np.meshgrid(ranges, np.deg2rad(azimuth), indexing="ij")
+    lateral = range_grid * np.sin(angle_grid)
+    forward = range_grid * np.cos(angle_grid)
+    if wall == "Back":
+        world_x, world_y = sensor_position + lateral, forward
+    elif wall == "Front":
+        world_x, world_y = sensor_position - lateral, depth - forward
+    elif wall == "Left":
+        world_x, world_y = forward, sensor_position - lateral
+    else:
+        world_x, world_y = width - forward, sensor_position + lateral
+    valid_xy = (
+        (world_x >= 0.0) & (world_x <= width)
+        & (world_y >= 0.0) & (world_y <= depth)
+    )
+    xy_columns = np.clip((world_x / max(width, 1e-6) * 63).astype(int), 0, 63)
+    xy_rows = np.clip((world_y / max(depth, 1e-6) * 63).astype(int), 0, 63)
+    np.maximum.at(xy_grid, (xy_rows[valid_xy], xy_columns[valid_xy]), xy_values[valid_xy])
+    xy_grid = _spread_intensity(xy_grid)
+
+    yz_grid = np.zeros((48, 72), dtype=float)
+    if yz_values.shape == (len(ranges), len(elevation)):
+        vertical_range, vertical_angle = np.meshgrid(
+            ranges, np.deg2rad(elevation), indexing="ij"
+        )
+        yz_forward = vertical_range * np.cos(vertical_angle)
+        yz_height = sensor_height + vertical_range * np.sin(vertical_angle)
+        forward_limit = min(float(np.max(ranges)), depth if wall in {"Back", "Front"} else width)
+        valid_yz = (
+            (yz_forward >= 0.0) & (yz_forward <= forward_limit)
+            & (yz_height >= 0.0) & (yz_height <= height)
+        )
+        yz_columns = np.clip((yz_forward / max(forward_limit, 1e-6) * 71).astype(int), 0, 71)
+        yz_rows = np.clip((yz_height / max(height, 1e-6) * 47).astype(int), 0, 47)
+        np.maximum.at(yz_grid, (yz_rows[valid_yz], yz_columns[valid_yz]), yz_values[valid_yz])
+        yz_grid = _spread_intensity(yz_grid)
+    else:
+        forward_limit = min(float(np.max(ranges)), depth if wall in {"Back", "Front"} else width)
+
+    return {
+        "scale": {"minimum": 0.0, "maximum": 1.0, "label": "Normalized intensity"},
+        "xy": {
+            "rows": int(xy_grid.shape[0]), "columns": int(xy_grid.shape[1]),
+            "values": np.rint(np.clip(xy_grid, 0.0, 1.0) * 255.0).astype(np.uint8).ravel().tolist(),
+            "x_max_m": width, "y_max_m": depth,
+        },
+        "yz": {
+            "rows": int(yz_grid.shape[0]), "columns": int(yz_grid.shape[1]),
+            "values": np.rint(np.clip(yz_grid, 0.0, 1.0) * 255.0).astype(np.uint8).ravel().tolist(),
+            "x_max_m": forward_limit, "y_max_m": height,
+            "sensor_height_m": sensor_height,
+        },
+    }
+
+
 def occupancy_region(
     detected_frames: int,
     evaluated_frames: int,
@@ -335,6 +432,8 @@ class StreamingChunkAnalyzer:
         self.playback_frames: List[Dict[str, Any]] = []
         self.live_state_path = live_state_path
         self.last_live_publish = 0.0
+        self.frame_times: deque[float] = deque(maxlen=60)
+        self.configured_frame_rate_hz = float(self.radar_config.get("frame_rate") or 0.0)
         self.max_visualization_frames = 48
         self.max_point_frames = 32
         csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -358,6 +457,7 @@ class StreamingChunkAnalyzer:
         shadow_intensity = np.asarray(shadow.get("intensity") if shadow.get("intensity") is not None else np.empty(0), dtype=float)
         frame_index = self.evaluated_frames
         self.evaluated_frames += 1
+        self.frame_times.append(time.monotonic())
         serialized_targets = [_serialize_target(target, self.room) for target in targets]
         self.last_targets = self.identity.assign(serialized_targets) if self.identity else serialized_targets
         # Live visualization and chunk labeling share this exact signal.
@@ -433,9 +533,14 @@ class StreamingChunkAnalyzer:
         if self.live_state_path is None:
             return
         now = time.monotonic()
-        if now - self.last_live_publish < 0.5:
+        publish_interval = max(0.03, 0.75 / max(1.0, self.configured_frame_rate_hz))
+        if now - self.last_live_publish < publish_interval:
             return
         self.last_live_publish = now
+        measured_hz = 0.0
+        if len(self.frame_times) > 1:
+            elapsed = self.frame_times[-1] - self.frame_times[0]
+            measured_hz = (len(self.frame_times) - 1) / elapsed if elapsed > 0 else 0.0
         temporary = self.live_state_path.with_name(
             f".{self.live_state_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
         )
@@ -467,6 +572,9 @@ class StreamingChunkAnalyzer:
                 },
                 "chunk_index": self.chunk_index,
                 "frame_index": self.evaluated_frames - 1,
+                "sensor_hz": round(measured_hz, 2),
+                "configured_hz": self.configured_frame_rate_hz,
+                "intensity": _live_intensity_payload(self.processor, self.room),
             }, separators=(",", ":")), encoding="utf-8")
             os.replace(temporary, self.live_state_path)
         except OSError:

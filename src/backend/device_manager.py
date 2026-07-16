@@ -276,28 +276,10 @@ class DeviceManager:
         desired_capture_settings = None
         if capture_updates:
             desired_capture_settings = self.save_capture_settings(capture_updates, local_change=True)
-        if self.registered and self.auth_token:
-            capture_synchronized = True
-            if desired_capture_settings is not None:
-                capture_synchronized = self._sync_capture_settings_to_brain(desired_capture_settings)
-            synchronized = self.update_status({
-                'online': True,
-                'hardware_info': self._build_hardware_info(
-                    include_capture_settings=capture_synchronized or desired_capture_settings is None
-                ),
-            })
-            if desired_capture_settings is not None:
-                current_capture_settings = self.load_capture_settings()
-                desired_values_preserved = all(
-                    current_capture_settings.get(key) == desired_capture_settings.get(key)
-                    for key in capture_updates
-                )
-                synchronized = synchronized and capture_synchronized and desired_values_preserved
-            self._settings_sync_pending = not synchronized
-            self._settings_sync_error = None if synchronized else 'Brain did not confirm the settings update; the local change is saved and will retry.'
-        else:
-            self._settings_sync_pending = True
-            self._settings_sync_error = None
+        # Settings affect the local collector, so a dashboard save must never
+        # wait for Brain. The heartbeat rebases this revision in the background.
+        self._settings_sync_pending = bool(desired_capture_settings) or self.registered
+        self._settings_sync_error = None
         return self.get_device_settings()
 
     def _sync_capture_settings_to_brain(self, desired: Dict[str, Any]) -> bool:
@@ -523,17 +505,10 @@ class DeviceManager:
         return persisted
 
     def save_and_sync_capture_settings(self, settings: Dict[str, Any] | None) -> Dict[str, Any]:
-        """Persist locally first, then attempt a device-authenticated Brain sync."""
-        saved = self.save_capture_settings(settings, local_change=True)
-        if self.registered and self.auth_token:
-            canonical_synchronized = self._sync_capture_settings_to_brain(saved)
-            synchronized = self.update_status({
-                'online': True,
-                'hardware_info': self._build_hardware_info(include_capture_settings=canonical_synchronized),
-            })
-            synchronized = synchronized and canonical_synchronized
-            self._settings_sync_pending = not synchronized
-            self._settings_sync_error = None if synchronized else 'Brain did not confirm the settings update; the local change is saved and will retry.'
+        """Persist immediately; the heartbeat performs remote reconciliation."""
+        self.save_capture_settings(settings, local_change=True)
+        self._settings_sync_pending = True
+        self._settings_sync_error = None
         return {
             **self.load_capture_settings(),
             'sync_pending': self._settings_sync_pending,

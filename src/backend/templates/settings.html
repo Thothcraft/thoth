@@ -153,6 +153,11 @@ document.getElementById('settings-form').addEventListener('submit', async (event
   payload.home_assistant_entity_id = event.target.home_assistant_entity_id.value;
   payload.home_assistant_token = event.target.home_assistant_token.value;
 
+  if (payload.yellow_threshold_percent >= payload.green_threshold_percent) {
+    showAlert('Yellow threshold must be lower than green threshold.', 'error');
+    return;
+  }
+
   const saveStatus = document.getElementById('save-status');
   saveStatus.textContent = 'Saving…';
   try {
@@ -181,7 +186,7 @@ document.getElementById('settings-form').addEventListener('submit', async (event
     document.getElementById('yellow-threshold-value').textContent = Number(event.target.yellow_threshold_percent.value).toFixed(0) + '%';
     document.getElementById('green-threshold-value').textContent = Number(event.target.green_threshold_percent.value).toFixed(0) + '%';
     event.target.home_assistant_token.value = '';
-    saveStatus.textContent = canonical.sync_pending ? 'Sync pending' : 'Saved';
+    saveStatus.textContent = canonical.sync_pending ? 'Saved locally · cloud sync pending' : 'Saved';
     showAlert(saveStatus.textContent, 'success');
   } catch (error) {
     saveStatus.textContent = error.message;

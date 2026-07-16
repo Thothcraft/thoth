@@ -91,7 +91,7 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(saved["sensors"]["usb_camera"])
             self.assertTrue(saved["sensors"]["dreamhat_radar"])
 
-    def test_dashboard_rebases_detection_regions_onto_brain_revision(self):
+    def test_dashboard_saves_detection_regions_without_waiting_for_brain(self):
         with tempfile.TemporaryDirectory() as root:
             manager = DeviceManager(_Config(root))
             manager.registered = True
@@ -109,21 +109,25 @@ class SettingsTests(unittest.TestCase):
             get_response.json.return_value = {"capture_settings": remote}
             put_response = mock.Mock(status_code=200)
             put_response.json.return_value = {"capture_settings": canonical}
-            with mock.patch.object(manager.session, "get", return_value=get_response), mock.patch.object(
+            with mock.patch.object(manager.session, "get", return_value=get_response) as get, mock.patch.object(
                 manager.session, "put", return_value=put_response
-            ) as put, mock.patch.object(manager, "update_status", return_value=True):
+            ) as put:
                 saved = manager.save_device_settings({
                     "yellow_threshold_percent": 31,
                     "green_threshold_percent": 74,
                 })
-            sent = put.call_args.kwargs["json"]
-            self.assertEqual(sent["revision"], 7)
-            self.assertEqual(sent["yellow_threshold_percent"], 31.0)
-            self.assertEqual(sent["green_threshold_percent"], 74.0)
-            self.assertEqual(saved["revision"], 8)
-            self.assertEqual(saved["yellow_threshold_percent"], 31.0)
-            self.assertEqual(saved["green_threshold_percent"], 74.0)
-            self.assertFalse(saved["sync_pending"])
+                get.assert_not_called()
+                put.assert_not_called()
+                self.assertEqual(saved["yellow_threshold_percent"], 31.0)
+                self.assertEqual(saved["green_threshold_percent"], 74.0)
+                self.assertTrue(saved["sync_pending"])
+
+                self.assertTrue(manager._sync_capture_settings_to_brain(manager.load_capture_settings()))
+                sent = put.call_args.kwargs["json"]
+                self.assertEqual(sent["revision"], 7)
+                self.assertEqual(sent["yellow_threshold_percent"], 31.0)
+                self.assertEqual(sent["green_threshold_percent"], 74.0)
+                self.assertEqual(manager.load_capture_settings()["revision"], 8)
 
     def test_frequent_heartbeat_does_not_rescan_complete_inventory(self):
         with tempfile.TemporaryDirectory() as root:

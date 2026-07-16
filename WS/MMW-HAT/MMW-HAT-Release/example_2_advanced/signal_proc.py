@@ -160,6 +160,13 @@ class SigProc:
             "points": np.empty((0, 3), dtype=float),
             "intensity": np.empty(0, dtype=float),
         }
+        self.last_intensity_views = {
+            "range_m": self.range_bin.copy(),
+            "azimuth_deg": self.azimuth_bin.copy(),
+            "elevation_deg": self.elevation_bin.copy(),
+            "xy": np.zeros((len(self.range_bin), len(self.azimuth_bin)), dtype=float),
+            "yz": np.zeros((len(self.range_bin), len(self.elevation_bin)), dtype=float),
+        }
         self._motion_strength_ema = None
 
         self.doppler = DopplerAlgo(radar_config, 3)
@@ -202,6 +209,18 @@ class SigProc:
         self.elevation_dbf = DBF(
             2, num_beams=beam_count, max_angle_degrees=self.max_elevation_deg
         )
+
+    @staticmethod
+    def _display_intensity(energy):
+        """Normalize one range-angle response using the MMW-HAT display scale."""
+        energy_db = 20.0 * np.log10(np.maximum(energy, np.finfo(float).tiny))
+        finite = energy_db[np.isfinite(energy_db)]
+        if not finite.size:
+            return np.zeros_like(energy_db, dtype=float)
+        floor = float(np.percentile(finite, 55.0))
+        ceiling = float(np.percentile(finite, 99.5))
+        span = max(1.0, ceiling - floor)
+        return np.clip((energy_db - floor) / span, 0.0, 1.0)
 
     def range_angle_products(self, frame):
         rd_spectrum = self._rd_spectrum
@@ -729,6 +748,16 @@ class SigProc:
         shadow_points, shadow_intensity, motion_strength = self._motion_shadow(
             energy_db, azimuth_cube, elevation_cube
         )
+        elevation_energy = np.linalg.norm(elevation_cube, axis=1) / math.sqrt(
+            self.num_elevation_beams
+        )
+        self.last_intensity_views = {
+            "range_m": self.range_bin.copy(),
+            "azimuth_deg": self.azimuth_bin.copy(),
+            "elevation_deg": self.elevation_bin.copy(),
+            "xy": self._display_intensity(azimuth_energy),
+            "yz": self._display_intensity(elevation_energy),
+        }
         start = int(np.searchsorted(self.range_bin, self.dead_zone))
         noise_floor_db = self._robust_noise_floor_db(energy_db[start:])
         detections = self._candidate_peaks(
