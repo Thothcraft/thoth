@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Profile - {{ super() }}{% endblock %}
+{% block extra_head %}
+<style>
+  .profile-header{margin:18px 0 34px}.profile-header h1{margin:0;font-size:clamp(38px,6vw,68px);font-weight:600;letter-spacing:-.055em}.profile-header p{margin:9px 0 0;color:#6d6961;font-size:14px}
+  .profile-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(260px,.65fr);gap:18px}
+  .profile-card{border:1px solid #c9c4b9;background:#faf8f2;padding:24px}
+  .profile-card h2{margin:0;font-size:20px}.profile-fields{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:22px}
+  .profile-field{display:grid;gap:7px;color:#4e4b45;font-size:12px;font-weight:700}.profile-field input{border:1px solid #aaa59b;background:#fff;padding:11px 12px;border-radius:8px}.profile-field.wide{grid-column:1/-1}
+  .profile-save{margin-top:20px;border:0;border-radius:8px;background:#11110f;color:#fff;padding:11px 15px;font-size:12px;font-weight:700}
+  .profile-fact{padding:14px 0;border-top:1px solid #ddd8ce}.profile-fact:first-of-type{margin-top:18px}.profile-fact span{display:block;color:#77736b;font-size:10px;text-transform:uppercase;letter-spacing:.12em}.profile-fact strong{display:block;margin-top:5px;font-size:15px;overflow-wrap:anywhere}
+  .verification{margin-top:9px;font-size:12px;font-weight:700}.verification.verified{color:#238653}.verification.pending{color:#9a641c}
+  .profile-secondary{margin-top:12px;border:1px solid #aaa59b;background:#fff;border-radius:8px;padding:9px 12px;font-size:12px;font-weight:700}
+  .profile-status{min-height:20px;margin-top:12px;color:#6d6961;font-size:12px}
+  @media(max-width:800px){.profile-grid{grid-template-columns:1fr}.profile-fields{grid-template-columns:1fr}.profile-field.wide{grid-column:auto}}
+</style>
+{% endblock %}
+{% block content %}
+<header class="profile-header"><h1>Profile</h1><p>Your Thoth account profile is available here and in the Research Portal.</p></header>
+<div id="profile-loading" class="profile-card">Loading profile...</div>
+<div id="profile-content" class="profile-grid" hidden>
+  <section class="profile-card">
+    <h2>Identity</h2>
+    <div class="profile-fields">
+      <label class="profile-field">Username<input id="profile-username" autocomplete="username"></label>
+      <label class="profile-field">Phone<input id="profile-phone" inputmode="tel" placeholder="Optional"></label>
+      <label id="organization-field" class="profile-field wide" hidden>Organization<input id="profile-organization"></label>
+    </div>
+    <button id="profile-save" class="profile-save">Save profile</button>
+    <div id="profile-status" class="profile-status" role="status"></div>
+  </section>
+  <aside class="profile-card">
+    <h2>Account</h2>
+    <div class="profile-fact"><span>Email</span><strong id="profile-email">-</strong><div id="profile-verification" class="verification"></div><button id="profile-resend" class="profile-secondary" hidden>Resend verification</button></div>
+    <div class="profile-fact"><span>Plan</span><strong id="profile-plan">-</strong></div>
+    <div class="profile-fact"><span>Account ID</span><strong id="profile-id">-</strong></div>
+  </aside>
+</div>
+<script>
+let profile=null;
+const loading=document.getElementById('profile-loading'),content=document.getElementById('profile-content'),status=document.getElementById('profile-status');
+async function readJson(response){const text=await response.text();try{return JSON.parse(text)}catch{return{message:`Unexpected response (${response.status})`}}}
+function showProfile(value){profile=value;loading.hidden=true;content.hidden=false;document.getElementById('profile-username').value=value.username||'';document.getElementById('profile-phone').value=value.phone_number||'';document.getElementById('profile-organization').value=value.org_name||'';document.getElementById('organization-field').hidden=value.role!==2;document.getElementById('profile-email').textContent=value.email||'No email stored';document.getElementById('profile-plan').textContent=value.plan||'free';document.getElementById('profile-id').textContent=value.userId||'-';const verification=document.getElementById('profile-verification'),resend=document.getElementById('profile-resend');verification.textContent=value.email_verified?'Verified':'Verification pending';verification.className=`verification ${value.email_verified?'verified':'pending'}`;resend.hidden=!value.email||value.email_verified}
+async function loadProfile(){const response=await fetch('/api/profile',{cache:'no-store'}),body=await readJson(response);if(!response.ok){loading.textContent=body.detail||body.message||'Unable to load profile';return}showProfile(body)}
+document.getElementById('profile-save').addEventListener('click',async()=>{status.textContent='Saving...';const payload={username:document.getElementById('profile-username').value.trim(),phone_number:Number(document.getElementById('profile-phone').value.replace(/\D/g,''))||null};if(profile?.role===2)payload.org_name=document.getElementById('profile-organization').value.trim();const response=await fetch('/api/profile',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),body=await readJson(response);if(!response.ok){status.textContent=body.detail||body.message||'Unable to save profile';return}showProfile(body);status.textContent='Profile saved.'});
+document.getElementById('profile-resend').addEventListener('click',async()=>{status.textContent='Requesting verification email...';const response=await fetch('/api/profile/resend-verification',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:profile.email})}),body=await readJson(response);status.textContent=body.message||body.detail||(response.ok?'Verification requested.':'Unable to request verification.')});
+loadProfile();
+</script>
+{% endblock %}

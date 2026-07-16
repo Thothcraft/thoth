@@ -265,6 +265,9 @@ def _update_example2_xy_plot(processor: Any) -> Dict[str, Any]:
             * exact.processing_config["spatial_resolution"]
         ),
         "source": "example_2_track/location_gui.py",
+        "native_pipeline": True,
+        "processing_source": "example_2_track/signal_proc.py::SigProc.target_detection",
+        "display_source": "example_2_track/location_gui.py::update_gui",
     }
     setattr(processor, "_thoth_example2_xy_payload", payload)
     return payload

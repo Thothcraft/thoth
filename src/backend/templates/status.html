@@ -2,44 +2,62 @@
 {% block title %}Home - {{ super() }}{% endblock %}
 {% block extra_head %}
 <style>
-  .home-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(300px,.65fr);gap:18px;min-height:calc(100vh - 190px)}
-  .assistant-stage{position:relative;overflow:hidden;background:#11110f;color:#f5f1e8;border-radius:28px;padding:clamp(28px,5vw,72px);display:flex;flex-direction:column}
-  .assistant-stage:before{content:"";position:absolute;width:520px;height:520px;border:1px solid #383831;border-radius:50%;right:-180px;top:-220px;box-shadow:0 0 0 70px rgba(255,255,255,.018),0 0 0 140px rgba(255,255,255,.012)}
-  .assistant-kicker{font:700 10px ui-monospace,monospace;letter-spacing:.22em;text-transform:uppercase;color:#a8a49b}
-  .assistant-title{position:relative;margin-top:22px;max-width:780px;font-family:Georgia,"Times New Roman",serif;font-size:clamp(52px,7vw,104px);font-weight:400;line-height:.88;letter-spacing:-.065em}
-  .assistant-copy{position:relative;margin-top:24px;max-width:590px;color:#aaa69d;line-height:1.65}
-  .assistant-log{position:relative;flex:1;min-height:140px;max-height:320px;overflow:auto;margin-top:32px;padding-right:8px}
-  .assistant-message{max-width:82%;margin:10px 0;padding:12px 15px;border:1px solid #393933;border-radius:14px;color:#d7d2c8;font-size:14px;line-height:1.5}
-  .assistant-message.user{margin-left:auto;background:#f4f1e9;color:#11110f;border-color:#f4f1e9}
-  .assistant-form{position:relative;display:flex;gap:10px;margin-top:24px;border-top:1px solid #383831;padding-top:20px}
-  .assistant-form input{flex:1;border:1px solid #47473f;background:#1a1a17;color:#fff;border-radius:999px;padding:14px 18px;outline:none}
-  .assistant-form button{width:48px;height:48px;border:0;border-radius:50%;background:#d9e6bb;color:#11110f;font-size:20px}
-  .home-rail{display:flex;flex-direction:column;gap:18px}
-  .rail-card{background:#faf8f2;border:1px solid #c9c4b9;border-radius:20px;padding:22px}
-  .rail-card h2{font-family:Georgia,serif;font-size:28px;font-weight:400}
-  .metric{display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid #ddd8ce;font-size:13px}.metric:last-child{border:0}
-  .quick-command{display:block;width:100%;margin-top:9px;border:1px solid #aaa59b;background:transparent;border-radius:999px;padding:10px 12px;text-align:left;font-size:12px;font-weight:700}
-  @media(max-width:900px){.home-grid{grid-template-columns:1fr}.assistant-stage{min-height:620px}}
+  .home-header{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin:18px 0 34px}
+  .home-header h1{margin:0;font-size:clamp(38px,6vw,68px);font-weight:600;letter-spacing:-.055em}
+  .home-header p{max-width:560px;margin:9px 0 0;color:#6d6961;font-size:14px;line-height:1.6}
+  .home-state{display:inline-flex;align-items:center;gap:8px;color:#4e4b45;font-size:12px;font-weight:700}
+  .home-state i{width:8px;height:8px;border-radius:50%;background:{{ '#238653' if system_status.collection_active else '#9b978f' }}}
+  .home-grid{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(280px,.6fr);gap:18px}
+  .assistant-panel,.system-panel{border:1px solid #c9c4b9;background:#faf8f2;padding:24px}
+  .panel-label{font:700 10px ui-monospace,SFMono-Regular,Consolas,monospace;text-transform:uppercase;letter-spacing:.16em;color:#77736b}
+  .assistant-log{height:340px;overflow:auto;margin-top:20px;padding-right:8px}
+  .assistant-message{width:fit-content;max-width:82%;margin:9px 0;border:1px solid #d5d1c8;background:#fff;padding:11px 13px;border-radius:10px;color:#4e4b45;font-size:14px;line-height:1.55}
+  .assistant-message.user{margin-left:auto;background:#11110f;border-color:#11110f;color:#fff}
+  .assistant-form{display:flex;gap:8px;margin-top:18px;border-top:1px solid #ddd8ce;padding-top:18px}
+  .assistant-form input{flex:1;border:1px solid #aaa59b;background:#fff;padding:12px 14px;border-radius:8px;outline:none}
+  .assistant-form button{width:44px;border:0;border-radius:8px;background:#11110f;color:#fff;font-size:18px}
+  .metrics{margin-top:18px}
+  .metric{display:flex;justify-content:space-between;gap:12px;padding:13px 0;border-top:1px solid #ddd8ce;font-size:13px}
+  .metric span{color:#77736b}.metric strong{font-weight:700}
+  .home-actions{margin-top:20px;display:grid;gap:8px}
+  .home-action{border:1px solid #aaa59b;background:#fff;padding:10px 12px;border-radius:8px;text-align:left;font-size:12px;font-weight:700}
+  .home-links{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+  .home-links a{border:1px solid #aaa59b;background:#fff;padding:10px 12px;border-radius:8px;text-align:center;font-size:12px;font-weight:700}
+  @media(max-width:900px){.home-grid{grid-template-columns:1fr}.assistant-log{height:300px}}
 </style>
 {% endblock %}
 {% block content %}
+<header class="home-header">
+  <div><h1>Home</h1><p>Monitor this device, inspect retained sensor minutes, and use the account assistant for collection controls.</p></div>
+  <div class="home-state"><i></i>{{ 'Collecting' if system_status.collection_active else 'Ready' }}</div>
+</header>
 <div class="home-grid">
-  <section class="assistant-stage">
-    <div class="assistant-kicker">Thoth intelligence · device {{ device_info.device_id[:8] if device_info.device_id else 'local' }}</div>
-    <h1 class="assistant-title">Ask your sensing environment.</h1>
-    <p class="assistant-copy">The same account-scoped assistant used by Portal can inspect your system and call secure device functions. Ask it to start or stop collection, or label the current 10-frame stream.</p>
-    <div id="assistant-log" class="assistant-log"><div class="assistant-message">I can control this device and explain its live state. Try “start collection” or “label the current stream cooking”.</div></div>
-    <form id="assistant-form" class="assistant-form"><input id="assistant-input" autocomplete="off" placeholder="Message Thoth..." aria-label="Message Thoth assistant"><button aria-label="Send">↑</button></form>
+  <section class="assistant-panel">
+    <div class="panel-label">Assistant</div>
+    <div id="assistant-log" class="assistant-log"><div class="assistant-message">Ask about this device or tell me to start, stop, or label the current collection stream.</div></div>
+    <form id="assistant-form" class="assistant-form"><input id="assistant-input" autocomplete="off" placeholder="Ask or control this device" aria-label="Message assistant"><button aria-label="Send">↑</button></form>
   </section>
-  <aside class="home-rail">
-    <section class="rail-card"><div class="assistant-kicker">Live system</div><h2>{{ 'Collecting' if system_status.collection_active else 'Ready' }}</h2><div class="mt-4"><div class="metric"><span>WiFi</span><strong>{{ 'Connected' if system_status.wifi_connected else 'Offline' }}</strong></div><div class="metric"><span>Saved minutes</span><strong>{{ capture_overview.minute_count }}</strong></div><div class="metric"><span>Disk used</span><strong>{{ system_status.disk_usage['percent_used'] if system_status.disk_usage else 0 }}%</strong></div></div></section>
-    <section class="rail-card"><div class="assistant-kicker">Suggested functions</div><button class="quick-command" data-command="Start data collection">Start collection</button><button class="quick-command" data-command="Stop data collection">Stop collection</button><button class="quick-command" data-command="Label the current data collection stream occupied">Label current chunk</button><a href="{{ url_for('presence_view') }}" class="quick-command">Open live presence</a><a href="{{ url_for('captures') }}" class="quick-command">Browse captures</a></section>
+  <aside class="system-panel">
+    <div class="panel-label">Device</div>
+    <div class="metrics">
+      <div class="metric"><span>Connection</span><strong>{{ 'Online' if system_status.wifi_connected else 'Offline' }}</strong></div>
+      <div class="metric"><span>Stored minutes</span><strong>{{ capture_overview.minute_count }}</strong></div>
+      <div class="metric"><span>Disk used</span><strong>{{ system_status.disk_usage['percent_used'] if system_status.disk_usage else 0 }}%</strong></div>
+      <div class="metric"><span>Device ID</span><strong>{{ device_info.device_id[:8] if device_info.device_id else 'local' }}</strong></div>
+    </div>
+    <div class="home-actions">
+      <button class="home-action" data-command="Start data collection">Start collection</button>
+      <button class="home-action" data-command="Stop data collection">Stop collection</button>
+      <button class="home-action" data-command="Label the current data collection stream occupied">Label current chunk occupied</button>
+    </div>
+    <div class="home-links"><a href="{{ url_for('presence_view') }}">Presence</a><a href="{{ url_for('captures') }}">Captures</a></div>
   </aside>
 </div>
 <script>
 const form=document.getElementById('assistant-form'),input=document.getElementById('assistant-input'),log=document.getElementById('assistant-log');let chatId=null,busy=false;
-function append(text,role='assistant'){const item=document.createElement('div');item.className=`assistant-message ${role}`;item.textContent=text;log.appendChild(item);log.scrollTop=log.scrollHeight}
-async function ask(text){if(!text||busy)return;busy=true;append(text,'user');input.value='';append('Thinking and checking device state...');const pending=log.lastElementChild;try{const response=await fetch('/api/assistant',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:text,chat_id:chatId})}),body=await response.json();pending.remove();if(!response.ok)throw new Error(body.detail||body.message||'Assistant unavailable');chatId=body.chat_id||chatId;append(body.response||'Command accepted.')}catch(error){pending.textContent=error.message}finally{busy=false;input.focus()}}
+function append(text,role='assistant'){const item=document.createElement('div');item.className=`assistant-message ${role}`;item.textContent=text;log.appendChild(item);log.scrollTop=log.scrollHeight;return item}
+async function readJson(response){const text=await response.text();try{return JSON.parse(text)}catch{return{message:`Assistant returned an invalid response (${response.status})`}}}
+async function ask(text){if(!text||busy)return;busy=true;append(text,'user');input.value='';const pending=append('Working...');try{const response=await fetch('/api/assistant',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:text,chat_id:chatId})}),body=await readJson(response);if(!response.ok)throw new Error(body.detail||body.message||'Assistant unavailable');chatId=body.chat_id||chatId;pending.textContent=body.response||'Command accepted.'}catch(error){pending.textContent=error.message}finally{busy=false;input.focus()}}
 form.addEventListener('submit',event=>{event.preventDefault();ask(input.value.trim())});
 document.querySelectorAll('[data-command]').forEach(button=>button.addEventListener('click',()=>ask(button.dataset.command)));
 </script>

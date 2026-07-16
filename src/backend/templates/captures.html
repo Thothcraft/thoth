@@ -2,81 +2,90 @@
 {% block title %}Captures - {{ super() }}{% endblock %}
 {% block extra_head %}
 <style>
-  .capture-page{min-height:calc(100vh - 180px);display:flex;flex-direction:column;justify-content:center}
-  .capture-head{display:flex;align-items:flex-end;justify-content:space-between;gap:28px;margin-bottom:58px}
-  .capture-kicker{font:700 10px ui-monospace,monospace;letter-spacing:.22em;text-transform:uppercase;color:#77736b}
-  .capture-title{font-family:Georgia,"Times New Roman",serif;font-size:clamp(58px,9vw,132px);font-weight:400;line-height:.78;letter-spacing:-.075em;color:#11110f}
-  .capture-subtitle{max-width:420px;font-size:15px;line-height:1.6;color:#6b675f}
-  .capture-controls{display:flex;align-items:center;gap:8px;margin-top:18px}
-  .capture-control{border:1px solid #b9b4aa;background:transparent;border-radius:999px;padding:9px 14px;font-size:12px;font-weight:700}
-  .capture-control.primary{background:#11110f;color:#fff;border-color:#11110f}
-  .capture-control.hidden{display:none}
-  .timeline-shell{position:relative;padding:84px 2vw 100px;overflow:hidden;border-top:1px solid #bdb8ae;border-bottom:1px solid #bdb8ae}
-  .timeline-shell:before{content:"";position:absolute;left:0;right:0;top:50%;height:1px;background:#aaa59b}
-  .timeline{display:flex;align-items:center;gap:clamp(18px,3.2vw,58px);overflow-x:auto;overflow-y:hidden;padding:64px 9vw;scrollbar-width:none}
-  .timeline::-webkit-scrollbar{display:none}
-  .capture-minute{--focus:0;position:relative;flex:0 0 58px;height:58px;display:grid;place-items:center;text-decoration:none;transform:scale(calc(1 + var(--focus)*1.45));transition:transform .16s cubic-bezier(.2,.8,.2,1),opacity .2s;transform-origin:center;z-index:2}
-  .capture-minute:hover{animation:minute-magnify 2.6s cubic-bezier(.2,.8,.2,1) forwards}
-  @keyframes minute-magnify{to{transform:scale(calc(1.25 + var(--focus)*1.95))}}
-  .capture-dot{width:14px;height:14px;border-radius:50%;background:var(--dot);box-shadow:0 0 0 7px #f4f1e9,0 0 0 8px #aaa59b}
-  .capture-minute[data-active="true"] .capture-dot{box-shadow:0 0 0 7px #f4f1e9,0 0 0 10px rgba(31,110,255,.25)}
-  .capture-label{position:absolute;top:48px;left:50%;transform:translateX(-50%);width:150px;text-align:center;opacity:calc(.45 + var(--focus)*.55);transition:opacity .2s}
-  .capture-label strong{display:block;font:700 11px ui-monospace,monospace;color:#11110f}
-  .capture-label span{display:block;margin-top:5px;font-size:10px;color:#77736b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .timeline-empty{text-align:center;color:#77736b;padding:70px}
-  .timeline-legend{display:flex;flex-wrap:wrap;justify-content:center;gap:18px;margin-top:28px;font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:#6b675f}
-  .timeline-legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
-  .capture-status{min-height:20px;margin-top:12px;font-size:12px;color:#6b675f}
-  @media(max-width:700px){.capture-head{align-items:flex-start;flex-direction:column;margin-bottom:30px}.capture-title{font-size:64px}.timeline-shell{margin-inline:-1rem}.capture-label{width:112px}}
+  .captures-page{min-height:calc(100vh - 210px)}
+  .captures-header{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin:18px 0 52px}
+  .captures-header h1{margin:0;font-size:clamp(38px,6vw,68px);font-weight:600;letter-spacing:-.055em}
+  .captures-header p{max-width:520px;margin:10px 0 0;color:#6d6961;font-size:14px;line-height:1.6}
+  .capture-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .capture-action{border:1px solid #aaa59b;background:#faf8f2;color:#11110f;border-radius:8px;padding:9px 13px;font-size:12px;font-weight:700}
+  .capture-action.primary{background:#11110f;border-color:#11110f;color:#fff}
+  .capture-action.hidden{display:none}
+  .archive{border:1px solid #c9c4b9;background:#faf8f2;padding:26px 22px 20px}
+  .archive-meta{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:24px;color:#77736b;font-size:11px}
+  .archive-meta strong{color:#11110f;font-size:13px}
+  .timeline-viewport{overflow-x:auto;padding:12px 4px 18px;scrollbar-color:#aaa59b transparent;scrollbar-width:thin}
+  .timeline{position:relative;display:flex;align-items:flex-start;gap:22px;min-width:max-content;padding:12px 10px 4px}
+  .timeline:before{content:"";position:absolute;left:10px;right:10px;top:20px;height:1px;background:#c9c4b9}
+  .capture-minute{position:relative;z-index:1;width:34px;color:#77736b;text-decoration:none;text-align:center}
+  .capture-dot{display:block;width:9px;height:9px;margin:4px auto 12px;border-radius:50%;background:var(--dot);box-shadow:0 0 0 4px #faf8f2}
+  .capture-time{display:block;font:600 9px ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap}
+  .capture-date{display:block;height:14px;margin-top:4px;font-size:8px;white-space:nowrap;color:#aaa59b}
+  .capture-minute:hover .capture-dot,.capture-minute:focus-visible .capture-dot{box-shadow:0 0 0 4px #faf8f2,0 0 0 5px #11110f}
+  .timeline-empty{padding:30px;color:#77736b;font-size:13px}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:18px;color:#77736b;font-size:10px;text-transform:uppercase;letter-spacing:.1em}
+  .legend i{display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%}
+  .capture-status{min-height:18px;margin-top:10px;color:#77736b;font-size:12px}
+  @media(max-width:700px){.captures-header{align-items:flex-start;flex-direction:column;margin-bottom:30px}.archive{margin-inline:-16px;border-left:0;border-right:0;padding-inline:14px}}
 </style>
 {% endblock %}
 {% block content %}
-<div class="capture-page">
-  <header class="capture-head">
+<div class="captures-page">
+  <header class="captures-header">
     <div>
-      <div class="capture-kicker">Synchronized sensor archive</div>
-      <h1 class="capture-title">Captures</h1>
-      <div class="capture-controls">
-        <button id="start-capturing" class="capture-control primary {{ 'hidden' if system_status.collection_active else '' }}">Start collection</button>
-        <button id="stop-capturing" class="capture-control {{ '' if system_status.collection_active else 'hidden' }}">Stop collection</button>
-        <button id="refresh-captures" class="capture-control">Refresh</button>
-      </div>
-      <div id="capture-status" class="capture-status">{{ 'Collecting one-second sensor windows' if system_status.collection_active else 'Collection paused' }}</div>
+      <h1>Captures</h1>
+      <p>Every retained minute, ordered by capture time. Select a minute to inspect its synchronized chunks, plots, sensor files, labels, and predictions.</p>
+      <div id="capture-status" class="capture-status">{{ 'Collecting now' if system_status.collection_active else 'Collection paused' }}</div>
     </div>
-    <p class="capture-subtitle">Move the cursor along the timeline to progressively magnify nearby minutes. Select a point to open its synchronized radar, camera, CSI, labels, and predictions.</p>
+    <div class="capture-actions">
+      <button id="start-capturing" class="capture-action primary {{ 'hidden' if system_status.collection_active else '' }}">Start</button>
+      <button id="stop-capturing" class="capture-action {{ '' if system_status.collection_active else 'hidden' }}">Stop</button>
+      <button id="refresh-captures" class="capture-action">Refresh</button>
+    </div>
   </header>
 
-  <section class="timeline-shell" aria-label="Captured minute timeline">
-    <div id="capture-timeline" class="timeline">
-      {% for minute in minutes %}
-      {% set state = minute.latest_chunk.state if minute.latest_chunk else 'unclassified' %}
-      {% set color = '#238653' if state == 'occupied' else '#d3463b' if state == 'empty' else '#246bfd' if state in ['collecting','stored','analyzing','loading'] else '#7651c9' if minute.labels and minute.labels|length else '#11110f' if state == 'error' else '#9b978f' %}
-      <a href="{{ url_for('capture_detail', minute=minute.minute) }}" class="capture-minute" data-minute="{{ minute.minute }}" data-active="{{ 'true' if minute.minute == active_minute else 'false' }}" style="--dot:{{ color }}">
-        <span class="capture-dot"></span>
-        <span class="capture-label"><strong>{{ minute.minute[9:11] }}:{{ minute.minute[11:13] }}</strong><span>{{ minute.latest_chunk.prediction if minute.latest_chunk and minute.latest_chunk.prediction else minute.labels|join(', ') if minute.labels else 'unclassified' }}</span></span>
-      </a>
-      {% endfor %}
-      {% if not minutes %}<div class="timeline-empty">No captured minutes yet.</div>{% endif %}
+  <section class="archive" aria-label="Captured minute timeline">
+    <div class="archive-meta">
+      <strong><span id="capture-count">{{ minutes|length }}</span> stored minutes</strong>
+      <span>Oldest to newest</span>
+    </div>
+    <div id="timeline-viewport" class="timeline-viewport">
+      <div id="capture-timeline" class="timeline">
+        {% for minute in minutes %}
+        {% set active = minute.minute == active_minute %}
+        {% set state = minute.latest_chunk.state if minute.latest_chunk else 'unclassified' %}
+        {% set color = '#246bfd' if active else '#238653' if state == 'occupied' else '#d3463b' if state == 'empty' else '#9b978f' %}
+        <a href="{{ url_for('capture_detail', minute=minute.minute) }}" class="capture-minute" title="{{ minute.minute }} · {{ 'collecting' if active else state }}" style="--dot:{{ color }}">
+          <span class="capture-dot"></span>
+          <span class="capture-time">{{ minute.minute[9:11] }}:{{ minute.minute[11:13] }}</span>
+          <span class="capture-date">{{ minute.minute[4:6] }}/{{ minute.minute[6:8] }}</span>
+        </a>
+        {% endfor %}
+        {% if not minutes %}<div class="timeline-empty">No captured minutes yet.</div>{% endif %}
+      </div>
+    </div>
+    <div class="legend">
+      <span><i style="background:#9b978f"></i>Unclassified</span>
+      <span><i style="background:#d3463b"></i>Empty</span>
+      <span><i style="background:#238653"></i>Occupied</span>
+      <span><i style="background:#246bfd"></i>Current</span>
     </div>
   </section>
-  <div class="timeline-legend">
-    <span><i style="background:#9b978f"></i>Unclassified</span><span><i style="background:#d3463b"></i>Empty</span><span><i style="background:#238653"></i>Occupied</span><span><i style="background:#246bfd"></i>Collecting</span><span><i style="background:#7651c9"></i>Labeled</span><span><i style="background:#11110f"></i>Error</span>
-  </div>
 </div>
 <script>
 const timeline=document.getElementById('capture-timeline');
+const viewport=document.getElementById('timeline-viewport');
 const status=document.getElementById('capture-status');
-function colorFor(minute){const state=minute.latest_chunk?.state;if(state==='occupied')return'#238653';if(state==='empty')return'#d3463b';if(['collecting','stored','analyzing','loading'].includes(state))return'#246bfd';if(state==='error')return'#11110f';if(minute.labels?.length)return'#7651c9';return'#9b978f'}
-function minuteLabel(minute){return minute.latest_chunk?.prediction||minute.latest_chunk?.state||minute.labels?.join(', ')||'unclassified'}
 function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[character]))}
-function render(minutes,active){timeline.innerHTML=minutes.length?minutes.map(minute=>`<a href="/captures/${encodeURIComponent(minute.minute)}" class="capture-minute" data-minute="${escapeHtml(minute.minute)}" data-active="${minute.minute===active}" style="--dot:${colorFor(minute)}"><span class="capture-dot"></span><span class="capture-label"><strong>${escapeHtml(minute.minute.slice(9,11))}:${escapeHtml(minute.minute.slice(11,13))}</strong><span>${escapeHtml(minuteLabel(minute))}</span></span></a>`).join(''):'<div class="timeline-empty">No captured minutes yet.</div>'}
-timeline?.addEventListener('pointermove',event=>{for(const item of timeline.querySelectorAll('.capture-minute')){const box=item.getBoundingClientRect(),center=box.left+box.width/2,distance=Math.abs(event.clientX-center),focus=Math.max(0,1-distance/190);item.style.setProperty('--focus',focus.toFixed(3));}})
-timeline?.addEventListener('pointerleave',()=>timeline.querySelectorAll('.capture-minute').forEach(item=>item.style.setProperty('--focus','0')))
-async function control(action){const button=document.getElementById(`${action}-capturing`);button.disabled=true;try{const response=await fetch(`/api/collection/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),body=await response.json();if(!response.ok)throw new Error(body.message||'Command failed');status.textContent=body.message;document.getElementById('start-capturing').classList.toggle('hidden',action==='start');document.getElementById('stop-capturing').classList.toggle('hidden',action==='stop')}catch(error){status.textContent=error.message}finally{button.disabled=false}}
-async function refresh(){const response=await fetch('/api/captures/timeline?limit=90',{cache:'no-store'}),body=await response.json();if(response.ok)render(body.minutes||[],body.active_minute)}
+function stateFor(minute,active){if(minute.minute===active)return'current';return minute.latest_chunk?.state==='occupied'?'occupied':minute.latest_chunk?.state==='empty'?'empty':'unclassified'}
+function colorFor(state){return state==='current'?'#246bfd':state==='occupied'?'#238653':state==='empty'?'#d3463b':'#9b978f'}
+function render(minutes,active){timeline.innerHTML=minutes.length?minutes.map(minute=>{const state=stateFor(minute,active),name=String(minute.minute||'');return`<a href="/captures/${encodeURIComponent(name)}" class="capture-minute" title="${escapeHtml(name)} · ${state}" style="--dot:${colorFor(state)}"><span class="capture-dot"></span><span class="capture-time">${escapeHtml(name.slice(9,11))}:${escapeHtml(name.slice(11,13))}</span><span class="capture-date">${escapeHtml(name.slice(4,6))}/${escapeHtml(name.slice(6,8))}</span></a>`}).join(''):'<div class="timeline-empty">No captured minutes yet.</div>';document.getElementById('capture-count').textContent=minutes.length}
+async function readJson(response){const text=await response.text();try{return JSON.parse(text)}catch{return{message:`Unexpected response (${response.status})`}}}
+async function control(action){const button=document.getElementById(`${action}-capturing`);button.disabled=true;try{const response=await fetch(`/api/collection/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),body=await readJson(response);if(!response.ok)throw new Error(body.message||'Command failed');status.textContent=body.message;document.getElementById('start-capturing').classList.toggle('hidden',action==='start');document.getElementById('stop-capturing').classList.toggle('hidden',action==='stop');await refresh(true)}catch(error){status.textContent=error.message}finally{button.disabled=false}}
+async function refresh(forceEnd=false){const nearEnd=viewport.scrollWidth-viewport.scrollLeft-viewport.clientWidth<80;const response=await fetch('/api/captures/timeline',{cache:'no-store'}),body=await readJson(response);if(!response.ok){status.textContent=body.message||'Unable to refresh captures';return}render(body.minutes||[],body.active_minute);if(forceEnd||nearEnd)requestAnimationFrame(()=>viewport.scrollLeft=viewport.scrollWidth)}
 document.getElementById('start-capturing')?.addEventListener('click',()=>control('start'));
 document.getElementById('stop-capturing')?.addEventListener('click',()=>control('stop'));
-document.getElementById('refresh-captures')?.addEventListener('click',refresh);
-window.setInterval(refresh,5000);
+document.getElementById('refresh-captures')?.addEventListener('click',()=>refresh());
+requestAnimationFrame(()=>viewport.scrollLeft=viewport.scrollWidth);
+window.setInterval(()=>refresh(),5000);
 </script>
 {% endblock %}

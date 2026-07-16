@@ -172,7 +172,8 @@ terminal_manager = SSHTerminalManager(socketio, Config)
 collection_active = False
 collection_process: Optional[subprocess.Popen] = None
 COLLECTOR_PAUSE_PATH = THOTH_ROOT / 'config' / 'collector.pause'
-_capture_timeline_cache: Dict[str, Any] = {'at': 0.0, 'limit': 0, 'items': []}
+_capture_timeline_cache: Dict[str, Any] = {'signature': None, 'items': []}
+_capture_manifest_cache: Dict[str, Any] = {}
 wifi_manager = None
 
 # Mock user for local authentication (in production, use a proper user database)
@@ -1454,7 +1455,11 @@ def status():
 @app.route('/api/assistant', methods=['POST'])
 def assistant_query():
     """Use the same authenticated Brain assistant as Research Portal."""
-    token = getattr(device_manager, 'auth_token', None) or getattr(Config, 'USER_AUTH_TOKEN', None)
+    token = (
+        getattr(auth_manager, 'token', None)
+        or getattr(device_manager, 'auth_token', None)
+        or getattr(Config, 'USER_AUTH_TOKEN', None)
+    )
     if not token:
         return jsonify({'success': False, 'message': 'Log in to use the assistant'}), 401
     payload = request.get_json(silent=True) or {}
@@ -1463,7 +1468,7 @@ def assistant_query():
         return jsonify({'success': False, 'message': 'Query is required'}), 400
     try:
         response = requests.post(
-            f"{Config.BRAIN_SERVER_URL}/api/query",
+            _brain_api_url('/query'),
             json={
                 'query': query,
                 'chat_id': payload.get('chat_id'),
@@ -1476,11 +1481,82 @@ def assistant_query():
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
             timeout=90,
         )
-        body = response.json()
+        body = _response_json(response)
+        if body is None:
+            logger.error(
+                'Brain assistant returned non-JSON content: status=%s content_type=%s',
+                response.status_code,
+                response.headers.get('content-type'),
+            )
+            return jsonify({
+                'success': False,
+                'message': f'Assistant service returned an invalid response ({response.status_code})',
+            }), 502
         return jsonify(body), response.status_code
     except Exception as exc:
         logger.exception('Assistant request failed: %s', exc)
         return jsonify({'success': False, 'message': 'Assistant unavailable'}), 502
+
+
+def _brain_api_url(path: str) -> str:
+    base = str(Config.BRAIN_SERVER_URL or '').rstrip('/')
+    suffix = '/' + str(path or '').lstrip('/')
+    return f"{base}{suffix}" if base.endswith('/api') else f"{base}/api{suffix}"
+
+
+def _response_json(response: requests.Response) -> Optional[Dict[str, Any]]:
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _brain_profile_request(method: str, path: str, payload: Optional[Dict[str, Any]] = None):
+    token = (
+        getattr(auth_manager, 'token', None)
+        or getattr(device_manager, 'auth_token', None)
+        or getattr(Config, 'USER_AUTH_TOKEN', None)
+    )
+    if not token:
+        return jsonify({'success': False, 'message': 'Log in to view this profile'}), 401
+    try:
+        response = requests.request(
+            method,
+            _brain_api_url(path),
+            json=payload,
+            headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+            timeout=20,
+        )
+        body = _response_json(response)
+        if body is None:
+            return jsonify({
+                'success': False,
+                'message': f'Profile service returned an invalid response ({response.status_code})',
+            }), 502
+        return jsonify(body), response.status_code
+    except requests.RequestException as exc:
+        logger.warning('Profile request failed: %s', exc)
+        return jsonify({'success': False, 'message': 'Profile service is unavailable'}), 502
+
+
+@app.route('/profile')
+def profile():
+    if 'username' not in session and not getattr(auth_manager, 'token', None):
+        return redirect(url_for('login', next=url_for('profile')))
+    return render_template('profile.html', username=session.get('username'))
+
+
+@app.route('/api/profile', methods=['GET', 'PUT'])
+def profile_api():
+    payload = request.get_json(silent=True) if request.method == 'PUT' else None
+    return _brain_profile_request(request.method, '/profile', payload)
+
+
+@app.route('/api/profile/resend-verification', methods=['POST'])
+def profile_resend_verification():
+    payload = request.get_json(silent=True) or {}
+    return _brain_profile_request('POST', '/resend-verification', payload)
 
 
 def _read_json_file(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
@@ -1778,9 +1854,9 @@ def api_internal_home_assistant_publish():
 @app.route('/captures')
 def captures():
     """Show the minute capture browser."""
-    minutes = _capture_timeline_items(limit=90)
-    active = current_minute()
     system_status = get_system_status(update_remote=False)
+    minutes = _capture_timeline_items()
+    active = current_minute() if system_status.collection_active else None
     sensors = detect_sensor_inventory()
     capture_settings = device_manager.load_capture_settings()
     enabled_map = (capture_settings or {}).get("sensors", {})
@@ -1797,53 +1873,99 @@ def captures():
     )
 
 
-def _capture_timeline_items(limit: int = 90) -> list[Dict[str, Any]]:
-    """Return only the fields needed to draw the capture timeline."""
-    normalized_limit = max(1, min(1000, int(limit)))
-    now = time.monotonic()
-    if (
-        _capture_timeline_cache['limit'] == normalized_limit
-        and now - float(_capture_timeline_cache['at']) < 2.0
-    ):
+def _capture_timeline_items(limit: Optional[int] = None) -> list[Dict[str, Any]]:
+    """Return every stored minute in stable timestamp order."""
+    minute_dirs = sorted(list_minute_folders(), key=lambda path: path.name)
+    if limit is not None:
+        normalized_limit = max(1, min(10000, int(limit)))
+        minute_dirs = minute_dirs[-normalized_limit:]
+    signatures = []
+    for minute_dir in minute_dirs:
+        manifest_path = minute_dir / 'manifest.json'
+        try:
+            stat = manifest_path.stat()
+            signatures.append((str(manifest_path), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            signatures.append((str(manifest_path), 0, 0))
+    signature = tuple(signatures)
+    if _capture_timeline_cache['signature'] == signature:
         return list(_capture_timeline_cache['items'])
+
     compact = []
-    for minute_dir in list_minute_folders()[:normalized_limit]:
-        manifest = _read_json_file(minute_dir / 'manifest.json', {})
-        chunks = (((manifest.get('outputs') or {}).get('radar') or {}).get('chunks') or [])
-        latest = chunks[-1] if chunks else None
-        labels = list(manifest.get('labels') or [])
-        if labels == ['collecting'] and manifest.get('capture_finished'):
-            labels = []
+    active_cache_keys = set()
+    for minute_dir, manifest_signature in zip(minute_dirs, signatures):
+        manifest_path = minute_dir / 'manifest.json'
+        cache_key = str(manifest_path)
+        active_cache_keys.add(cache_key)
+        cached = _capture_manifest_cache.get(cache_key)
+        if not cached or cached.get('signature') != manifest_signature[1:]:
+            cached = {
+                'signature': manifest_signature[1:],
+                'summary': _read_timeline_manifest_summary(manifest_path),
+            }
+            _capture_manifest_cache[cache_key] = cached
+        summary = cached['summary']
         compact.append({
             'minute': minute_dir.name,
             'modified': datetime.fromtimestamp(minute_dir.stat().st_mtime).isoformat(),
-            'labels': labels,
-            'latest_chunk': {
-                'index': latest.get('chunk_index'),
-                'state': 'error' if latest.get('error') else latest.get('status'),
-                'classification': latest.get('classification') or (
-                    'green' if latest.get('status') == 'occupied'
-                    else 'red' if latest.get('status') == 'empty'
-                    else None
-                ),
-                'prediction': ((latest.get('analysis') or {}).get('occupancy') or {}).get('label')
-                or latest.get('status'),
-            } if isinstance(latest, dict) else None,
+            'latest_chunk': summary,
         })
-    _capture_timeline_cache.update(
-        {'at': time.monotonic(), 'limit': normalized_limit, 'items': compact}
-    )
+    for cache_key in set(_capture_manifest_cache) - active_cache_keys:
+        _capture_manifest_cache.pop(cache_key, None)
+    _capture_timeline_cache.update({'signature': signature, 'items': compact})
     return list(compact)
+
+
+def _read_timeline_manifest_summary(path: Path) -> Optional[Dict[str, Any]]:
+    """Read only the bounded manifest tail needed for one archive dot."""
+    try:
+        size = path.stat().st_size
+        with path.open('rb') as handle:
+            handle.seek(max(0, size - 262144))
+            tail = handle.read().decode('utf-8', errors='ignore')
+    except OSError:
+        return None
+
+    minute_match = re.search(
+        r'"minute_summary"\s*:\s*\{.*?"occupancy"\s*:\s*\{.*?'
+        r'"label"\s*:\s*"(occupied|empty)"',
+        tail,
+        flags=re.DOTALL,
+    )
+    state = minute_match.group(1) if minute_match else None
+    chunk_matches = re.findall(
+        r'"chunk_index"\s*:\s*(\d+)(?:(?!"chunk_index").){0,6000}?'
+        r'"status"\s*:\s*"(occupied|empty)"',
+        tail,
+        flags=re.DOTALL,
+    )
+    if chunk_matches:
+        chunk_index, chunk_state = max(chunk_matches, key=lambda item: int(item[0]))
+        state = chunk_state
+        index = int(chunk_index)
+    else:
+        index = None
+    if state not in {'occupied', 'empty'}:
+        return None
+    return {
+        'index': index,
+        'state': state,
+        'classification': 'green' if state == 'occupied' else 'red',
+        'prediction': state,
+    }
 
 
 @app.route('/api/captures/timeline', methods=['GET'])
 def api_capture_timeline():
-    minutes = _capture_timeline_items(request.args.get('limit', 90))
+    requested_limit = request.args.get('limit')
+    minutes = _capture_timeline_items(int(requested_limit)) if requested_limit else _capture_timeline_items()
+    system_status = get_system_status(update_remote=False)
+    active = current_minute() if system_status.collection_active else None
     return jsonify({
         'status': 'success',
         'minutes': minutes,
         'count': len(minutes),
-        'active_minute': current_minute().name if current_minute() else None,
+        'active_minute': active.name if active else None,
     })
 
 

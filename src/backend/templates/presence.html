@@ -5,39 +5,39 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Thoth Presence</title>
   <style>
-    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
     * { box-sizing: border-box; }
-    body { margin: 0; background: #070c0e; color: #e8f0f1; overflow: hidden; }
+    body { margin: 0; background: #f4f1e9; color: #11110f; overflow: hidden; }
     .shell { display: grid; grid-template-columns: minmax(0,1fr) 278px; height: 100vh; min-height: 420px; }
-    .stage { position: relative; min-width: 0; }
+    .stage { position: relative; min-width: 0; background:#11110f; color:#f4f1e9; }
     canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action:none; }
     canvas.dragging { cursor: grabbing; }
     .hud { position: absolute; left: 18px; top: 16px; pointer-events: none; }
     .view-toggle { position:absolute; right:16px; top:14px; display:flex; gap:6px; }
-    .view-toggle button { width:auto; margin:0; padding:7px 11px; background:#172126; border:1px solid #33434a; }
-    .site-nav { position:absolute; left:18px; bottom:16px; z-index:4; display:flex; gap:6px; padding:6px; border:1px solid #33434a; border-radius:10px; background:rgba(10,17,20,.9); backdrop-filter:blur(12px); }
-    .site-nav a { color:#dbe8ea; text-decoration:none; font-size:12px; padding:7px 9px; border-radius:6px; }
-    .site-nav a:hover { background:#25343a; color:white; }
+    .view-toggle button { width:auto; margin:0; padding:7px 11px; background:#faf8f2; color:#11110f; border:1px solid #c9c4b9; }
+    .site-nav { position:absolute; left:18px; bottom:16px; z-index:4; display:flex; gap:3px; padding:5px; border:1px solid #c9c4b9; border-radius:8px; background:rgba(250,248,242,.94); backdrop-filter:blur(12px); }
+    .site-nav a { color:#4e4b45; text-decoration:none; font-size:12px; font-weight:650; padding:7px 9px; border-radius:5px; }
+    .site-nav a:hover { background:#dedad0; color:#11110f; }
     .measure { position:absolute; z-index:5; display:none; pointer-events:none; padding:7px 9px; border:1px solid #4b626b; border-radius:8px; background:rgba(7,12,14,.94); color:#f2fbfb; font:600 12px ui-monospace,monospace; box-shadow:0 10px 35px rgba(0,0,0,.35); transform:translate(12px,-115%); }
     .eyebrow { color: #789097; font-size: 11px; font-weight: 700; letter-spacing: .16em; }
     .headline { margin-top: 5px; font-size: 24px; font-weight: 650; }
     .status { margin-top: 7px; color: #95a8ae; font-size: 13px; }
     .rate { margin-top: 5px; color: #b7c8cc; font: 600 12px ui-monospace, monospace; }
     .live { color: #5ee0cf; }
-    .intensity-bar { position:absolute; right:18px; bottom:18px; width:168px; z-index:3; pointer-events:none; padding:9px 10px; border:1px solid #33434a; border-radius:8px; background:rgba(7,12,14,.86); color:#aebdc1; font-size:10px; }
+    .intensity-bar { position:absolute; right:18px; bottom:18px; width:190px; z-index:3; pointer-events:none; padding:9px 10px; border:1px solid #c9c4b9; border-radius:8px; background:rgba(250,248,242,.94); color:#4e4b45; font-size:10px; }
     .intensity-gradient { height:8px; margin:5px 0 3px; border-radius:99px; background:linear-gradient(90deg,#440154,#482878,#3e4989,#31688e,#26828e,#1f9e89,#35b779,#6ece58,#b5de2b,#fde725); }
     .intensity-labels { display:flex; justify-content:space-between; font-family:ui-monospace,monospace; }
-    aside { overflow: auto; border-left: 1px solid #243137; background: #101719; padding: 18px; }
-    h2 { margin: 0 0 13px; font-size: 12px; color: #80949a; letter-spacing: .14em; }
-    .field { display: grid; grid-template-columns: 1fr 92px; align-items: center; gap: 10px; margin: 8px 0; font-size: 12px; color: #aebdc1; }
-    input, select { width: 100%; border: 1px solid #2b3a40; border-radius: 7px; background: #0a1114; color: #edf4f5; padding: 7px; }
-    button { width: 100%; margin-top: 12px; border: 0; border-radius: 8px; padding: 9px; background: #277f7a; color: white; font-weight: 650; cursor: pointer; }
-    .hint { margin: 13px 0 20px; color: #71858b; font-size: 11px; line-height: 1.5; }
-    .targets { border-top: 1px solid #253136; padding-top: 14px; }
-    .target { display: grid; grid-template-columns: 1fr auto; gap: 4px; padding: 9px 0; border-bottom: 1px solid #202a2e; font-size: 12px; }
-    .target span { color: #7f949a; }
-    .editor { border-top:1px solid #253136; margin-top:16px; padding-top:14px; }
-    .editor-row { border:1px solid #29383d; border-radius:8px; padding:8px; margin:7px 0; display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+    aside { overflow: auto; border-left: 1px solid #c9c4b9; background: #faf8f2; padding: 18px; }
+    h2 { margin: 0 0 13px; font-size: 11px; color: #77736b; letter-spacing: .14em; }
+    .field { display: grid; grid-template-columns: 1fr 92px; align-items: center; gap: 10px; margin: 8px 0; font-size: 12px; color: #4e4b45; }
+    input, select { width: 100%; border: 1px solid #aaa59b; border-radius: 7px; background: #fff; color: #11110f; padding: 7px; }
+    button { width: 100%; margin-top: 12px; border: 0; border-radius: 8px; padding: 9px; background: #11110f; color: white; font-weight: 650; cursor: pointer; }
+    .hint { margin: 13px 0 20px; color: #77736b; font-size: 11px; line-height: 1.5; }
+    .targets { border-top: 1px solid #ddd8ce; padding-top: 14px; }
+    .target { display: grid; grid-template-columns: 1fr auto; gap: 4px; padding: 9px 0; border-bottom: 1px solid #e4e0d7; font-size: 12px; }
+    .target span { color: #77736b; }
+    .editor { border-top:1px solid #ddd8ce; margin-top:16px; padding-top:14px; }
+    .editor-row { border:1px solid #c9c4b9; border-radius:8px; padding:8px; margin:7px 0; display:grid; grid-template-columns:1fr 1fr; gap:6px; }
     .editor-row input,.editor-row select { padding:5px; font-size:11px; }
     .editor-row strong { grid-column:1/-1; display:flex; justify-content:space-between; font-size:11px; }
     .editor-row button { width:auto; margin:0; padding:2px 7px; background:#713b3b; }
@@ -50,7 +50,7 @@
   <section class="stage">
     <canvas id="scene"></canvas>
     <div class="view-toggle"><button data-view="example2">Example 2 XY</button><button data-view="xy">Room XY</button><button data-view="yz">YZ vertical</button><button data-view="3d">3D room</button><button data-rotate="-1" title="Rotate left">↺</button><button data-rotate="1" title="Rotate right">↻</button></div>
-    <nav class="site-nav" aria-label="Dashboard navigation"><a href="/">Dashboard</a><a href="/captures">Captures</a><a href="/settings">Settings</a></nav>
+    <nav class="site-nav" aria-label="Dashboard navigation"><a href="/">Home</a><a href="/captures">Captures</a><a href="/profile">Profile</a><a href="/settings">Settings</a></nav>
     <div id="measure" class="measure"></div>
     <div class="hud">
       <div class="eyebrow">LIVE SPATIAL PRESENCE</div>
@@ -58,7 +58,7 @@
       <div id="status" class="status">Waiting for sensor state</div>
       <div id="rate" class="rate">-- Hz</div>
     </div>
-    <div class="intensity-bar"><span>Example 2 intensity · fixed levels</span><div class="intensity-gradient"></div><div class="intensity-labels"><span>0</span><span>0.5</span><span>1</span></div></div>
+    <div class="intensity-bar"><span>Native Example 2 map · levels 0 to 1</span><div class="intensity-gradient"></div><div class="intensity-labels"><span>0</span><span>0.5</span><span>1</span></div></div>
   </section>
   <aside>
     <h2>ROOM GEOMETRY</h2>
@@ -109,7 +109,7 @@ function drawBox(center,size,color){ const lo=[center[0]-size[0]/2,center[1]-siz
 function viridis(value){const stops=[[68,1,84],[72,40,120],[62,73,137],[49,104,142],[38,130,142],[31,158,137],[53,183,121],[110,206,88],[181,222,43],[253,231,37]],p=Math.max(0,Math.min(1,value))*(stops.length-1),i=Math.min(stops.length-2,Math.floor(p)),t=p-i;return stops[i].map((v,k)=>Math.round(v+(stops[i+1][k]-v)*t));}
 function heatmapImage(map){if(!map?.values?.length)return null;const key=`${map.columns}x${map.rows}`,cached=heatmapCache.get(key)||(()=>{const off=document.createElement('canvas');off.width=map.columns;off.height=map.rows;const context=off.getContext('2d'),image=context.createImageData(map.columns,map.rows),value={off,context,image};heatmapCache.set(key,value);return value;})();for(let row=0;row<map.rows;row++)for(let col=0;col<map.columns;col++){const value=Number(map.values[row*map.columns+col]||0)/255,[red,green,blue]=viridis(value),pixel=((map.rows-1-row)*map.columns+col)*4;cached.image.data[pixel]=red;cached.image.data[pixel+1]=green;cached.image.data[pixel+2]=blue;cached.image.data[pixel+3]=value<.025?20:Math.round(65+190*value);}cached.context.putImageData(cached.image,0,0);return cached.off;}
 function example2Image(map){if(!map?.rows||!map?.columns)return null;const key=`example2:${map.columns}x${map.rows}`,cached=heatmapCache.get(key)||(()=>{const off=document.createElement('canvas');off.width=map.columns;off.height=map.rows;const context=off.getContext('2d'),image=context.createImageData(map.columns,map.rows),value={off,context,image};heatmapCache.set(key,value);return value;})();for(let i=0;i<cached.image.data.length;i+=4){cached.image.data[i]=68;cached.image.data[i+1]=1;cached.image.data[i+2]=84;cached.image.data[i+3]=255;}for(const cell of map.values_sparse||[]){const source=Number(cell[0]),value=Number(cell[1]||0)/255,forwardIndex=Math.floor(source/map.columns),lateralIndex=source%map.columns,x=map.columns-1-lateralIndex,y=map.rows-1-forwardIndex;if(x<0||x>=map.columns||y<0||y>=map.rows)continue;const [red,green,blue]=viridis(value),pixel=(y*map.columns+x)*4;cached.image.data[pixel]=red;cached.image.data[pixel+1]=green;cached.image.data[pixel+2]=blue;cached.image.data[pixel+3]=255;}cached.context.putImageData(cached.image,0,0);return cached.off;}
-function drawExample2XY(){const r=canvas.getBoundingClientRect(),map=example2Map,x0=68,y0=66,w=Math.max(120,r.width-136),h=Math.max(120,r.height-136),image=example2Image(map);ctx.fillStyle='#440154';ctx.fillRect(x0,y0,w,h);if(image){ctx.save();ctx.imageSmoothingEnabled=false;ctx.drawImage(image,x0,y0,w,h);ctx.restore();}ctx.strokeStyle='rgba(221,232,234,.8)';ctx.lineWidth=1.2;ctx.strokeRect(x0,y0,w,h);ctx.fillStyle='#aebdc1';ctx.font='11px ui-monospace,monospace';ctx.textAlign='center';for(let i=0;i<=5;i++){const x=x0+w*i/5;ctx.beginPath();ctx.moveTo(x,y0+h);ctx.lineTo(x,y0+h+5);ctx.stroke();ctx.fillText((5*i/5).toFixed(1),x,y0+h+18);}for(let i=0;i<=10;i+=2){const y=y0+h-h*i/10;ctx.beginPath();ctx.moveTo(x0-5,y);ctx.lineTo(x0,y);ctx.stroke();ctx.textAlign='right';ctx.fillText((-5+i).toFixed(1),x0-9,y+4);}ctx.textAlign='center';ctx.fillText('X (m)',x0+w/2,y0+h+38);ctx.save();ctx.translate(19,y0+h/2);ctx.rotate(-Math.PI/2);ctx.fillText('Y (m)',0,0);ctx.restore();ctx.textAlign='left';ctx.fillStyle='#dbe8ea';ctx.font='600 12px ui-monospace,monospace';ctx.fillText('EXAMPLE 2 TRACKING MAP · TRANSPOSED + MIRRORED',x0,y0-18);}
+function drawExample2XY(){const r=canvas.getBoundingClientRect(),map=example2Map,x0=68,y0=66,w=Math.max(120,r.width-136),h=Math.max(120,r.height-136),image=example2Image(map);ctx.fillStyle='#440154';ctx.fillRect(x0,y0,w,h);if(image){ctx.save();ctx.imageSmoothingEnabled=false;ctx.drawImage(image,x0,y0,w,h);ctx.restore();}ctx.strokeStyle='rgba(221,232,234,.8)';ctx.lineWidth=1.2;ctx.strokeRect(x0,y0,w,h);ctx.fillStyle='#aebdc1';ctx.font='11px ui-monospace,monospace';ctx.textAlign='center';for(let i=0;i<=5;i++){const x=x0+w*i/5;ctx.beginPath();ctx.moveTo(x,y0+h);ctx.lineTo(x,y0+h+5);ctx.stroke();ctx.fillText((5*i/5).toFixed(1),x,y0+h+18);}for(let i=0;i<=10;i+=2){const y=y0+h-h*i/10;ctx.beginPath();ctx.moveTo(x0-5,y);ctx.lineTo(x0,y);ctx.stroke();ctx.textAlign='right';ctx.fillText((-5+i).toFixed(1),x0-9,y+4);}ctx.textAlign='center';ctx.fillText('X (m)',x0+w/2,y0+h+38);ctx.save();ctx.translate(19,y0+h/2);ctx.rotate(-Math.PI/2);ctx.fillText('Y (m)',0,0);ctx.restore();ctx.textAlign='left';ctx.fillStyle='#dbe8ea';ctx.font='600 12px ui-monospace,monospace';ctx.fillText('EXAMPLE 2 · NATIVE DBF + TARGET_DETECTION + BUFFER',x0,y0-18);}
 function drawXYIntensity(){const image=heatmapImage(smoothIntensity.xy);if(!image)return;const topLeft=project([0,state.room.depth_m,0]),bottomRight=project([state.room.width_m,0,0]);ctx.save();ctx.imageSmoothingEnabled=true;ctx.globalAlpha=.82;ctx.drawImage(image,topLeft[0],topLeft[1],bottomRight[0]-topLeft[0],bottomRight[1]-topLeft[1]);ctx.restore();}
 function targetForward(position){const room=state.room,wall=room.sensor_wall||'Back';if(wall==='Back')return position[1];if(wall==='Front')return room.depth_m-position[1];if(wall==='Left')return position[0];return room.width_m-position[0];}
 function drawYZ(){const r=canvas.getBoundingClientRect(),map=smoothIntensity.yz,x0=62,y0=42,w=r.width-112,h=r.height-90,maxX=Number(map?.x_max_m||5),maxY=Number(map?.y_max_m||state.room.height_m||2.7),toScreen=(forward,height)=>[x0+forward/maxX*w,y0+h-height/maxY*h];const image=heatmapImage(map);if(image){ctx.save();ctx.globalAlpha=.84;ctx.imageSmoothingEnabled=true;ctx.drawImage(image,x0,y0,w,h);ctx.restore();}ctx.strokeStyle='rgba(174,196,201,.72)';ctx.lineWidth=1.4;ctx.strokeRect(x0,y0,w,h);ctx.fillStyle='#9bafb4';ctx.font='11px ui-monospace,monospace';ctx.fillText('FORWARD RANGE (m)',x0+w/2-50,y0+h+28);ctx.save();ctx.translate(20,y0+h/2+40);ctx.rotate(-Math.PI/2);ctx.fillText('HEIGHT (m)',0,0);ctx.restore();for(let i=0;i<=5;i++){const x=x0+w*i/5;ctx.fillText((maxX*i/5).toFixed(1),x-10,y0+h+15);}for(let i=0;i<=4;i++){const y=y0+h-h*i/4;ctx.fillText((maxY*i/4).toFixed(1),x0-42,y+4);}const cone=primaryCone(),origin=toScreen(0,Number(cone.height_m||state.room.sensor_height_m||1)),half=Number(cone.vertical_deg||65)/2*Math.PI/180,range=Number(cone.range_m||maxX);for(const angle of [-half,half]){const endpoint=toScreen(Math.min(maxX,range*Math.cos(angle)),Math.max(0,Math.min(maxY,Number(cone.height_m||1)+range*Math.sin(angle))));ctx.beginPath();ctx.moveTo(...origin);ctx.lineTo(...endpoint);ctx.strokeStyle='rgba(79,213,205,.72)';ctx.stroke();}ctx.beginPath();ctx.arc(...origin,6,0,Math.PI*2);ctx.fillStyle='#edf8f8';ctx.fill();for(const target of displayTargets()){const forward=targetForward(target.position),center=toScreen(forward,target.position[2]),tw=Math.max(5,Number(target.size?.[1]||.3)/maxX*w),th=Math.max(8,Number(target.size?.[2]||.5)/maxY*h);ctx.save();ctx.globalAlpha=target._opacity;ctx.strokeStyle=target.presence_mode==='static'?'#ffbe5c':'#5be0cf';ctx.lineWidth=2;ctx.strokeRect(center[0]-tw/2,center[1]-th/2,tw,th);ctx.fillStyle='#e8f2f3';ctx.fillText(`T${target.id}`,center[0]+tw/2+5,center[1]);ctx.restore();}}
