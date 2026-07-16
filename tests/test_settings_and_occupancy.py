@@ -22,6 +22,7 @@ from backend.calibration import derive_thresholds
 from backend.minute_collector import (
     annotate_chunk_result,
     enqueue_latest_chunk_frame,
+    live_chunk_statistics,
     minute_start,
     summarize_minute_results,
 )
@@ -183,6 +184,28 @@ class SettingsTests(unittest.TestCase):
 
 
 class OccupancyTests(unittest.TestCase):
+    def test_live_chunk_statistics_classifies_in_progress_frames(self):
+        analyzer = types.SimpleNamespace(
+            evaluated_frames=5,
+            detected_frames=3,
+            yellow_threshold_percent=20,
+            green_threshold_percent=60,
+            last_position=(1.25, 2.5),
+            last_score=0.87,
+            last_targets=[{"id": 4}, {"id": 8}],
+        )
+
+        statistics = live_chunk_statistics(analyzer)
+
+        self.assertEqual(statistics["status"], "collecting")
+        self.assertEqual(statistics["classification"], "green")
+        self.assertTrue(statistics["occupied"])
+        self.assertEqual(statistics["detected_frames"], 3)
+        self.assertEqual(statistics["evaluated_frames"], 5)
+        self.assertEqual(statistics["ratio"], 0.6)
+        self.assertEqual(statistics["people_count"], 2)
+        self.assertEqual(statistics["location"], [1.25, 2.5])
+
     def test_analysis_backlog_keeps_latest_frames_within_each_chunk(self):
         jobs: queue.Queue = queue.Queue(maxsize=96)
         entry = {"chunk_index": 2}

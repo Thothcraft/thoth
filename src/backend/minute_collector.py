@@ -24,10 +24,24 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from backend.config import Config  # type: ignore
-    from backend.radar_analysis import PersistentTargetIdentity, StreamingChunkAnalyzer, compile_minute_xy_payload, create_signal_processor, load_room_config  # type: ignore
+    from backend.radar_analysis import (  # type: ignore
+        PersistentTargetIdentity,
+        StreamingChunkAnalyzer,
+        compile_minute_xy_payload,
+        create_signal_processor,
+        load_room_config,
+        occupancy_region,
+    )
 else:
     from .config import Config
-    from .radar_analysis import PersistentTargetIdentity, StreamingChunkAnalyzer, compile_minute_xy_payload, create_signal_processor, load_room_config
+    from .radar_analysis import (
+        PersistentTargetIdentity,
+        StreamingChunkAnalyzer,
+        compile_minute_xy_payload,
+        create_signal_processor,
+        load_room_config,
+        occupancy_region,
+    )
 
 THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / "WS" / "MMW-HAT" / "MMW-HAT-Release"
@@ -73,6 +87,30 @@ def enqueue_latest_chunk_frame(
             replaced = True
     analysis_queue.put_nowait(("frame", entry, frame, captured_at))
     return replaced
+
+
+def live_chunk_statistics(analyzer: StreamingChunkAnalyzer) -> dict[str, Any]:
+    """Build the partial chunk result published while analysis is running."""
+    evaluated = analyzer.evaluated_frames
+    detected = analyzer.detected_frames
+    classification = occupancy_region(
+        detected,
+        evaluated,
+        analyzer.yellow_threshold_percent,
+        analyzer.green_threshold_percent,
+    )
+    return {
+        "status": "collecting",
+        "detected_frames": detected,
+        "evaluated_frames": evaluated,
+        "ratio": detected / evaluated if evaluated else 0.0,
+        "classification": classification,
+        "occupied": classification == "green",
+        "location": list(analyzer.last_position),
+        "score": analyzer.last_score,
+        "people_count": len(analyzer.last_targets),
+        "targets": analyzer.last_targets,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -983,27 +1021,7 @@ def main() -> int:
                         analyzer.process(job[2])
                         now = time.monotonic()
                         if now - last_timeline_publish >= 0.75:
-                            evaluated = analyzer.evaluated_frames
-                            detected = analyzer.detected_frames
-                            ratio = detected / evaluated if evaluated else 0.0
-                            classification = occupancy_region(
-                                detected,
-                                evaluated,
-                                analyzer.yellow_threshold_percent,
-                                analyzer.green_threshold_percent,
-                            )
-                            entry.update({
-                                "status": "collecting",
-                                "detected_frames": detected,
-                                "evaluated_frames": evaluated,
-                                "ratio": ratio,
-                                "classification": classification,
-                                "occupied": classification == "green",
-                                "location": list(analyzer.last_position),
-                                "score": analyzer.last_score,
-                                "people_count": len(analyzer.last_targets),
-                                "targets": analyzer.last_targets,
-                            })
+                            entry.update(live_chunk_statistics(analyzer))
                             with publish_lock:
                                 write_live_manifest()
                             try:
