@@ -78,6 +78,9 @@ THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / 'WS' / 'MMW-HAT' / 'MMW-HAT-Release'
 RADAR_OCCUPANCY_STATE = THOTH_ROOT / 'config' / 'radar_occupancy.json'
 RADAR_ROOM_CONFIG = MMW_RELEASE / 'example_2_advanced' / 'config' / 'room_config.json'
+RADAR_LIVE_STALE_SECONDS = max(
+    5.0, float(os.getenv('THOTH_RADAR_LIVE_STALE_SECONDS', '12.0'))
+)
 if str(MMW_RELEASE) not in sys.path:
     sys.path.append(str(MMW_RELEASE))
 
@@ -1634,7 +1637,36 @@ def api_radar_occupancy():
             'vertical_deg': primary.get('vertical_deg', 65),
             'range_m': primary.get('range_m', 15),
         }
-    state['stale'] = time.time() - float(state.get('updated_at') or 0) > 3.0
+    try:
+        updated_at = float(state.get('updated_at') or 0)
+    except (TypeError, ValueError):
+        updated_at = 0.0
+    try:
+        configured_hz = max(0.0, float(state.get('configured_hz') or 0))
+    except (TypeError, ValueError):
+        configured_hz = 0.0
+
+    # Native Example 2 processing can briefly lag capture on a busy Pi, and
+    # the minute collector intentionally rotates workers at wall-clock minute
+    # boundaries. Three seconds was short enough to mark a healthy stream as
+    # stale during either event. Allow at least twelve seconds, or thirty
+    # expected frame periods for deliberately low-rate radar configurations.
+    stale_after = max(
+        RADAR_LIVE_STALE_SECONDS,
+        30.0 / configured_hz if configured_hz > 0 else 0.0,
+    )
+    age_seconds = max(0.0, time.time() - updated_at) if updated_at else None
+    collection_paused = COLLECTOR_PAUSE_PATH.exists()
+    state['age_seconds'] = round(age_seconds, 3) if age_seconds is not None else None
+    state['stale_after_seconds'] = round(stale_after, 3)
+    state['collection_paused'] = collection_paused
+    state['stale'] = updated_at <= 0 or bool(age_seconds is not None and age_seconds > stale_after)
+    state['stale_reason'] = (
+        'collection_paused' if collection_paused
+        else 'waiting_for_first_frame' if updated_at <= 0
+        else 'frame_timeout' if state['stale']
+        else None
+    )
     response = jsonify(state)
     response.headers['Cache-Control'] = 'no-store, max-age=0'
     return response

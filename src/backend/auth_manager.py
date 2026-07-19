@@ -208,6 +208,10 @@ class AuthManager:
                 'device_type': 'thoth',
                 'hardware_info': hardware_info or {},
             },
+            headers={
+                'Authorization': f'Bearer {self.token}',
+                'Content-Type': 'application/json',
+            } if self.token else {'Content-Type': 'application/json'},
             timeout=(5, 20),
         )
         data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
