@@ -1140,6 +1140,9 @@ def register_device_periodically():
         if not auth_token:
             logger.debug("No authenticated user token available, skipping device registration")
             return False
+        if device_manager.pairing_required:
+            logger.debug("Device registration paused until thothHUB pairing is completed")
+            return False
 
         success, message = device_manager.register_device(auth_token.strip())
         if success:
@@ -1411,7 +1414,11 @@ def status():
                                 key: auth_manager.pairing_session.get(key)
                                 for key in ('code', 'device_id', 'expires_at')
                             } if auth_manager.pairing_session else None,
-                            hub_paired=auth_manager.is_authenticated())
+                            hub_paired=(
+                                auth_manager.is_authenticated()
+                                and not device_manager.pairing_required
+                            ),
+                            pairing_required=device_manager.pairing_required)
 
     except Exception as e:
         logger.error(f"Error in status route: {str(e)}", exc_info=True)

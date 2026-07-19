@@ -244,6 +244,27 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("/commands/42/ack", ack.args[0])
             self.assertTrue(ack.kwargs["json"]["success"])
 
+    def test_registration_ownership_conflict_exposes_repair_state(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = _Config(root)
+            config.BRAIN_SERVER_URL = "https://brain.example"
+            manager = DeviceManager(config)
+            conflict = mock.Mock(status_code=409, text='{"detail":"paired elsewhere"}')
+            conflict.json.return_value = {
+                "detail": "This device is paired with another account. Start pairing on the device."
+            }
+            manager.session.post = mock.Mock(return_value=conflict)
+
+            with mock.patch.object(manager, "_build_hardware_info", return_value={}), \
+                 mock.patch.object(manager, "_get_local_ip", return_value="10.0.0.22"):
+                success, message = manager.register_device("new-account-token")
+
+            self.assertFalse(success)
+            self.assertIn("another account", message)
+            self.assertTrue(manager.pairing_required)
+            self.assertFalse(manager.registered)
+            self.assertFalse(manager.status["online"])
+
     def test_processing_settings_include_live_chunk_labels(self):
         with tempfile.TemporaryDirectory() as root:
             settings_path = Path(root) / "capture_settings.json"

@@ -66,8 +66,8 @@
       <div id="hub-pairing-title" class="panel-label">thothHUB</div>
       <p>Pair this device without entering your account password here.</p>
       <div id="pairing-code" class="pairing-code {{ 'hidden' if not pairing_state }}">{{ pairing_state.code if pairing_state else '' }}</div>
-      <button id="start-pairing" class="pairing-action {{ 'hidden' if hub_paired else '' }}">{{ 'New pairing code' if pairing_state else 'Pair with thothHUB' }}</button>
-      <div id="pairing-state" class="pairing-state">{{ 'Paired and connected' if hub_paired else 'Enter the code on the thothHUB Devices page.' if pairing_state else 'Not paired' }}</div>
+      <button id="start-pairing" class="pairing-action {{ 'hidden' if hub_paired else '' }}">{{ 'New pairing code' if pairing_state else 'Re-pair with thothHUB' if pairing_required else 'Pair with thothHUB' }}</button>
+      <div id="pairing-state" class="pairing-state">{{ 'Paired and connected' if hub_paired else 'Enter the code on the thothHUB Devices page.' if pairing_state else 'This account does not own the device yet. Generate a code to re-pair it.' if pairing_required else 'Not paired' }}</div>
     </section>
   </aside>
 </div>

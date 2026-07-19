@@ -40,6 +40,8 @@ class DeviceManager:
         self.device_id = self._get_device_id()
         self.auth_token = None
         self.registered = False
+        self.pairing_required = False
+        self.registration_error: Optional[str] = None
         self.session = self._create_session()
         self.stop_event = threading.Event()
         self.heartbeat_thread = None
@@ -950,6 +952,8 @@ class DeviceManager:
                 result = response.json()
                 self._apply_response_settings(result)
                 self.registered = True
+                self.pairing_required = False
+                self.registration_error = None
                 self.auth_token = user_token
                 self._apply_pending_deployments(result)
 
@@ -962,7 +966,18 @@ class DeviceManager:
                 logger.info(f"Device registered successfully: {self.device_id}")
                 return True, "Device registered successfully"
 
-            error_msg = f"Registration failed: {response.status_code} - {response.text}"
+            try:
+                detail = str((response.json() or {}).get('detail') or '').strip()
+            except (ValueError, AttributeError, TypeError):
+                detail = ''
+            error_msg = detail or f"Registration failed: {response.status_code} - {response.text}"
+            self.registered = False
+            self.registration_error = error_msg
+            if response.status_code == 409 and 'paired with another account' in error_msg.lower():
+                self.pairing_required = True
+                self.status['online'] = False
+                logger.warning("Device ownership changed; thothHUB re-pairing is required")
+                return False, error_msg
             logger.error(error_msg)
             return False, error_msg
 
