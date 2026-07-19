@@ -4,61 +4,133 @@
 <style>
   .home-header{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin:18px 0 34px}
   .home-header h1{margin:0;font-size:clamp(38px,6vw,68px);font-weight:600;letter-spacing:-.055em}
-  .home-header p{max-width:560px;margin:9px 0 0;color:#6d6961;font-size:14px;line-height:1.6}
   .home-state{display:inline-flex;align-items:center;gap:8px;color:#4e4b45;font-size:12px;font-weight:700}
   .home-state i{width:8px;height:8px;border-radius:50%;background:{{ '#238653' if system_status.collection_active else '#9b978f' }}}
   .home-grid{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(280px,.6fr);gap:18px}
-  .assistant-panel,.system-panel{border:1px solid #c9c4b9;background:#faf8f2;padding:24px}
+  .assistant-panel,.system-panel,.capture-archive{border:1px solid #d8d4ca;background:#fff;padding:24px;border-radius:18px;box-shadow:0 14px 40px rgba(47,43,35,.06)}
   .panel-label{font:700 10px ui-monospace,SFMono-Regular,Consolas,monospace;text-transform:uppercase;letter-spacing:.16em;color:#77736b}
-  .assistant-log{height:340px;overflow:auto;margin-top:20px;padding-right:8px}
-  .assistant-message{width:fit-content;max-width:82%;margin:9px 0;border:1px solid #d5d1c8;background:#fff;padding:11px 13px;border-radius:10px;color:#4e4b45;font-size:14px;line-height:1.55}
+  .assistant-log{height:360px;overflow:auto;margin-top:20px;padding:4px 8px 4px 0}
+  .assistant-message{width:fit-content;max-width:82%;margin:9px 0;border:1px solid #e0ddd5;background:#faf9f6;padding:11px 13px;border-radius:14px;color:#4e4b45;font-size:14px;line-height:1.55;white-space:pre-wrap}
   .assistant-message.user{margin-left:auto;background:#11110f;border-color:#11110f;color:#fff}
-  .assistant-form{display:flex;gap:8px;margin-top:18px;border-top:1px solid #ddd8ce;padding-top:18px}
-  .assistant-form input{flex:1;border:1px solid #aaa59b;background:#fff;padding:12px 14px;border-radius:8px;outline:none}
-  .assistant-form button{width:44px;border:0;border-radius:8px;background:#11110f;color:#fff;font-size:18px}
-  .metrics{margin-top:18px}
-  .metric{display:flex;justify-content:space-between;gap:12px;padding:13px 0;border-top:1px solid #ddd8ce;font-size:13px}
-  .metric span{color:#77736b}.metric strong{font-weight:700}
-  .home-actions{margin-top:20px;display:grid;gap:8px}
-  .home-action{border:1px solid #aaa59b;background:#fff;padding:10px 12px;border-radius:8px;text-align:left;font-size:12px;font-weight:700}
-  .home-links{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
-  .home-links a{border:1px solid #aaa59b;background:#fff;padding:10px 12px;border-radius:8px;text-align:center;font-size:12px;font-weight:700}
+  .assistant-form{margin-top:18px;border:1px solid #c9c4b9;border-radius:16px;background:#faf9f6;padding:12px 14px;transition:border-color .2s,box-shadow .2s}
+  .assistant-form:focus-within{border-color:#77736b;box-shadow:0 0 0 3px rgba(119,115,107,.1)}
+  .assistant-form textarea{display:block;width:100%;min-height:54px;max-height:150px;resize:none;border:0;background:transparent;color:#11110f;font:inherit;line-height:1.5;outline:none}
+  .composer-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px;color:#77736b;font-size:11px}
+  .file-label{cursor:pointer;text-decoration:underline;text-underline-offset:3px}.file-label input{position:absolute;opacity:0;pointer-events:none}.attachment{color:#11110f;font-weight:650}
+  .metrics{margin-top:18px}.metric{display:flex;justify-content:space-between;gap:12px;padding:13px 0;border-top:1px solid #ddd8ce;font-size:13px}.metric span{color:#77736b}.metric strong{font-weight:700}
+  .home-links{display:grid;grid-template-columns:1fr;gap:8px;margin-top:8px}.home-links a{border:1px solid #aaa59b;background:#fff;padding:10px 12px;border-radius:8px;text-align:center;font-size:12px;font-weight:700}
+  .pairing-card{margin-top:18px;border-top:1px solid #ddd8ce;padding-top:18px}.pairing-card p{margin:7px 0 0;color:#77736b;font-size:11px;line-height:1.5}.pairing-code{display:block;margin-top:12px;border:1px dashed #8e897f;border-radius:10px;background:#faf8f2;padding:12px;text-align:center;font:700 22px ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.16em}.pairing-action{width:100%;margin-top:11px;border:0;border-radius:999px;background:#11110f;color:#fff;padding:10px 12px;font-size:12px;font-weight:700;cursor:pointer}.pairing-action:disabled{opacity:.5;cursor:wait}.pairing-state{margin-top:9px;min-height:16px;color:#4e4b45;font-size:11px}
+  .capture-archive{margin-top:18px;padding:26px 22px 20px;scroll-margin-top:100px}
+  .archive-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap}
+  .archive-head h2{margin:4px 0 0;font-size:24px;letter-spacing:-.04em}.archive-head p{margin:7px 0 0;color:#77736b;font-size:12px}
+  .archive-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.archive-action{border:1px solid #aaa59b;background:#faf8f2;color:#11110f;border-radius:8px;padding:8px 11px;font-size:11px;font-weight:700}.archive-action.primary{background:#11110f;border-color:#11110f;color:#fff}.archive-action.danger{color:#a32922;border-color:#d8aaa5}.archive-action:disabled{opacity:.4;cursor:not-allowed}
+  .selection-count{min-width:80px;color:#77736b;font-size:11px;text-align:right}
+  .timeline-viewport{overflow-x:auto;overscroll-behavior-x:contain;padding:18px 4px 20px;scrollbar-color:#aaa59b transparent;scrollbar-width:thin;cursor:grab}.timeline-viewport.dragging{cursor:grabbing;user-select:none}
+  .capture-timeline{position:relative;display:flex;align-items:flex-start;gap:20px;min-width:max-content;padding:12px 10px 4px;user-select:none}
+  .capture-timeline:before{content:"";position:absolute;left:10px;right:10px;top:20px;height:1px;background:#c9c4b9}
+  .capture-minute{position:relative;z-index:1;width:38px;border:0;background:transparent;color:#77736b;text-align:center;padding:0;cursor:pointer}
+  .capture-dot{display:block;width:10px;height:10px;margin:3px auto 12px;border-radius:50%;background:var(--dot);box-shadow:0 0 0 4px #fff;transition:transform .15s,box-shadow .15s}
+  .capture-time{display:block;font:600 9px ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap}.capture-date{display:block;height:14px;margin-top:4px;font-size:8px;white-space:nowrap;color:#aaa59b}
+  .capture-minute:hover .capture-dot{transform:scale(1.2)}.capture-minute.selected .capture-dot{transform:scale(1.2);box-shadow:0 0 0 4px #fff,0 0 0 7px #11110f}.capture-minute.selected{color:#11110f}
+  .archive-foot{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;color:#77736b;font-size:10px}.legend{display:flex;gap:16px;flex-wrap:wrap;text-transform:uppercase;letter-spacing:.08em}.legend i{display:inline-block;width:7px;height:7px;margin-right:5px;border-radius:50%}
+  .capture-status{min-height:17px}.timeline-empty{padding:26px;color:#77736b;font-size:13px}
+  .quick-stats{margin-top:18px;border-top:1px solid #d8d4ca;padding-top:18px}.quick-stats.hidden{display:none}.quick-stats-head{display:flex;align-items:center;justify-content:space-between;gap:14px}.quick-stats-head h3{margin:3px 0 0;font-size:18px;letter-spacing:-.035em}.quick-stats-head a{border-bottom:1px solid #77736b;color:#4e4b45;font-size:11px;font-weight:700;text-decoration:none}.quick-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:14px}.quick-metric{border:1px solid #ddd8ce;border-radius:10px;background:#faf9f6;padding:12px}.quick-metric span{display:block;color:#77736b;font-size:9px;text-transform:uppercase;letter-spacing:.1em}.quick-metric strong{display:block;margin-top:5px;font-size:17px}.quick-chunks{position:relative;display:flex;align-items:center;gap:8px;min-height:18px;margin-top:15px;padding:0 2px}.quick-chunks:before{content:"";position:absolute;left:2px;right:2px;top:50%;height:1px;background:#d8d4ca}.quick-chunk{position:relative;width:9px;height:9px;flex:0 0 auto;border-radius:50%;background:var(--quick-dot);box-shadow:0 0 0 3px #fff}.quick-loading{margin-top:14px;color:#77736b;font-size:12px}
   @media(max-width:900px){.home-grid{grid-template-columns:1fr}.assistant-log{height:300px}}
+  @media(max-width:700px){.home-header{align-items:flex-start;flex-direction:column}.capture-archive{margin-inline:-16px;border-radius:0;border-left:0;border-right:0;padding-inline:14px}.selection-count{text-align:left}.quick-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 {% endblock %}
 {% block content %}
 <header class="home-header">
-  <div><h1>Home</h1><p>Monitor this device, inspect retained sensor minutes, and use the account assistant for collection controls.</p></div>
+  <h1>Hello, {{ username or 'there' }}</h1>
   <div class="home-state"><i></i>{{ 'Collecting' if system_status.collection_active else 'Ready' }}</div>
 </header>
 <div class="home-grid">
   <section class="assistant-panel">
     <div class="panel-label">Assistant</div>
-    <div id="assistant-log" class="assistant-log"><div class="assistant-message">Ask about this device or tell me to start, stop, or label the current collection stream.</div></div>
-    <form id="assistant-form" class="assistant-form"><input id="assistant-input" autocomplete="off" placeholder="Ask or control this device" aria-label="Message assistant"><button aria-label="Send">↑</button></form>
+    <div id="assistant-log" class="assistant-log"><div class="assistant-message">How can I help?</div></div>
+    <form id="assistant-form" class="assistant-form">
+      <textarea id="assistant-input" autocomplete="off" placeholder="Message the assistant" aria-label="Message assistant"></textarea>
+      <div class="composer-meta"><label class="file-label">Attach .txt<input id="assistant-file" name="attachment" type="file" accept=".txt,text/plain"></label><span id="attachment-name">Enter to send · Shift+Enter for a new line</span></div>
+    </form>
   </section>
   <aside class="system-panel">
     <div class="panel-label">Device</div>
     <div class="metrics">
       <div class="metric"><span>Connection</span><strong>{{ 'Online' if system_status.wifi_connected else 'Offline' }}</strong></div>
-      <div class="metric"><span>Stored minutes</span><strong>{{ capture_overview.minute_count }}</strong></div>
+      <div class="metric"><span>Stored minutes</span><strong id="stored-minute-count">{{ capture_overview.minute_count }}</strong></div>
       <div class="metric"><span>Disk used</span><strong>{{ system_status.disk_usage['percent_used'] if system_status.disk_usage else 0 }}%</strong></div>
       <div class="metric"><span>Device ID</span><strong>{{ device_info.device_id[:8] if device_info.device_id else 'local' }}</strong></div>
     </div>
-    <div class="home-actions">
-      <button class="home-action" data-command="Start data collection">Start collection</button>
-      <button class="home-action" data-command="Stop data collection">Stop collection</button>
-      <button class="home-action" data-command="Label the current data collection stream occupied">Label current chunk occupied</button>
-    </div>
-    <div class="home-links"><a href="{{ url_for('presence_view') }}">Presence</a><a href="{{ url_for('captures') }}">Captures</a></div>
+    <div class="home-links"><a href="{{ url_for('presence_view') }}">Presence</a></div>
+    <section class="pairing-card" aria-labelledby="hub-pairing-title">
+      <div id="hub-pairing-title" class="panel-label">thothHUB</div>
+      <p>Pair this device without entering your account password here.</p>
+      <div id="pairing-code" class="pairing-code {{ 'hidden' if not pairing_state }}">{{ pairing_state.code if pairing_state else '' }}</div>
+      <button id="start-pairing" class="pairing-action {{ 'hidden' if hub_paired else '' }}">{{ 'New pairing code' if pairing_state else 'Pair with thothHUB' }}</button>
+      <div id="pairing-state" class="pairing-state">{{ 'Paired and connected' if hub_paired else 'Enter the code on the thothHUB Devices page.' if pairing_state else 'Not paired' }}</div>
+    </section>
   </aside>
 </div>
+
+<section id="captures" class="capture-archive" aria-label="Captured minute archive">
+  <div class="archive-head">
+    <div><div class="panel-label">Captured minutes</div><h2>Archive</h2><p>Click to select · drag across a range · Ctrl-click to toggle · double-click to open</p></div>
+    <div class="archive-actions">
+      <span id="selection-count" class="selection-count">0 selected</span>
+      <button id="bulk-download" class="archive-action" disabled>Download</button>
+      <button id="bulk-delete" class="archive-action danger" disabled>Delete</button>
+      <button id="start-capturing" class="archive-action primary {{ 'hidden' if system_status.collection_active else '' }}">Start</button>
+      <button id="stop-capturing" class="archive-action {{ '' if system_status.collection_active else 'hidden' }}">Stop</button>
+    </div>
+  </div>
+  <div id="timeline-viewport" class="timeline-viewport">
+    <div id="capture-timeline" class="capture-timeline">
+      {% for minute in minutes %}
+      {% set active = minute.minute == active_minute %}{% set state = minute.latest_chunk.state if minute.latest_chunk else 'missing-data' %}{% set color = '#246bfd' if active else '#238653' if state == 'occupied' else '#d3463b' if state == 'empty' else '#9b978f' %}
+      <button type="button" class="capture-minute" data-minute="{{ minute.minute }}" aria-selected="false" title="{{ minute.minute }} · {{ 'collecting' if active else state }} · double-click to open" style="--dot:{{ color }}"><span class="capture-dot"></span><span class="capture-time">{{ minute.minute[9:11] }}:{{ minute.minute[11:13] }}</span><span class="capture-date">{{ minute.minute[4:6] }}/{{ minute.minute[6:8] }}</span></button>
+      {% endfor %}
+      {% if not minutes %}<div class="timeline-empty">No captured minutes yet.</div>{% endif %}
+    </div>
+  </div>
+  <div class="archive-foot"><div class="legend"><span><i style="background:#9b978f"></i>Missing radar</span><span><i style="background:#d3463b"></i>Empty</span><span><i style="background:#238653"></i>Occupied</span><span><i style="background:#246bfd"></i>Current</span></div><div id="capture-status" class="capture-status">{{ 'Collecting now' if system_status.collection_active else 'Collection paused' }}</div></div>
+  <section id="quick-stats" class="quick-stats hidden" aria-live="polite">
+    <div class="quick-stats-head"><div><div class="panel-label">Selected minute</div><h3 id="quick-stats-title">Capture</h3></div><a id="quick-stats-open" href="#">Open capture</a></div>
+    <div id="quick-stats-body" class="quick-loading">Loading quick stats…</div>
+  </section>
+</section>
+
 <script>
-const form=document.getElementById('assistant-form'),input=document.getElementById('assistant-input'),log=document.getElementById('assistant-log');let chatId=null,busy=false;
+const form=document.getElementById('assistant-form'),input=document.getElementById('assistant-input'),fileInput=document.getElementById('assistant-file'),attachmentName=document.getElementById('attachment-name'),log=document.getElementById('assistant-log');let chatId=null,busy=false;
 function append(text,role='assistant'){const item=document.createElement('div');item.className=`assistant-message ${role}`;item.textContent=text;log.appendChild(item);log.scrollTop=log.scrollHeight;return item}
-async function readJson(response){const text=await response.text();try{return JSON.parse(text)}catch{return{message:`Assistant returned an invalid response (${response.status})`}}}
-async function ask(text){if(!text||busy)return;busy=true;append(text,'user');input.value='';const pending=append('Working...');try{const response=await fetch('/api/assistant',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:text,chat_id:chatId})}),body=await readJson(response);if(!response.ok)throw new Error(body.detail||body.message||'Assistant unavailable');chatId=body.chat_id||chatId;pending.textContent=body.response||'Command accepted.'}catch(error){pending.textContent=error.message}finally{busy=false;input.focus()}}
-form.addEventListener('submit',event=>{event.preventDefault();ask(input.value.trim())});
-document.querySelectorAll('[data-command]').forEach(button=>button.addEventListener('click',()=>ask(button.dataset.command)));
+async function readJson(response){const text=await response.text();try{return JSON.parse(text)}catch{return{message:`Unexpected response (${response.status})`}}}
+async function ask(text){const file=fileInput.files[0];if((!text&&!file)||busy)return;busy=true;append(text||`Attached ${file.name}`,'user');input.value='';const pending=append('Thinking…');try{const data=new FormData();data.append('query',text);if(chatId)data.append('chat_id',chatId);if(file)data.append('attachment',file);const response=await fetch('/api/assistant',{method:'POST',body:data}),body=await readJson(response);if(!response.ok)throw new Error(body.detail||body.message||'Assistant unavailable');chatId=body.chat_id||chatId;pending.textContent=body.response||'Done.';fileInput.value='';attachmentName.textContent='Enter to send · Shift+Enter for a new line'}catch(error){pending.textContent=error.message}finally{busy=false;input.focus()}}
+form.addEventListener('submit',event=>{event.preventDefault();ask(input.value.trim())});input.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();form.requestSubmit()}});fileInput.addEventListener('change',()=>{const file=fileInput.files[0];attachmentName.textContent=file?file.name:'Enter to send · Shift+Enter for a new line';attachmentName.classList.toggle('attachment',Boolean(file))});
+
+const pairingButton=document.getElementById('start-pairing'),pairingCode=document.getElementById('pairing-code'),pairingState=document.getElementById('pairing-state');let pairingTimer=null;
+async function pollPairing(){try{const response=await fetch('/api/pairing/status',{cache:'no-store'}),body=await readJson(response);if(!response.ok)throw new Error(body.message||'Unable to check pairing');if(body.status==='paired'){pairingState.textContent='Paired and connected';pairingButton.classList.add('hidden');pairingCode.classList.add('hidden');window.clearInterval(pairingTimer);window.setTimeout(()=>window.location.reload(),700)}else if(body.status==='pending'){pairingState.textContent='Waiting for this code to be entered in thothHUB…'}else if(body.status==='expired'){pairingState.textContent='Pairing code expired. Generate a new one.';window.clearInterval(pairingTimer)}}catch(error){pairingState.textContent=error.message}}
+async function beginPairing(){pairingButton.disabled=true;pairingState.textContent='Creating a secure code…';try{const response=await fetch('/api/pairing/start',{method:'POST'}),body=await readJson(response);if(!response.ok)throw new Error(body.message||'Unable to start pairing');pairingCode.textContent=body.code;pairingCode.classList.remove('hidden');pairingButton.textContent='New pairing code';pairingState.textContent='Enter this code in thothHUB → Devices.';window.clearInterval(pairingTimer);pairingTimer=window.setInterval(pollPairing,3000)}catch(error){pairingState.textContent=error.message}finally{pairingButton.disabled=false}}
+pairingButton?.addEventListener('click',beginPairing);{% if pairing_state and not hub_paired %}pairingTimer=window.setInterval(pollPairing,3000);{% endif %}
+
+const timeline=document.getElementById('capture-timeline'),viewport=document.getElementById('timeline-viewport'),captureStatus=document.getElementById('capture-status'),selected=new Set();let ordered=[],drag=null,quickStatsTimer=null,quickStatsToken=0;
+function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[character]))}
+function stateFor(minute,active){if(minute.minute===active)return'current';return minute.latest_chunk?.state==='occupied'?'occupied':minute.latest_chunk?.state==='empty'?'empty':'missing-data'}
+function colorFor(state){return state==='current'?'#246bfd':state==='occupied'?'#238653':state==='empty'?'#d3463b':'#9b978f'}
+function syncSelection(){timeline.querySelectorAll('[data-minute]').forEach(button=>{const active=selected.has(button.dataset.minute);button.classList.toggle('selected',active);button.setAttribute('aria-selected',String(active))});const count=selected.size;document.getElementById('selection-count').textContent=`${count} selected`;document.getElementById('bulk-download').disabled=!count;document.getElementById('bulk-delete').disabled=!count;scheduleQuickStats()}
+function scheduleQuickStats(){window.clearTimeout(quickStatsTimer);const panel=document.getElementById('quick-stats');if(selected.size!==1){quickStatsToken+=1;panel.classList.add('hidden');return}const minute=[...selected][0],token=++quickStatsToken;panel.classList.remove('hidden');document.getElementById('quick-stats-title').textContent=minute;document.getElementById('quick-stats-open').href=`/captures/${encodeURIComponent(minute)}`;document.getElementById('quick-stats-body').className='quick-loading';document.getElementById('quick-stats-body').textContent='Loading quick stats…';quickStatsTimer=window.setTimeout(()=>loadQuickStats(minute,token),120)}
+async function loadQuickStats(minute,token){try{const response=await fetch(`/api/captures/${encodeURIComponent(minute)}?compact=1`,{cache:'no-store'}),body=await readJson(response);if(token!==quickStatsToken)return;if(!response.ok)throw new Error(body.message||'Quick stats unavailable');const progress=body.capture?.progress||{},chunks=(progress.chunks||[]).filter(chunk=>chunk.state!=='waiting'),occupied=chunks.filter(chunk=>chunk.state==='occupied'||chunk.classification==='green').length,empty=chunks.filter(chunk=>chunk.state==='empty'||chunk.classification==='red').length,evaluated=chunks.reduce((sum,chunk)=>sum+(Number(chunk.evaluated_frames)||0),0),detected=chunks.reduce((sum,chunk)=>sum+(Number(chunk.detected_frames)||0),0),people=chunks.reduce((maximum,chunk)=>Math.max(maximum,Number(chunk.people_count??chunk.target_count??0)),0),dots=chunks.map(chunk=>{const state=chunk.state==='occupied'||chunk.classification==='green'?'occupied':chunk.state==='empty'||chunk.classification==='red'?'empty':'loading',color=colorFor(state);return`<i class="quick-chunk" style="--quick-dot:${color}" title="Chunk ${Number(chunk.index)+1} · ${state}"></i>`}).join('');const host=document.getElementById('quick-stats-body');host.className='';host.innerHTML=`<div class="quick-metrics"><div class="quick-metric"><span>Chunks</span><strong>${chunks.length}</strong></div><div class="quick-metric"><span>Occupied / empty</span><strong>${occupied} / ${empty}</strong></div><div class="quick-metric"><span>Detected frames</span><strong>${detected} / ${evaluated}</strong></div><div class="quick-metric"><span>Peak people</span><strong>${people}</strong></div></div><div class="quick-chunks" aria-label="Chunk classifications">${dots}</div>`}catch(error){if(token===quickStatsToken)document.getElementById('quick-stats-body').textContent=error.message}}
+function setRange(from,to,base=new Set()){selected.clear();for(const item of base)selected.add(item);const start=Math.min(from,to),end=Math.max(from,to);for(let index=start;index<=end;index++)if(ordered[index])selected.add(ordered[index]);syncSelection()}
+function render(minutes,active){const existing=new Set(minutes.map(item=>String(item.minute||'')));for(const name of [...selected])if(!existing.has(name))selected.delete(name);timeline.innerHTML=minutes.length?minutes.map(minute=>{const state=stateFor(minute,active),name=String(minute.minute||'');return`<button type="button" class="capture-minute" data-minute="${escapeHtml(name)}" aria-selected="false" title="${escapeHtml(name)} · ${state} · double-click to open" style="--dot:${colorFor(state)}"><span class="capture-dot"></span><span class="capture-time">${escapeHtml(name.slice(9,11))}:${escapeHtml(name.slice(11,13))}</span><span class="capture-date">${escapeHtml(name.slice(4,6))}/${escapeHtml(name.slice(6,8))}</span></button>`}).join(''):'<div class="timeline-empty">No captured minutes yet.</div>';ordered=minutes.map(item=>String(item.minute||''));document.getElementById('stored-minute-count').textContent=minutes.length;syncSelection()}
+async function refresh(forceEnd=false){const nearEnd=viewport.scrollWidth-viewport.scrollLeft-viewport.clientWidth<80;try{const response=await fetch('/api/captures/timeline',{cache:'no-store'}),body=await readJson(response);if(!response.ok)throw new Error(body.message||'Unable to refresh captures');render(body.minutes||[],body.active_minute);if(forceEnd||nearEnd)requestAnimationFrame(()=>viewport.scrollLeft=viewport.scrollWidth)}catch(error){captureStatus.textContent=error.message}}
+async function control(action){const button=document.getElementById(`${action}-capturing`);button.disabled=true;try{const response=await fetch(`/api/collection/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),body=await readJson(response);if(!response.ok)throw new Error(body.message||'Command failed');captureStatus.textContent=body.message;document.getElementById('start-capturing').classList.toggle('hidden',action==='start');document.getElementById('stop-capturing').classList.toggle('hidden',action==='stop');await refresh(true)}catch(error){captureStatus.textContent=error.message}finally{button.disabled=false}}
+timeline.addEventListener('pointerdown',event=>{if(event.button!==0)return;const button=event.target.closest('[data-minute]');if(!button)return;event.preventDefault();const index=ordered.indexOf(button.dataset.minute),base=(event.ctrlKey||event.metaKey)?new Set(selected):new Set();drag={anchor:index,last:index,base,additive:event.ctrlKey||event.metaKey,moved:false};if(drag.additive&&selected.has(button.dataset.minute)){selected.delete(button.dataset.minute);drag.base=new Set(selected);syncSelection()}else setRange(index,index,base);viewport.classList.add('dragging')});
+timeline.addEventListener('pointerover',event=>{if(!drag)return;const button=event.target.closest('[data-minute]');if(!button)return;const index=ordered.indexOf(button.dataset.minute);if(index<0||index===drag.last)return;drag.last=index;drag.moved=true;setRange(drag.anchor,index,drag.base)});
+window.addEventListener('pointerup',()=>{if(!drag)return;drag=null;viewport.classList.remove('dragging')});
+timeline.addEventListener('dblclick',event=>{const button=event.target.closest('[data-minute]');if(button)window.location.href=`/captures/${encodeURIComponent(button.dataset.minute)}`});
+timeline.addEventListener('keydown',event=>{const button=event.target.closest('[data-minute]');if(!button)return;if(event.key==='Enter')window.location.href=`/captures/${encodeURIComponent(button.dataset.minute)}`;if(event.key===' '){event.preventDefault();selected.has(button.dataset.minute)?selected.delete(button.dataset.minute):selected.add(button.dataset.minute);syncSelection()}});
+viewport.addEventListener('wheel',event=>{if(Math.abs(event.deltaY)<=Math.abs(event.deltaX))return;event.preventDefault();viewport.scrollLeft+=event.deltaY},{passive:false});
+async function bulkDownload(){if(!selected.size)return;captureStatus.textContent='Preparing download…';const response=await fetch('/api/captures/bulk-download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({minutes:[...selected]})});if(!response.ok){const body=await readJson(response);captureStatus.textContent=body.message||'Download failed';return}const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement('a'),disposition=response.headers.get('content-disposition')||'';link.href=url;link.download=(disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i)?.[1]||'thoth-captures.zip').replace(/\"/g,'');document.body.appendChild(link);link.click();link.remove();URL.revokeObjectURL(url);captureStatus.textContent=`Downloaded ${selected.size} captures`}
+async function bulkDelete(){if(!selected.size||!confirm(`Delete ${selected.size} selected capture${selected.size===1?'':'s'}? This cannot be undone.`))return;const response=await fetch('/api/captures/bulk-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({minutes:[...selected]})}),body=await readJson(response);if(!response.ok){captureStatus.textContent=body.message||'Delete failed';return}selected.clear();captureStatus.textContent=`Deleted ${body.count||0} captures`;await refresh()}
+document.getElementById('bulk-download').addEventListener('click',bulkDownload);document.getElementById('bulk-delete').addEventListener('click',bulkDelete);document.getElementById('start-capturing')?.addEventListener('click',()=>control('start'));document.getElementById('stop-capturing')?.addEventListener('click',()=>control('stop'));
+ordered={{ minutes|map(attribute='minute')|list|tojson }};requestAnimationFrame(()=>viewport.scrollLeft=viewport.scrollWidth);window.setInterval(()=>refresh(),5000);
 </script>
 {% endblock %}

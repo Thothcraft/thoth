@@ -56,6 +56,7 @@ from backend.config import Config, BUTTON_ACTIONS, SENSOR_CONFIG
 from backend.models import SensorReading, SystemStatus, ButtonConfig, UploadResult
 from backend.device_manager import DeviceManager
 from backend.auth_manager import AuthManager
+from backend.radar_analysis import create_example2_processor, serialize_example2_plot
 from backend.terminal_manager import SSHTerminalManager
 from backend.sensor_detection import detect_sensor_inventory
 from backend.home_assistant import get_home_assistant_publisher, load_home_assistant_config, save_home_assistant_config, test_home_assistant_connection
@@ -95,10 +96,8 @@ if str(TRACK_EXAMPLE_DIR) not in sys.path:
     sys.path.append(str(TRACK_EXAMPLE_DIR))
 
 try:
-    from signal_proc import SigProc
     from utility.helper import parse_radar_cfg, read_uint12, split_samples
 except Exception:  # pragma: no cover - import may fail on minimal installs
-    SigProc = None
     parse_radar_cfg = None
     read_uint12 = None
     split_samples = None
@@ -120,7 +119,7 @@ RADAR_PLOT_AXES = {
 RADAR_CONFIG_DIR = MMW_RELEASE / 'radar_config' / 'config_3rx_3m'
 RADAR_TRACKING_CONFIG = TRACK_EXAMPLE_DIR / 'config' / 'processing_config.json'
 CSI_NUMBER_RE = re.compile(r'[-+]?\d+(?:\.\d+)?')
-RADAR_CACHE_VERSION = 4
+RADAR_CACHE_VERSION = 5
 _radar_cache_lock = threading.RLock()
 _home_assistant_manifest_lock = threading.Lock()
 
@@ -138,11 +137,15 @@ from backend.file_manager import file_manager
 # Add request logging
 @app.before_request
 def log_request():
-    logger.info(f"Request: {request.method} {request.path} - {request.remote_addr}")
+    if session.get('username') and not auth_manager.is_authenticated():
+        session.clear()
+    if request.path != '/api/radar/occupancy':
+        logger.info(f"Request: {request.method} {request.path} - {request.remote_addr}")
 
 @app.after_request
 def log_response(response):
-    logger.info(f"Response: {request.method} {request.path} - {response.status_code}")
+    if request.path != '/api/radar/occupancy':
+        logger.info(f"Response: {request.method} {request.path} - {response.status_code}")
     return response
 
 # Add current date to all templates
@@ -610,8 +613,8 @@ def _radar_animation_bundle(
     # dimension pairs, reduction, and log scaling as MMW-HAT Example 1.
     mmw_proc = CubeProcessor(setting, num_azimuth_bin=16, num_elevation_bin=16)
     tracking_proc = None
-    if all((SigProc, parse_radar_cfg, read_uint12, split_samples)) and RADAR_TRACKING_CONFIG.exists():
-        tracking_proc = SigProc(str(RADAR_TRACKING_CONFIG), parse_radar_cfg(setting))
+    if all((parse_radar_cfg, read_uint12, split_samples)) and RADAR_TRACKING_CONFIG.exists():
+        tracking_proc = create_example2_processor(parse_radar_cfg(setting))
         tracking_proc.detection_threshold_db = detection_threshold_db
     max_frames = min(60, total_frames)
     sample_indices = {1, total_frames}
@@ -673,19 +676,16 @@ def _radar_animation_bundle(
 
         if tracking_result is not None:
             location, score, gui_plot, detection = tracking_result
-            location_values = np.asarray(location, dtype=float)
-            safe_location = [float(value) if np.isfinite(value) else None for value in location_values]
-            xy_image = np.asarray(gui_plot['map'], dtype=float).T
-            active = np.argwhere(xy_image > 0)
+            native_plot = serialize_example2_plot(tracking_proc, gui_plot, location, score, detection)
+            playback = native_plot.get('playback') if isinstance(native_plot, dict) else None
+            if not isinstance(playback, dict):
+                continue
             frames_by_plot['xy-tracking'].append({
                 'seq': seq,
                 'index': index,
-                'x': np.asarray(gui_plot['x_axis'], dtype=float).tolist(),
-                'y': np.asarray(gui_plot['y_axis'], dtype=float).tolist(),
-                'z_sparse': [[int(row), int(column), float(xy_image[row, column])] for row, column in active],
-                'z_shape': [int(xy_image.shape[0]), int(xy_image.shape[1])],
-                'location': safe_location,
-                'score': float(score) if np.isfinite(score) else None,
+                **playback,
+                'location': native_plot.get('location'),
+                'score': native_plot.get('score'),
                 'detected': bool(detection.get('detected')),
                 'snr_db': detection.get('snr_db'),
                 'threshold_db': detection.get('threshold_db'),
@@ -725,14 +725,14 @@ def _radar_animation_bundle(
             'frames': frames,
             'frame_count': total_frames,
             'sample_count': len(frames),
-            'frame_interval_ms': 120,
+            'frame_interval_ms': max(50, int(round(1000.0 / max(1.0, float(setting.get('frame_rate') or 10.0))))),
             'updated': datetime.utcnow().isoformat(),
             'occupancy': occupancy,
         }
         if plot == 'xy-tracking':
             bundle[plot]['title'] = 'X-Y Tracking'
-            bundle[plot]['x_label'] = 'X (forward, m)'
-            bundle[plot]['y_label'] = 'Y (lateral, m)'
+            bundle[plot]['x_label'] = 'Y / lateral (m)'
+            bundle[plot]['y_label'] = 'X / forward (m)'
             bundle[plot]['location'] = latest.get('location')
             bundle[plot]['score'] = latest.get('score')
             bundle[plot]['detected'] = latest.get('detected', False)
@@ -740,6 +740,8 @@ def _radar_animation_bundle(
             bundle[plot]['threshold_db'] = latest.get('threshold_db')
             bundle[plot]['peak_power_db'] = latest.get('peak_power_db')
             bundle[plot]['noise_floor_db'] = latest.get('noise_floor_db')
+            bundle[plot]['coordinate_space'] = 'example2_sensor_local'
+            bundle[plot]['native_pipeline'] = True
     with _radar_cache_lock:
         try:
             temporary = cache_path.with_suffix(cache_path.suffix + '.tmp')
@@ -759,7 +761,7 @@ def _radar_plot_payload(radar_path: Path, plot: str) -> Dict[str, Any]:
     stat = radar_path.stat()
     settings = device_manager.get_device_settings()
     try:
-        detection_threshold_db = min(9.5, max(0.5, float(settings.get('radar_detection_threshold_normalized', 0.45)) * 10.0))
+        detection_threshold_db = min(30.0, max(0.0, float(settings.get('radar_detection_threshold_db', 8.0))))
     except (TypeError, ValueError):
         detection_threshold_db = 8.0
     # Four plot requests arrive together. Serialize the cache miss so only one
@@ -780,13 +782,8 @@ def _radar_plot_payload(radar_path: Path, plot: str) -> Dict[str, Any]:
     occupancy['detected_frames'] = detected_frames
     occupancy['evaluated_frames'] = evaluated_frames
     occupancy['ratio'] = detected_frames / evaluated_frames if evaluated_frames else 0.0
-    try:
-        threshold_percent = min(100.0, max(0.0, float(settings.get('occupancy_threshold_percent', 50.0))))
-    except (TypeError, ValueError):
-        threshold_percent = 50.0
-    occupancy['threshold_percent'] = threshold_percent
-    ratio_percent = occupancy['ratio'] * 100.0
-    occupancy['classification'] = 'green' if evaluated_frames and ratio_percent >= threshold_percent else 'red'
+    occupancy['threshold_db'] = detection_threshold_db
+    occupancy['classification'] = 'green' if detected_frames > 0 else 'red'
     occupancy['label'] = 'occupied' if occupancy['classification'] == 'green' else 'empty'
     payload['occupancy'] = occupancy
     # Live collection owns persistence, automatic labeling, and Home Assistant
@@ -800,7 +797,7 @@ def _prewarm_latest_radar_playback() -> None:
         return
     try:
         settings = device_manager.get_device_settings()
-        threshold = min(9.5, max(0.5, float(settings.get('radar_detection_threshold_normalized', 0.45)) * 10.0))
+        threshold = min(30.0, max(0.0, float(settings.get('radar_detection_threshold_db', 8.0))))
         for summary in list_minutes()[:3]:
             if not summary.get('capture_finished'):
                 continue
@@ -819,41 +816,6 @@ def _prewarm_latest_radar_playback() -> None:
             break
     except Exception as exc:
         logger.warning('Radar playback prewarm failed: %s', exc)
-
-
-def _relabel_cached_occupancy(threshold_percent: float) -> int:
-    """Apply a changed percentage threshold to minutes already evaluated."""
-    updated = 0
-    for summary in list_minutes():
-        minute_dir = get_minute(str(summary.get('minute', '')))
-        if not minute_dir:
-            continue
-        manifest_path = minute_dir / 'manifest.json'
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-            occupancy = manifest.get('auto_occupancy_label')
-            if not isinstance(occupancy, dict):
-                continue
-            previous_threshold = occupancy.get('threshold_percent')
-            detected = max(0, int(occupancy.get('detected_frames') or 0))
-            total = max(0, int(occupancy.get('evaluated_frames') or 0))
-            label = 'occupied' if total and detected * 100 >= threshold_percent * total else 'empty'
-            occupancy.update({
-                'detected_frames': detected,
-                'evaluated_frames': total,
-                'ratio': detected / total if total else 0.0,
-                'threshold_percent': threshold_percent,
-                'label': label,
-            })
-            if manifest.get('labels') != [label] or previous_threshold != threshold_percent:
-                manifest['labels'] = [label]
-                manifest['primary_label'] = label
-                manifest['auto_occupancy_label'] = occupancy
-                manifest_path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-                updated += 1
-        except Exception as exc:
-            logger.warning('Unable to relabel %s: %s', minute_dir.name, exc)
-    return updated
 
 
 def _render_live_radar_png(radar_path: Path, plot: str) -> bytes:
@@ -907,7 +869,7 @@ def _blank_xy_payload(title: str = 'X-Y localization') -> Dict[str, Any]:
             'detected_frames': 0,
             'evaluated_frames': 0,
             'ratio': 0.0,
-            'threshold_percent': 50.0,
+            'threshold_db': 8.0,
         },
         'location': [0.0, 0.0],
         'score': 0.0,
@@ -918,6 +880,8 @@ def _blank_xy_payload(title: str = 'X-Y localization') -> Dict[str, Any]:
         'noise_floor_db': 0.0,
         'targets': [],
         'motion_points': 0,
+        'coordinate_space': 'example2_sensor_local',
+        'native_pipeline': True,
     }
 
 
@@ -932,7 +896,7 @@ def _load_xy_tracking_payload(minute_dir: Path, files: Dict[str, Optional[Path]]
             logger.warning('Unable to read xy tracking payload for %s: %s', minute_dir.name, exc)
 
     chunk_payloads: list[Dict[str, Any]] = []
-    for radar_path in reversed(files.get('radar_bins') or []):
+    for radar_path in files.get('radar_bins') or []:
         if not radar_path or not radar_path.exists():
             continue
         try:
@@ -942,19 +906,34 @@ def _load_xy_tracking_payload(minute_dir: Path, files: Dict[str, Optional[Path]]
         except Exception as exc:
             logger.debug('Skipping incomplete radar chunk %s: %s', radar_path.name, exc)
             continue
-        if chunk_payloads:
-            break
-
     if chunk_payloads:
         try:
             from backend.radar_analysis import compile_minute_xy_payload
             combined = compile_minute_xy_payload(chunk_payloads)
             if isinstance(combined, dict):
+                try:
+                    _write_json_file(xy_payload_path, combined)
+                except OSError as exc:
+                    logger.warning('Unable to cache xy tracking payload for %s: %s', minute_dir.name, exc)
                 return combined
         except Exception as exc:
             logger.warning('Unable to combine xy tracking chunks for %s: %s', minute_dir.name, exc)
 
     return _blank_xy_payload()
+
+
+def _live_xy_window(payload: Dict[str, Any], frame_limit: int = 10) -> Dict[str, Any]:
+    """Return only the newest frames needed by a realtime client."""
+    bounded = dict(payload)
+    frames = payload.get('frames') if isinstance(payload.get('frames'), list) else []
+    bounded['frames'] = frames[-max(1, frame_limit):]
+    bounded['sample_count'] = len(bounded['frames'])
+    bounded['stream_window_frames'] = max(1, frame_limit)
+    if bounded['frames']:
+        # Every playback frame carries its sparse map, so the 200x400 dense
+        # fallback matrix is redundant in the live response.
+        bounded['z'] = []
+    return bounded
 
 
 def get_capture_overview() -> Dict[str, Any]:
@@ -1411,45 +1390,61 @@ def terminal_disconnect():
 def status():
     """Display the device status page."""
     try:
-        # Get system status
-        system_status = get_system_status()
-
-        # Get device information
+        # Home must remain local-first; remote registration and heartbeat run
+        # in background jobs and must never delay the dashboard render.
+        system_status = get_system_status(update_remote=False)
         device_info = device_manager.get_device_info()
-
-        # Get disk usage
-        disk_usage = psutil.disk_usage('/')
-
-        # Get CPU temperature (Linux only)
-        cpu_temp = None
-        if platform.system() != 'Windows':
-            try:
-                with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
-                    cpu_temp = float(f.read().strip()) / 1000.0  # Convert millidegrees to degrees
-            except Exception:
-                pass
-
-        wifi_state = get_active_wifi_state()
-        capture_overview = get_capture_overview()
-        sensors = detect_sensor_inventory()
-        recent_minutes = list_minutes()[:6]
+        minutes = _capture_timeline_items()
+        active_minute = current_minute() if system_status.collection_active else None
 
         return render_template('status.html',
                             system_status=system_status,
                             device_info=device_info,
-                            disk_usage=disk_usage,
-                            cpu_temp=cpu_temp,
-                            wifi_state=wifi_state,
                             username=session.get('username'),
-                            capture_overview=capture_overview,
-                            recent_minutes=recent_minutes,
-                            sensors=sensors,
-                            device_settings=device_manager.get_device_settings())
+                            capture_overview={'minute_count': len(minutes)},
+                            minutes=minutes,
+                            active_minute=active_minute.name if active_minute else None,
+                            pairing_state={
+                                key: auth_manager.pairing_session.get(key)
+                                for key in ('code', 'device_id', 'expires_at')
+                            } if auth_manager.pairing_session else None,
+                            hub_paired=auth_manager.is_authenticated())
 
     except Exception as e:
         logger.error(f"Error in status route: {str(e)}", exc_info=True)
         flash('An error occurred while loading the status page.', 'error')
         return redirect(url_for('index'))
+
+
+@app.route('/api/pairing/start', methods=['POST'])
+def start_pairing():
+    """Show a one-time code that binds this physical device to thothHUB."""
+    try:
+        device_name = f"Thoth-{device_manager.device_id[:8]}"
+        result = auth_manager.start_pairing(
+            device_manager.device_id,
+            device_name,
+            device_manager._build_hardware_info(),
+        )
+        return jsonify({'success': True, 'status': 'pending', **result})
+    except Exception as exc:
+        logger.warning("Unable to start thothHUB pairing: %s", exc)
+        return jsonify({'success': False, 'message': str(exc)}), 502
+
+
+@app.route('/api/pairing/status')
+def pairing_status():
+    """Complete a claimed pairing without exposing account credentials."""
+    try:
+        result = auth_manager.pairing_status()
+        if result.get('status') == 'paired':
+            user = result.get('user') or {}
+            session['user_id'] = user.get('user_id')
+            _activate_device_session(str(user.get('username') or 'paired-user'), result['token'])
+        return jsonify(result)
+    except Exception as exc:
+        logger.warning("Unable to check thothHUB pairing: %s", exc)
+        return jsonify({'success': False, 'message': str(exc)}), 502
 
 
 @app.route('/api/assistant', methods=['POST'])
@@ -1462,21 +1457,42 @@ def assistant_query():
     )
     if not token:
         return jsonify({'success': False, 'message': 'Log in to use the assistant'}), 401
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+    payload = payload if isinstance(payload, dict) else {}
     query = str(payload.get('query') or '').strip()
+    attachment = request.files.get('attachment') if not request.is_json else None
+    attachment_context = None
+    if attachment and attachment.filename:
+        filename = Path(attachment.filename).name
+        if Path(filename).suffix.lower() != '.txt':
+            return jsonify({'success': False, 'message': 'Only .txt attachments are supported'}), 400
+        raw = attachment.stream.read(262145)
+        if len(raw) > 262144:
+            return jsonify({'success': False, 'message': 'Text attachments must be 256 KB or smaller'}), 413
+        try:
+            content = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            return jsonify({'success': False, 'message': 'The attached text file must use UTF-8'}), 400
+        attachment_context = {'name': filename, 'content': content}
+    if not query and not attachment_context:
+        return jsonify({'success': False, 'message': 'Write a message or attach a .txt file'}), 400
     if not query:
-        return jsonify({'success': False, 'message': 'Query is required'}), 400
+        query = f"Please read and respond to the attached text file {attachment_context['name']}."
     try:
+        context = {
+            'surface': 'thoth-device-dashboard',
+            'device_id': device_manager.device_id,
+            'collection_active': get_system_status(update_remote=False).collection_active,
+            'username': session.get('username'),
+        }
+        if attachment_context:
+            context['text_attachment'] = attachment_context
         response = requests.post(
             _brain_api_url('/query'),
             json={
                 'query': query,
                 'chat_id': payload.get('chat_id'),
-                'context': {
-                    'surface': 'thoth-device-dashboard',
-                    'device_id': device_manager.device_id,
-                    'collection_active': get_system_status(update_remote=False).collection_active,
-                },
+                'context': context,
             },
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
             timeout=90,
@@ -1492,6 +1508,13 @@ def assistant_query():
                 'success': False,
                 'message': f'Assistant service returned an invalid response ({response.status_code})',
             }), 502
+        if response.ok:
+            nested = body.get('data') if isinstance(body.get('data'), dict) else {}
+            answer = body.get('response') or body.get('answer') or body.get('message') or nested.get('response') or nested.get('answer')
+            if answer:
+                body['response'] = answer
+            body['chat_id'] = body.get('chat_id') or nested.get('chat_id') or payload.get('chat_id')
+            body.setdefault('success', True)
         return jsonify(body), response.status_code
     except Exception as exc:
         logger.exception('Assistant request failed: %s', exc)
@@ -1612,7 +1635,9 @@ def api_radar_occupancy():
             'range_m': primary.get('range_m', 15),
         }
     state['stale'] = time.time() - float(state.get('updated_at') or 0) > 3.0
-    return jsonify(state)
+    response = jsonify(state)
+    response.headers['Cache-Control'] = 'no-store, max-age=0'
+    return response
 
 
 @app.route('/api/radar/room', methods=['GET', 'POST'])
@@ -1717,15 +1742,11 @@ def settings():
         updates = {
             'portal_upload_allowed': str(payload.get('portal_upload_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
             'cloud_sync_allowed': str(payload.get('cloud_sync_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
-            'radar_detection_threshold_normalized': payload.get('radar_detection_threshold_normalized', 0.45),
+            'radar_detection_threshold_db': payload.get('radar_detection_threshold_db', 8.0),
             'auto_occupancy_label_enabled': str(payload.get('auto_occupancy_label_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
-            'occupancy_threshold_percent': payload.get('occupancy_threshold_percent', 50.0),
-            'yellow_threshold_percent': payload.get('yellow_threshold_percent', 20.0),
-            'green_threshold_percent': payload.get('green_threshold_percent', 60.0),
             'chunk_seconds': payload.get('chunk_seconds', 10.0),
             'system_mode': payload.get('system_mode', 'balanced'),
             'labels': payload.get('labels', []),
-            'occupancy_vote_chunks': payload.get('occupancy_vote_chunks', 1),
             'prediction_label_style': payload.get('prediction_label_style', 'occupancy'),
             'people_count_label_enabled': str(payload.get('people_count_label_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
             'sleep_study_enabled': str(payload.get('sleep_study_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
@@ -1768,8 +1789,6 @@ def api_settings():
         saved = device_manager.save_device_settings(payload)
     except (OSError, ValueError, TypeError) as exc:
         return jsonify({'success': False, 'message': f'Unable to persist settings: {exc}'}), 500
-    if saved.get('auto_occupancy_label_enabled', True):
-        _relabel_cached_occupancy(float(saved.get('occupancy_threshold_percent', 50.0)))
     return jsonify({'success': True, 'settings': saved})
 
 
@@ -1853,24 +1872,8 @@ def api_internal_home_assistant_publish():
 
 @app.route('/captures')
 def captures():
-    """Show the minute capture browser."""
-    system_status = get_system_status(update_remote=False)
-    minutes = _capture_timeline_items()
-    active = current_minute() if system_status.collection_active else None
-    sensors = detect_sensor_inventory()
-    capture_settings = device_manager.load_capture_settings()
-    enabled_map = (capture_settings or {}).get("sensors", {})
-    for sensor in sensors:
-        sensor["enabled"] = bool(enabled_map.get(sensor.get("key"), True))
-    return render_template(
-        'captures.html',
-        minutes=minutes,
-        active_minute=active.name if active else None,
-        username=session.get('username'),
-        system_status=system_status,
-        sensors=sensors,
-        capture_settings=capture_settings,
-    )
+    """Keep old capture links working after moving the archive home."""
+    return redirect(url_for('status', _anchor='captures'))
 
 
 def _capture_timeline_items(limit: Optional[int] = None) -> list[Dict[str, Any]]:
@@ -2027,8 +2030,7 @@ def capture_detail(minute):
 
     files = capture_files(minute_dir)
     detail = minute_summary(minute_dir)
-    manifest_view = json.loads(json.dumps(detail))
-    for chunk in (manifest_view.get("progress") or {}).get("chunks", []):
+    for chunk in (detail.get("progress") or {}).get("chunks", []):
         chunk.pop("xy_map", None)
     metrics = minute_metrics(minute_dir)
     video_preview = f"/api/captures/{minute}/file/video" if files.get("video") else None
@@ -2041,10 +2043,10 @@ def capture_detail(minute):
         minute=minute_dir.name,
         capture=minute_dir,
         minute_info=detail,
-        manifest_view=manifest_view,
         files=files,
         capture_metrics=metrics,
         video_url=video_preview,
+        manifest_url=url_for('api_capture_file', minute=minute_dir.name, kind='manifest'),
         xy_tracking_url=url_for('api_capture_radar_data', minute=minute_dir.name, plot='xy-tracking'),
         csi_data_url=url_for('api_capture_csi_data', minute=minute_dir.name),
         radar_preview=radar_preview,
@@ -2212,6 +2214,16 @@ def api_capture_detail(minute):
 
     files = capture_files(minute_dir)
     detail = minute_summary(minute_dir)
+    for chunk in (detail.get('progress') or {}).get('chunks', []):
+        chunk.pop('xy_map', None)
+    if request.args.get('compact') in {'1', 'true', 'yes'}:
+        response = jsonify({'status': 'success', 'capture': {
+            'minute': detail.get('minute'),
+            'capture_finished': detail.get('capture_finished'),
+            'progress': detail.get('progress') or {},
+        }})
+        response.headers['Cache-Control'] = 'no-store, max-age=0'
+        return response
     metrics = minute_metrics(minute_dir)
     detail['files_on_disk'] = {key: str(path) if path else None for key, path in files.items()}
     detail['metrics'] = metrics
@@ -2407,6 +2419,47 @@ def api_capture_radar_data(minute, plot):
     except Exception as exc:
         logger.exception(f"Failed to build xy data {plot}: {exc}")
         abort(500, description=str(exc))
+
+    requested_chunk = request.args.get('chunk')
+    if requested_chunk is not None:
+        try:
+            chunk_index = int(requested_chunk)
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'chunk must be a non-negative integer'}), 400
+        if chunk_index < 0:
+            return jsonify({'status': 'error', 'message': 'chunk must be a non-negative integer'}), 400
+
+        frames = []
+        for frame in payload.get('frames') or []:
+            if not isinstance(frame, dict):
+                continue
+            try:
+                frame_chunk_index = int(frame.get('chunk_index', -1))
+            except (TypeError, ValueError):
+                continue
+            if frame_chunk_index == chunk_index:
+                frames.append(frame)
+        if not frames:
+            radar_bins = files.get('radar_bins') or []
+            if chunk_index < len(radar_bins):
+                try:
+                    chunk_payload = _radar_plot_payload(radar_bins[chunk_index], plot)
+                    frames = list((chunk_payload or {}).get('frames') or [])
+                    payload = chunk_payload if isinstance(chunk_payload, dict) else payload
+                except Exception as exc:
+                    logger.debug('Chunk %s is not ready for playback: %s', chunk_index, exc)
+
+        chunk_payload = dict(payload)
+        chunk_payload['frames'] = frames[:10]
+        chunk_payload['z'] = [] if frames else chunk_payload.get('z', [])
+        chunk_payload['chunk_index'] = chunk_index
+        chunk_payload['frame_count'] = len(chunk_payload['frames'])
+        chunk_payload['sample_count'] = len(chunk_payload['frames'])
+        chunk_payload['expected_frame_count'] = 10
+        chunk_payload['loading'] = len(chunk_payload['frames']) < 10
+        response = jsonify({'status': 'success', 'minute': minute, 'data': chunk_payload})
+        response.headers['Cache-Control'] = 'no-store, max-age=0'
+        return response
 
     payload['metadata'] = minute_metrics(minute_dir)
     return jsonify({'status': 'success', 'minute': minute, 'data': payload})
@@ -2649,7 +2702,7 @@ def api_live_capture_csi_plot():
 
 @app.route('/api/captures/live/radar/data/<plot>')
 def api_live_capture_radar_data(plot):
-    """Return interactive live radar data."""
+    """Return the bounded, newest live radar window."""
     plot = plot.lower()
     if plot not in RADAR_PLOTS:
         abort(404, description=f'Unsupported radar plot kind: {plot}')
@@ -2659,13 +2712,14 @@ def api_live_capture_radar_data(plot):
         abort(404, description='No live capture minute available')
 
     try:
-        payload = _load_xy_tracking_payload(minute_dir, files)
+        payload = _live_xy_window(_load_xy_tracking_payload(minute_dir, files))
     except Exception as exc:
         logger.exception(f"Failed to build live xy data {plot}: {exc}")
         abort(500, description=str(exc))
 
-    payload['metadata'] = minute_metrics(minute_dir)
-    return jsonify({'status': 'success', 'minute': minute_dir.name, 'data': payload})
+    response = jsonify({'status': 'success', 'minute': minute_dir.name, 'data': payload})
+    response.headers['Cache-Control'] = 'no-store, max-age=0'
+    return response
 
 
 @app.route('/api/captures/live/radar/plot/<plot>')

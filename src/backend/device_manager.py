@@ -190,6 +190,11 @@ class DeviceManager:
         }
 
     def _coerce_setting_value(self, key: str, value: Any) -> Any:
+        if key == 'radar_detection_threshold_db':
+            try:
+                return min(30.0, max(0.0, float(value)))
+            except (TypeError, ValueError):
+                return 8.0
         if key == 'radar_detection_threshold_normalized':
             try:
                 return min(0.95, max(0.05, float(value)))
@@ -392,14 +397,10 @@ class DeviceManager:
                 'esp32_csi': True,
                 'sense_hat': True,
             },
-            'radar_detection_threshold_normalized': 0.45,
-            'occupancy_threshold_percent': 50.0,
-            'yellow_threshold_percent': 20.0,
-            'green_threshold_percent': 60.0,
+            'radar_detection_threshold_db': 8.0,
             'auto_occupancy_label_enabled': True,
             'chunk_seconds': 10.0,
             'system_mode': 'balanced',
-            'occupancy_vote_chunks': 1,
             'prediction_label_style': 'occupancy',
             'people_count_label_enabled': False,
             'sleep_study_enabled': False,
@@ -430,27 +431,18 @@ class DeviceManager:
         except (TypeError, ValueError):
             revision = 0
         updated_at = source.get('updated_at')
-        normalized_source = source.get('radar_detection_threshold_normalized')
-        if normalized_source is None and 'radar_detection_threshold_db' in source:
+        threshold_db_source = source.get('radar_detection_threshold_db')
+        if threshold_db_source is None and 'radar_detection_threshold_normalized' in source:
             try:
-                normalized_source = float(source['radar_detection_threshold_db']) / 10.0
+                threshold_db_source = float(source['radar_detection_threshold_normalized']) * 10.0
             except (TypeError, ValueError):
-                normalized_source = 0.45
+                threshold_db_source = 8.0
         return {
             'labels': labels,
             'sensors': sensors,
-            'radar_detection_threshold_normalized': self._coerce_setting_value(
-                'radar_detection_threshold_normalized',
-                normalized_source if normalized_source is not None else 0.45,
-            ),
-            'occupancy_threshold_percent': self._coerce_setting_value(
-                'occupancy_threshold_percent', source.get('occupancy_threshold_percent', 50.0)
-            ),
-            'yellow_threshold_percent': self._coerce_setting_value(
-                'yellow_threshold_percent', source.get('yellow_threshold_percent', 20.0)
-            ),
-            'green_threshold_percent': self._coerce_setting_value(
-                'green_threshold_percent', source.get('green_threshold_percent', 60.0)
+            'radar_detection_threshold_db': self._coerce_setting_value(
+                'radar_detection_threshold_db',
+                threshold_db_source if threshold_db_source is not None else 8.0,
             ),
             'auto_occupancy_label_enabled': self._coerce_setting_value(
                 'auto_occupancy_label_enabled', source.get('auto_occupancy_label_enabled', True)
@@ -460,9 +452,6 @@ class DeviceManager:
             ),
             'system_mode': self._coerce_setting_value(
                 'system_mode', source.get('system_mode', 'balanced')
-            ),
-            'occupancy_vote_chunks': self._coerce_setting_value(
-                'occupancy_vote_chunks', source.get('occupancy_vote_chunks', 1)
             ),
             'prediction_label_style': self._coerce_setting_value(
                 'prediction_label_style', source.get('prediction_label_style', 'occupancy')
@@ -501,18 +490,16 @@ class DeviceManager:
         current = self.load_capture_settings()
         updates = dict(settings or {})
         if (
-            'radar_detection_threshold_normalized' not in updates
-            and 'radar_detection_threshold_db' in updates
+            'radar_detection_threshold_db' not in updates
+            and 'radar_detection_threshold_normalized' in updates
         ):
             try:
-                updates['radar_detection_threshold_normalized'] = (
-                    float(updates['radar_detection_threshold_db']) / 10.0
+                updates['radar_detection_threshold_db'] = (
+                    float(updates['radar_detection_threshold_normalized']) * 10.0
                 )
             except (TypeError, ValueError):
                 pass
         normalized = self.normalize_capture_settings({**current, **updates})
-        if normalized['yellow_threshold_percent'] >= normalized['green_threshold_percent']:
-            raise ValueError('thresholds must satisfy 0 <= yellow < green <= 100')
         if local_change:
             normalized['revision'] = max(int(current.get('revision') or 0), int(normalized.get('revision') or 0)) + 1
             normalized['updated_at'] = datetime.now(timezone.utc).isoformat()

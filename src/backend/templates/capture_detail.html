@@ -5,6 +5,18 @@
 {% block extra_head %}
 <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
 <script src="{{ url_for('static', filename='js/capture_playback.js') }}"></script>
+<style>
+  .chunk-card{display:block;width:100%;padding:0;text-align:left;cursor:pointer;transition:transform .16s,box-shadow .16s,border-color .16s}
+  .chunk-card:hover{transform:translateY(-2px);border-color:#77736b;box-shadow:0 14px 32px rgba(17,17,15,.10)}
+  .chunk-card:focus-visible{outline:3px solid rgba(36,107,253,.35);outline-offset:3px}
+  .chunk-dialog{position:fixed;inset:0;z-index:60;display:grid;place-items:center;padding:22px;background:rgba(17,17,15,.72);backdrop-filter:blur(8px)}
+  .chunk-dialog.hidden{display:none}.chunk-window{width:min(1040px,100%);max-height:calc(100vh - 44px);overflow:auto;border:1px solid #aaa59b;border-radius:18px;background:#faf8f2;box-shadow:0 30px 100px rgba(0,0,0,.45)}
+  .chunk-window-head{position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:20px;padding:18px 22px;border-bottom:1px solid #d8d4ca;background:rgba(250,248,242,.96);backdrop-filter:blur(12px)}
+  .chunk-window-head h2{margin:3px 0 0;font-size:24px;letter-spacing:-.04em}.chunk-close{width:36px;height:36px;border:1px solid #aaa59b;border-radius:50%;background:#fff;font-size:20px}
+  .chunk-view-body{padding:18px 22px 22px}.chunk-loading{display:grid;place-items:center;min-height:520px;border:1px dashed #aaa59b;border-radius:14px;color:#77736b}.chunk-loading.hidden{display:none}
+  .chunk-frame-host{height:min(610px,65vh)}.chunk-frame-controls{display:flex;align-items:center;gap:12px;margin-top:12px;padding:12px 14px;border:1px solid #d8d4ca;border-radius:12px;background:#fff}.chunk-frame-controls input{flex:1;accent-color:#11110f}.chunk-frame-controls button{width:34px;height:30px;border:1px solid #aaa59b;border-radius:7px;background:#faf8f2}.chunk-frame-count{min-width:92px;text-align:right;font:600 11px ui-monospace,monospace;color:#4e4b45}
+  body.chunk-dialog-open{overflow:hidden}
+</style>
 {% endblock %}
 
 {% block content %}
@@ -36,7 +48,7 @@
                         {% set chunk_detail %}Chunk {{ chunk.index + 1 }}; {{ chunk.prediction if chunk.prediction else chunk.state }}{% if chunk.detected_frames is defined and chunk.detected_frames is not none and chunk.evaluated_frames is defined and chunk.evaluated_frames is not none %}; {{ chunk.detected_frames }} / {{ chunk.evaluated_frames }} frames{% endif %}{% if chunk.ratio is defined and chunk.ratio is not none %}; ratio {{ (chunk.ratio * 100)|round(1) }}%{% endif %}{% if chunk.location is defined and chunk.location %}; coordinates {{ chunk.location.x|round(2) }}, {{ chunk.location.y|round(2) }} m{% endif %}{% if chunk.error is defined and chunk.error %}; {{ chunk.error }}{% endif %}{% endset %}
                         <div class="min-w-0 flex-1 text-center" title="{{ chunk_detail|trim }}">
                             {% set ratio = chunk.ratio|default(0, true)|float %}{% set thinking = chunk.progress|default(0, true)|float %}
-                            <div role="img" tabindex="0" title="{{ chunk_detail|trim }}" aria-label="{{ chunk_detail|trim }}" class="mx-auto h-3 w-3 rounded-full ring-2 ring-white" style="background:{% if chunk.state == 'occupied' or chunk.classification == 'green' %}hsl(145 68% 39%){% elif chunk.state == 'empty' or chunk.classification == 'red' %}hsl(4 76% 51%){% else %}hsl(217 88% 55%){% endif %};transition:background-color .45s ease"></div>
+                            <button type="button" data-open-chunk="{{ chunk.index }}" title="Open {{ chunk_detail|trim }}" aria-label="Open {{ chunk_detail|trim }}" class="mx-auto block h-3 w-3 rounded-full ring-2 ring-white" style="background:{% if chunk.state == 'occupied' or chunk.classification == 'green' %}hsl(145 68% 39%){% elif chunk.state == 'empty' or chunk.classification == 'red' %}hsl(4 76% 51%){% else %}hsl(217 88% 55%){% endif %};transition:background-color .45s ease"></button>
                         </div>
                         {% endif %}
                         {% endfor %}
@@ -76,21 +88,14 @@
         <div id="chunk-statistics" class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {% for chunk in minute_info.progress.chunks %}
             {% if chunk.state != 'waiting' %}
-            <article class="overflow-hidden border border-slate-200 bg-slate-50">
+            <button type="button" data-open-chunk="{{ chunk.index }}" class="chunk-card overflow-hidden border border-slate-200 bg-slate-50" aria-label="Open Chunk {{ chunk.index + 1 }} frames">
                 <div class="flex items-center justify-between gap-3 p-4 pb-3"><strong>Chunk {{ chunk.index + 1 }}</strong><span class="inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-600"><span class="h-2.5 w-2.5 rounded-full" style="background:{% if chunk.state == 'occupied' or chunk.classification == 'green' %}hsl(145 68% 39%){% elif chunk.state == 'empty' or chunk.classification == 'red' %}hsl(4 76% 51%){% else %}hsl(217 88% 55%){% endif %}"></span>{{ chunk.prediction or chunk.state }}</span></div>
-                {% if chunk.xy_map %}
-                <div class="border-y border-slate-200 bg-slate-950 p-2">
-                    <canvas data-chunk-map="{{ chunk.index }}" width="512" height="512" class="aspect-square h-auto w-full"></canvas>
-                    <div class="mt-2 flex items-center gap-2 px-1 text-[10px] font-medium text-slate-300"><span>0</span><span class="h-1.5 flex-1 rounded-full" style="background:linear-gradient(90deg,#440154,#3b528b,#21918c,#5ec962,#fde725)"></span><span>1 normalized intensity</span></div>
-                </div>
-                {% else %}
-                <div class="flex aspect-square items-center justify-center border-y border-slate-200 bg-slate-950 text-xs font-medium text-slate-400">Map loading</div>
-                {% endif %}
+                <div class="flex h-24 items-center justify-center border-y border-slate-200 bg-slate-950 text-xs font-semibold uppercase tracking-[0.16em] text-slate-300">Open 10 frames</div>
                 <div class="p-4 pt-3">
                 <div class="mt-3 grid grid-cols-2 gap-3 text-sm"><div><span class="block text-xs text-slate-500">Detected frames</span>{{ chunk.detected_frames|default(0, true) }} / {{ chunk.evaluated_frames|default(0, true) }}</div><div><span class="block text-xs text-slate-500">Detection ratio</span>{{ ((chunk.ratio|default(0, true)|float) * 100)|round(1) }}%</div><div><span class="block text-xs text-slate-500">People</span>{{ chunk.people_count|default(chunk.target_count, true)|default(0, true) }}</div><div><span class="block text-xs text-slate-500">Normalized peak</span>{{ chunk.score|round(3) if chunk.score is defined and chunk.score is not none else 'N/A' }}</div></div>
                 <div class="mt-3 text-sm"><span class="block text-xs text-slate-500">Coordinates</span>{% if chunk.location %}{{ chunk.location.x|round(2) }}, {{ chunk.location.y|round(2) }} m{% else %}N/A{% endif %}</div>
                 </div>
-            </article>
+            </button>
             {% endif %}
             {% endfor %}
         </div>
@@ -178,9 +183,20 @@
         </div>
 
         <div id="tab-manifest" class="tab-panel hidden pt-5">
-            <pre class="overflow-x-auto whitespace-pre-wrap rounded-2xl bg-slate-950 p-4 text-xs text-emerald-200">{{ manifest_view|default(minute_info, true)|tojson(indent=2) }}</pre>
+            <pre id="capture-manifest" data-url="{{ manifest_url }}" class="max-h-[640px] overflow-auto whitespace-pre-wrap rounded-2xl bg-slate-950 p-4 text-xs text-emerald-200">Open this tab to load the manifest.</pre>
         </div>
     </section>
+</div>
+
+<div id="chunk-dialog" class="chunk-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="chunk-dialog-title">
+  <section class="chunk-window">
+    <header class="chunk-window-head"><div><div class="text-xs uppercase tracking-[0.18em] text-slate-500">10-frame capture window</div><h2 id="chunk-dialog-title">Chunk</h2><div id="chunk-dialog-status" class="mt-1 text-xs text-slate-500">Loading frames…</div></div><button id="chunk-dialog-close" type="button" class="chunk-close" aria-label="Close chunk viewer">×</button></header>
+    <div class="chunk-view-body">
+      <div id="chunk-loading" class="chunk-loading">Loading 10 radar frames…</div>
+      <div id="chunk-frame-host" class="chunk-frame-host hidden"></div>
+      <div id="chunk-frame-controls" class="chunk-frame-controls hidden"><button id="chunk-frame-previous" type="button" aria-label="Previous frame">←</button><input id="chunk-frame-slider" type="range" min="0" max="9" value="0" step="1" aria-label="Chunk frame"><button id="chunk-frame-next" type="button" aria-label="Next frame">→</button><span id="chunk-frame-count" class="chunk-frame-count">Frame 1 / 10</span></div>
+    </div>
+  </section>
 </div>
 {% endblock %}
 
@@ -203,25 +219,33 @@ function drawChunkMaps(progress) {
     const map = chunks.get(Number(canvas.dataset.chunkMap))?.xy_map;
     const rows = Number(map?.rows || 0), columns = Number(map?.columns || 0);
     const values = Array.isArray(map?.values) ? map.values : [];
-    if (!rows || !columns || values.length !== rows * columns) return;
+    const sparse = Array.isArray(map?.values_sparse) ? map.values_sparse : [];
+    if (!rows || !columns || (values.length !== rows * columns && !sparse.length)) return;
     const context = canvas.getContext('2d');
     if (!context) return;
-    const image = context.createImageData(columns, rows);
-    values.forEach((raw, sourceIndex) => {
-      const sourceRow = Math.floor(sourceIndex / columns);
-      const column = sourceIndex % columns;
-      const destinationIndex = ((rows - 1 - sourceRow) * columns + column) * 4;
+    const native = map.native_pipeline === true || sparse.length > 0;
+    const imageWidth = columns, imageHeight = rows;
+    const image = context.createImageData(imageWidth, imageHeight);
+    for (let index = 0; index < image.data.length; index += 4) {
+      image.data[index] = 68; image.data[index + 1] = 1; image.data[index + 2] = 84; image.data[index + 3] = 255;
+    }
+    const paint = (sourceIndex, raw) => {
+      const sourceRow = Math.floor(sourceIndex / columns), column = sourceIndex % columns;
+      const x = native ? columns - 1 - column : column, y = rows - 1 - sourceRow;
+      const destinationIndex = (y * imageWidth + x) * 4;
       const [red, green, blue] = viridis((Number(raw) || 0) / 255);
       image.data[destinationIndex] = red;
       image.data[destinationIndex + 1] = green;
       image.data[destinationIndex + 2] = blue;
       image.data[destinationIndex + 3] = 255;
-    });
+    };
+    if (native) sparse.forEach((cell) => paint(Number(cell[0]), Number(cell[1])));
+    else values.forEach((raw, sourceIndex) => paint(sourceIndex, raw));
     const buffer = document.createElement('canvas');
-    buffer.width = columns;
-    buffer.height = rows;
+    buffer.width = imageWidth;
+    buffer.height = imageHeight;
     buffer.getContext('2d')?.putImageData(image, 0, 0);
-    context.imageSmoothingEnabled = true;
+    context.imageSmoothingEnabled = false;
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.drawImage(buffer, 0, 0, canvas.width, canvas.height);
   });
@@ -233,11 +257,8 @@ function renderChunkStatistics(progress) {
     const ratio = chunk.ratio == null ? (evaluated ? detected / evaluated : 0) : Number(chunk.ratio);
     const location = chunk.location ? `${Number(chunk.location.x).toFixed(2)}, ${Number(chunk.location.y).toFixed(2)} m` : 'N/A';
     const visual = chunk.state === 'occupied' || chunk.classification === 'green' ? 'hsl(145 68% 39%)' : chunk.state === 'empty' || chunk.classification === 'red' ? 'hsl(4 76% 51%)' : 'hsl(217 88% 55%)';
-    const map = chunk.xy_map;
-    const mapHtml = map
-      ? `<div class="border-y border-slate-200 bg-slate-950 p-2"><canvas data-chunk-map="${Number(chunk.index)}" width="512" height="512" class="aspect-square h-auto w-full"></canvas><div class="mt-2 flex items-center gap-2 px-1 text-[10px] font-medium text-slate-300"><span>0</span><span class="h-1.5 flex-1 rounded-full" style="background:linear-gradient(90deg,#440154,#3b528b,#21918c,#5ec962,#fde725)"></span><span>1 normalized intensity</span></div></div>`
-      : '<div class="flex aspect-square items-center justify-center border-y border-slate-200 bg-slate-950 text-xs font-medium text-slate-400">Map loading</div>';
-    return `<article class="overflow-hidden border border-slate-200 bg-slate-50"><div class="flex items-center justify-between gap-3 p-4 pb-3"><strong>Chunk ${Number(chunk.index) + 1}</strong><span class="inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-600"><span class="h-2.5 w-2.5 rounded-full" style="background:${visual}"></span>${String(chunk.prediction || chunk.state || 'loading')}</span></div>${mapHtml}<div class="p-4 pt-3"><div class="grid grid-cols-2 gap-3 text-sm"><div><span class="block text-xs text-slate-500">Detected frames</span>${detected} / ${evaluated}</div><div><span class="block text-xs text-slate-500">Detection ratio</span>${(ratio * 100).toFixed(1)}%</div><div><span class="block text-xs text-slate-500">People</span>${Number(chunk.people_count ?? chunk.target_count ?? 0)}</div><div><span class="block text-xs text-slate-500">Normalized peak</span>${chunk.score == null ? 'N/A' : Number(chunk.score).toFixed(3)}</div><div class="col-span-2"><span class="block text-xs text-slate-500">Coordinates</span>${location}</div></div></div></article>`;
+    const mapHtml = '<div class="flex h-24 items-center justify-center border-y border-slate-200 bg-slate-950 text-xs font-semibold uppercase tracking-[0.16em] text-slate-300">Open 10 frames</div>';
+    return `<button type="button" data-open-chunk="${Number(chunk.index)}" class="chunk-card overflow-hidden border border-slate-200 bg-slate-50" aria-label="Open Chunk ${Number(chunk.index) + 1} frames"><div class="flex items-center justify-between gap-3 p-4 pb-3"><strong>Chunk ${Number(chunk.index) + 1}</strong><span class="inline-flex items-center gap-2 text-xs font-semibold uppercase text-slate-600"><span class="h-2.5 w-2.5 rounded-full" style="background:${visual}"></span>${String(chunk.prediction || chunk.state || 'loading')}</span></div>${mapHtml}<div class="p-4 pt-3"><div class="grid grid-cols-2 gap-3 text-sm"><div><span class="block text-xs text-slate-500">Detected frames</span>${detected} / ${evaluated}</div><div><span class="block text-xs text-slate-500">Detection ratio</span>${(ratio * 100).toFixed(1)}%</div><div><span class="block text-xs text-slate-500">People</span>${Number(chunk.people_count ?? chunk.target_count ?? 0)}</div><div><span class="block text-xs text-slate-500">Normalized peak</span>${chunk.score == null ? 'N/A' : Number(chunk.score).toFixed(3)}</div><div class="col-span-2"><span class="block text-xs text-slate-500">Coordinates</span>${location}</div></div></div></button>`;
   }).join('');
 }
 
@@ -247,6 +268,23 @@ function showTab(name) {
     if (panel) {
         panel.classList.remove('hidden');
     }
+    if (name === 'manifest') loadManifest();
+    if (name === 'localization') renderLocalization();
+}
+
+async function loadManifest() {
+  const host = document.getElementById('capture-manifest');
+  if (!host || host.dataset.loaded === 'true') return;
+  host.textContent = 'Loading manifest…';
+  try {
+    const response = await fetch(host.dataset.url, {cache: 'no-store'});
+    if (!response.ok) throw new Error(`Manifest ${response.status}`);
+    const payload = await response.json();
+    host.textContent = JSON.stringify(payload, null, 2);
+    host.dataset.loaded = 'true';
+  } catch (error) {
+    host.textContent = String(error);
+  }
 }
 
 async function saveMinuteLabels(minute) {
@@ -290,33 +328,28 @@ async function deleteMinute(minute) {
         showAlert(data.message || 'Delete failed', 'error');
         return;
     }
-    window.location.href = '{{ url_for("captures") }}';
+    window.location.href = '{{ url_for("status") }}#captures';
 }
 
 async function fetchJson(url) {
-  const response = await fetch(`${url}?t=${Date.now()}`, {cache: 'no-store'});
+  const separator = url.includes('?') ? '&' : '?';
+  const response = await fetch(`${url}${separator}t=${Date.now()}`, {cache: 'no-store'});
   if (!response.ok) {
     throw new Error(await response.text());
   }
   return response.json();
 }
 
-function initTabs() {
-  showTab('video');
-}
+let localizationRequest = null;
+let localizationLoaded = false;
 
-document.addEventListener('DOMContentLoaded', async () => {
-  initTabs();
-  drawChunkMaps(chunkProgress);
-  if (!window.ThothPlayback) return;
+async function renderLocalization() {
+  if (localizationRequest || !window.ThothPlayback) return localizationRequest;
   const [id, url] = xyTarget;
   const host = document.getElementById(id);
-  if (!host || !url) return;
-  const activeMinute = {{ 'true' if minute == active_minute else 'false' }};
-  let progressTimer = null;
-  let renderTimer = null;
-  const render = async () => {
-    if (host.__thothPlaying) return;
+  if (!host || !url) return null;
+  if (host.__thothPlaying) return null;
+  localizationRequest = (async () => {
     const payload = await fetchJson(url);
     const data = payload?.data || {};
     await ThothPlayback.renderAnimatedHeatmap(host, payload, {
@@ -325,9 +358,119 @@ document.addEventListener('DOMContentLoaded', async () => {
       yLabel: data?.y_label || payload?.y_label || 'Y',
       uirevision: 'capture-xy',
     });
-  };
+    localizationLoaded = true;
+  })();
+  try {
+    await localizationRequest;
+  } catch (error) {
+    host.innerHTML = `<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">${String(error).replace(/[<>&]/g, '')}</div>`;
+  } finally {
+    localizationRequest = null;
+  }
+  return null;
+}
+
+const chunkDialog = document.getElementById('chunk-dialog');
+const chunkHost = document.getElementById('chunk-frame-host');
+const chunkLoading = document.getElementById('chunk-loading');
+const chunkControls = document.getElementById('chunk-frame-controls');
+const chunkSlider = document.getElementById('chunk-frame-slider');
+const chunkFrameCount = document.getElementById('chunk-frame-count');
+let chunkRequestToken = 0;
+let chunkRetryTimer = null;
+
+function setChunkFrame(index) {
+  const maximum = Number(chunkSlider.max) || 0;
+  const frame = Math.max(0, Math.min(maximum, Number(index) || 0));
+  chunkSlider.value = String(frame);
+  chunkFrameCount.textContent = `Frame ${frame + 1} / ${maximum + 1}`;
+  if (chunkHost?.data && window.Plotly) {
+    Plotly.animate(chunkHost, [String(frame)], {
+      mode: 'immediate',
+      frame: {duration: 0, redraw: true},
+      transition: {duration: 0},
+    });
+  }
+}
+
+function closeChunkViewer() {
+  chunkRequestToken += 1;
+  if (chunkRetryTimer) window.clearTimeout(chunkRetryTimer);
+  chunkRetryTimer = null;
+  chunkDialog.classList.add('hidden');
+  document.body.classList.remove('chunk-dialog-open');
+}
+
+async function openChunkViewer(chunkIndex, attempt = 0) {
+  if (!window.ThothPlayback || !xyTarget[1]) return;
+  if (attempt === 0) {
+    chunkDialog.classList.remove('hidden');
+    document.body.classList.add('chunk-dialog-open');
+    chunkHost.classList.add('hidden');
+    chunkControls.classList.add('hidden');
+    chunkLoading.classList.remove('hidden');
+    chunkLoading.textContent = 'Loading 10 radar frames…';
+  }
+  const token = attempt === 0 ? ++chunkRequestToken : chunkRequestToken;
+  document.getElementById('chunk-dialog-title').textContent = `Chunk ${Number(chunkIndex) + 1}`;
+  document.getElementById('chunk-dialog-status').textContent = 'Loading frames…';
+  try {
+    const separator = xyTarget[1].includes('?') ? '&' : '?';
+    const payload = await fetchJson(`${xyTarget[1]}${separator}chunk=${Number(chunkIndex)}`);
+    if (token !== chunkRequestToken || chunkDialog.classList.contains('hidden')) return;
+    const data = payload?.data || {}, frames = Array.isArray(data.frames) ? data.frames.slice(0, 10) : [];
+    document.getElementById('chunk-dialog-status').textContent = `${frames.length} of 10 frames ready${frames.length < 10 ? ' · loading' : ''}`;
+    if (frames.length) {
+      const exactPayload = {...payload, data: {...data, frames}};
+      chunkLoading.classList.add('hidden');
+      chunkHost.classList.remove('hidden');
+      chunkControls.classList.remove('hidden');
+      await ThothPlayback.renderAnimatedHeatmap(chunkHost, exactPayload, {
+        title: `Chunk ${Number(chunkIndex) + 1} · 10-frame radar window`,
+        xLabel: data.x_label || 'Y / lateral (m)',
+        yLabel: data.y_label || 'X / forward (m)',
+        intervalMs: data.frame_interval_ms || 100,
+        uirevision: `capture-chunk-${chunkIndex}`,
+      });
+      chunkSlider.max = String(Math.max(0, frames.length - 1));
+      setChunkFrame(0);
+    }
+    if (frames.length < 10 && attempt < 20) {
+      chunkRetryTimer = window.setTimeout(() => openChunkViewer(chunkIndex, attempt + 1), 500);
+    } else if (!frames.length) {
+      chunkLoading.textContent = 'This chunk has no playable radar frames.';
+    }
+  } catch (error) {
+    if (token !== chunkRequestToken) return;
+    document.getElementById('chunk-dialog-status').textContent = 'Unable to load chunk';
+    chunkLoading.classList.remove('hidden');
+    chunkLoading.textContent = String(error).replace(/[<>&]/g, '');
+  }
+}
+
+document.addEventListener('click', (event) => {
+  const opener = event.target.closest('[data-open-chunk]');
+  if (opener) openChunkViewer(Number(opener.dataset.openChunk));
+});
+document.getElementById('chunk-dialog-close').addEventListener('click', closeChunkViewer);
+chunkDialog.addEventListener('click', (event) => { if (event.target === chunkDialog) closeChunkViewer(); });
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !chunkDialog.classList.contains('hidden')) closeChunkViewer(); });
+chunkSlider.addEventListener('input', () => setChunkFrame(chunkSlider.value));
+document.getElementById('chunk-frame-previous').addEventListener('click', () => setChunkFrame(Number(chunkSlider.value) - 1));
+document.getElementById('chunk-frame-next').addEventListener('click', () => setChunkFrame(Number(chunkSlider.value) + 1));
+
+function initTabs() {
+  showTab('video');
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+  initTabs();
+  drawChunkMaps(chunkProgress);
+  const activeMinute = {{ 'true' if minute == active_minute else 'false' }};
+  let progressTimer = null;
+  let renderTimer = null;
   const refreshProgress = async () => {
-    const response = await fetchJson(`/api/captures/${encodeURIComponent({{ minute|tojson }})}`);
+    const response = await fetchJson(`/api/captures/${encodeURIComponent({{ minute|tojson }})}?compact=1`);
     const progress = response?.capture?.progress;
     const timeline = document.getElementById('chunk-timeline');
     if (!progress || !timeline) return;
@@ -342,7 +485,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const labels = Array.isArray(chunk.labels) && chunk.labels.length ? `; labels ${chunk.labels.join(', ')}` : '';
       const activity = Array.isArray(chunk.activity_labels) && chunk.activity_labels.length ? `; activity ${chunk.activity_labels.join(', ')}` : '';
       const detail = `Chunk ${chunk.index + 1}; ${chunk.prediction || chunk.state || 'waiting'}${people}${labels}${activity}${frames}${chunk.ratio == null ? '' : `; ratio ${(Number(chunk.ratio) * 100).toFixed(1)}%`}${location}${chunk.error ? `; ${chunk.error}` : ''}`;
-      return `<div class="min-w-0 flex-1 text-center" title="${detail}"><div role="img" tabindex="0" title="${detail}" aria-label="${detail}" class="mx-auto h-3 w-3 rounded-full ring-2 ring-white" style="background:${visual};transition:background-color .45s ease,box-shadow .45s ease;box-shadow:0 0 0 1px color-mix(in srgb, ${visual} 55%, transparent)"></div></div>`;
+      return `<div class="min-w-0 flex-1 text-center" title="${detail}"><button type="button" data-open-chunk="${Number(chunk.index)}" title="Open ${detail}" aria-label="Open ${detail}" class="mx-auto block h-3 w-3 rounded-full ring-2 ring-white" style="background:${visual};transition:background-color .45s ease,box-shadow .45s ease;box-shadow:0 0 0 1px color-mix(in srgb, ${visual} 55%, transparent)"></button></div>`;
     }).join('');
     const statistics = document.getElementById('chunk-statistics');
     if (statistics) {
@@ -351,13 +494,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   };
   try {
-    await Promise.allSettled([render(), refreshProgress()]);
+    await refreshProgress();
     if (activeMinute) {
       progressTimer = window.setInterval(refreshProgress, 500);
-      renderTimer = window.setInterval(render, 1500);
+      renderTimer = window.setInterval(() => {
+        const localizationPanel = document.getElementById('tab-localization');
+        if (localizationLoaded && localizationPanel && !localizationPanel.classList.contains('hidden')) renderLocalization();
+      }, 1500);
     }
   } catch (error) {
-    host.innerHTML = `<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">${String(error).replace(/[<>&]/g, '')}</div>`;
+    console.warn('Capture progress refresh failed', error);
   }
   window.addEventListener('beforeunload', () => {
     if (progressTimer) window.clearInterval(progressTimer);

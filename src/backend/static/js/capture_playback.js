@@ -101,6 +101,13 @@
     layout.shapes = shapes;
   }
 
+  function applyExample2Layout(layout, data) {
+    if (data?.coordinate_space !== 'example2_sensor_local') return;
+    const x = Array.isArray(data.x) ? data.x : [], y = Array.isArray(data.y) ? data.y : [];
+    layout.xaxis = { ...layout.xaxis, range: x.length ? [x[0], x[x.length - 1]] : undefined, constrain: 'domain' };
+    layout.yaxis = { ...layout.yaxis, range: y.length ? [y[0], y[y.length - 1]] : undefined, scaleanchor: 'x', scaleratio: 1 };
+  }
+
   async function renderAnimatedLine(host, payload, options = {}) {
     if (!host) return;
     const data = payload?.data || {};
@@ -177,7 +184,7 @@
       const detected = Number(data.occupancy.detected_frames) || 0;
       const total = Number(data.occupancy.evaluated_frames) || 0;
       const percent = total ? Math.round(detected * 1000 / total) / 10 : 0;
-      const threshold = Number(data.occupancy.threshold_percent ?? 50);
+      const thresholdDb = Number(data.occupancy.threshold_db ?? 8);
       let summary = host.parentElement?.querySelector('[data-radar-occupancy]');
       if (!summary && host.parentElement) {
         summary = document.createElement('div');
@@ -185,7 +192,7 @@
         summary.className = 'mt-2 text-xs font-semibold text-slate-600';
         host.parentElement.appendChild(summary);
       }
-      if (summary) summary.textContent = `${data.occupancy.label}: ${detected} / ${total} frames detected (${percent}%); occupied at ≥ ${threshold}%`;
+      if (summary) summary.textContent = `${data.occupancy.label}: ${detected} / ${total} native frames detected (${percent}%); Example 2 gate ${thresholdDb.toFixed(1)} dB above noise`;
     }
 
     function frameImage(frame) {
@@ -200,7 +207,7 @@
       return image;
     }
 
-    function trackingMarker(targets, location, score, detected, snrDb, thresholdNormalized) {
+    function trackingMarker(targets, location, score, detected, snrDb, thresholdDb) {
       const validTargets = Array.isArray(targets) ? targets.filter((target) => Array.isArray(target?.position) && Number.isFinite(Number(target.position[0])) && Number.isFinite(Number(target.position[1]))) : [];
       const fallback = detected === true && Array.isArray(location) && Number.isFinite(location[0]) && Number.isFinite(location[1]) ? [{ id: '?', position: location, confidence: score, snr_db: snrDb, position_error_m: 0 }] : [];
       const plotted = validTargets.length ? validTargets : fallback;
@@ -214,9 +221,9 @@
         marker: { color: '#ef4444', size: 13, line: { color: '#ffffff', width: 2 } },
         error_x: { type: 'data', array: plotted.map((target) => Number(target.position_error_m || 0)), visible: true, color: '#ef4444' },
         error_y: { type: 'data', array: plotted.map((target) => Number(target.position_error_m || 0)), visible: true, color: '#ef4444' },
-        customdata: plotted.map((target) => [target.id, Number(target.position_error_m || 0), Number(target.confidence ?? score ?? 0), Number(target.snr_db ?? snrDb ?? 0), thresholdNormalized]),
+        customdata: plotted.map((target) => [target.id, Number(target.position_error_m || 0), Number(target.confidence ?? score ?? 0), Number(target.snr_db ?? snrDb ?? 0), thresholdDb]),
         name: 'Tracked targets',
-        hovertemplate: 'Target %{customdata[0]}<br>X: %{x:.2f} ± %{customdata[1]:.2f} m<br>Y: %{y:.2f} ± %{customdata[1]:.2f} m<br>Normalized peak: %{customdata[2]:.2f}<br>SNR: %{customdata[3]:.1f} dB<br>Gate: %{customdata[4]:.2f}<extra></extra>',
+        hovertemplate: 'Target %{customdata[0]}<br>X: %{x:.2f} ± %{customdata[1]:.2f} m<br>Y: %{y:.2f} ± %{customdata[1]:.2f} m<br>Score: %{customdata[2]:.2f}<br>SNR: %{customdata[3]:.1f} dB<br>Gate: %{customdata[4]:.1f} dB<extra></extra>',
         showlegend: isTracking,
       };
     }
@@ -237,13 +244,14 @@
         colorscale: 'Viridis',
         zmin: isTracking ? 0 : undefined,
         zmax: isTracking ? 1 : undefined,
-        zsmooth: isTracking ? 'best' : false,
+        zsmooth: false,
         hoverongaps: false,
         hovertemplate: `${yLabel}: %{y}<br>${xLabel}: %{x}<br>${valueLabel} %{z:.2f}<extra></extra>`,
         colorbar: { title: colorbarTitle },
       }];
-      if (isTracking) staticTraces.push(trackingMarker(data.targets, data.location, data.score, data.detected, data.snr_db, data.threshold_normalized));
-      if (isTracking) applyRoomLayout(staticLayout, data.room);
+      if (isTracking && data.coordinate_space !== 'example2_sensor_local') staticTraces.push(trackingMarker(data.targets, data.location, data.score, data.detected, data.snr_db, data.threshold_db ?? data.occupancy?.threshold_db));
+      if (isTracking && data.coordinate_space !== 'example2_sensor_local') applyRoomLayout(staticLayout, data.room);
+      if (isTracking) applyExample2Layout(staticLayout, data);
       await Plotly.newPlot(host, staticTraces, staticLayout, plotConfig());
       renderOccupancySummary();
       return;
@@ -258,18 +266,19 @@
         colorscale: 'Viridis',
         zmin: isTracking ? 0 : undefined,
         zmax: isTracking ? 1 : undefined,
-        zsmooth: isTracking ? 'best' : false,
+        zsmooth: false,
         hoverongaps: false,
         hovertemplate: `${yLabel}: %{y}<br>${xLabel}: %{x}<br>${valueLabel} %{z:.2f}<extra></extra>`,
         colorbar: { title: colorbarTitle },
       }];
-      if (isTracking) frameTraces.push(trackingMarker(frame.targets, frame.location, frame.score, frame.detected, frame.snr_db, frame.threshold_normalized));
+      if (isTracking && data.coordinate_space !== 'example2_sensor_local') frameTraces.push(trackingMarker(frame.targets, frame.location, frame.score, frame.detected, frame.snr_db, frame.threshold_db ?? data.occupancy?.threshold_db));
       return { name: String(index), data: frameTraces };
     });
 
     const staticLayout = buildPlaybackLayout(title, xLabel, yLabel, intervalMs);
     staticLayout.uirevision = options.uirevision || 'capture-heatmap';
-    if (isTracking) applyRoomLayout(staticLayout, data.room);
+    if (isTracking && data.coordinate_space !== 'example2_sensor_local') applyRoomLayout(staticLayout, data.room);
+    if (isTracking) applyExample2Layout(staticLayout, data);
     staticLayout.sliders = buildSliderFrames(frames, (frame, index) => String(index + 1), intervalMs);
     if (host.data) {
       await Plotly.react(host, frames[0].data, staticLayout, plotConfig());

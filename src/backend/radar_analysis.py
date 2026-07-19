@@ -29,6 +29,7 @@ EXAMPLE2_SIGNAL_PROC = MMW_RELEASE / "example_2_track" / "signal_proc.py"
 RADAR_CONFIG_DIR = MMW_RELEASE / "radar_config" / "config_3rx_3m"
 TARGET_IDENTITY_PATH = THOTH_ROOT / "config" / "radar_target_identity.json"
 LIVE_OCCUPANCY_PATH = THOTH_ROOT / "config" / "radar_occupancy.json"
+_EXAMPLE2_MODULE: Any = None
 
 for path in (MMW_RELEASE, TRACK_EXAMPLE_DIR):
     if str(path) not in sys.path:
@@ -176,6 +177,15 @@ def create_signal_processor() -> Any:
     return SigProc(str(PROCESSING_CONFIG), radar_config)
 
 
+def create_example2_processor(radar_config: Optional[Dict[str, Any]] = None) -> Any:
+    """Construct the exact processor shipped in MMW-HAT Example 2 Track."""
+    module = _load_example2_module()
+    config = radar_config or load_radar_config()
+    if module is None or not config:
+        raise RuntimeError("MMW-HAT Example 2 tracking dependencies are unavailable.")
+    return module.SigProc(str(EXAMPLE2_PROCESSING_CONFIG), config)
+
+
 def validate_region_thresholds(yellow_threshold_percent: float, green_threshold_percent: float) -> tuple[float, float]:
     """Return validated red/yellow/green boundaries as percentages."""
     yellow = float(yellow_threshold_percent)
@@ -205,12 +215,11 @@ def _spread_intensity(grid: np.ndarray, radius: int = 1) -> np.ndarray:
     return spread
 
 
-def _example2_processor(processor: Any) -> Any:
-    cached = getattr(processor, "_thoth_example2_processor", None)
-    if cached is not None:
-        return cached
-    radar_config = getattr(processor, "radar_config", None)
-    if not isinstance(radar_config, dict) or not EXAMPLE2_SIGNAL_PROC.exists():
+def _load_example2_module() -> Any:
+    global _EXAMPLE2_MODULE
+    if _EXAMPLE2_MODULE is not None:
+        return _EXAMPLE2_MODULE
+    if not EXAMPLE2_SIGNAL_PROC.exists():
         return None
     try:
         spec = importlib.util.spec_from_file_location(
@@ -220,44 +229,87 @@ def _example2_processor(processor: Any) -> Any:
             return None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        _EXAMPLE2_MODULE = module
+        return module
+    except Exception:
+        return None
+
+
+def _example2_processor(processor: Any) -> Any:
+    cached = getattr(processor, "_thoth_example2_processor", None)
+    if cached is not None:
+        return cached
+    radar_config = getattr(processor, "radar_config", None)
+    if not isinstance(radar_config, dict):
+        return None
+    try:
+        module = _load_example2_module()
+        if module is None:
+            return None
         cached = module.SigProc(str(EXAMPLE2_PROCESSING_CONFIG), radar_config)
     except Exception:
         return None
     setattr(processor, "_thoth_example2_processor", cached)
+    setattr(processor, "_thoth_example2_module", module)
     return cached
 
 
-def _update_example2_xy_plot(processor: Any) -> Dict[str, Any]:
-    """Run example_2_track's native DBF, detection, buffering, and XY map."""
-    exact = _example2_processor(processor)
-    rd_spectrum = getattr(processor, "_rd_spectrum", None)
-    if exact is None or not isinstance(rd_spectrum, np.ndarray) or rd_spectrum.ndim != 3:
+def serialize_example2_plot(
+    processor: Any,
+    gui_plot: Dict[str, Any],
+    location: Any,
+    score: Any,
+    detection: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Call the serializer owned by the exact MMW-HAT Example 2 module."""
+    module = getattr(processor, "_thoth_example2_module", None) or _load_example2_module()
+    serializer = getattr(module, "serialize_xy_plot", None)
+    if not callable(serializer):
         return {}
+    return serializer(gui_plot, location, score, detection or {})
+
+
+def _update_example2_xy_plot(
+    processor: Any,
+    frame: Optional[np.ndarray] = None,
+    detection_threshold_db: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Run the unmodified Example 2 processing path and serialize its XY map.
+
+    Passing the ADC frame is important: it lets Example 2 use its own Doppler
+    state, DBF instance, noise gate, and ten-frame decay buffer.  Reusing the
+    advanced processor's intermediate cube looks similar but is not the same
+    signal pipeline and runs at a less predictable cadence.
+    """
+    exact = _example2_processor(processor)
+    if exact is None:
+        return {}
+    if detection_threshold_db is not None:
+        exact.detection_threshold_db = min(30.0, max(0.0, float(detection_threshold_db)))
     try:
-        beam_formed = exact.dbf.run(rd_spectrum)
-        beam_range_energy = np.linalg.norm(beam_formed, axis=1) / np.sqrt(exact.num_beams)
-        final_map, _location, _score = exact.target_detection(beam_range_energy)
+        if frame is not None:
+            location, score, gui_plot = exact.update(frame)
+            final_map = gui_plot["map"]
+        else:
+            rd_spectrum = getattr(processor, "_rd_spectrum", None)
+            if not isinstance(rd_spectrum, np.ndarray) or rd_spectrum.ndim != 3:
+                return {}
+            beam_formed = exact.dbf.run(rd_spectrum)
+            beam_range_energy = np.linalg.norm(beam_formed, axis=1) / np.sqrt(exact.num_beams)
+            final_map, location, score = exact.target_detection(beam_range_energy)
     except Exception:
         return {}
 
-    x_axis = np.asarray(exact.x_bin, dtype=float)
-    y_axis = np.asarray(exact.y_bin, dtype=float)
-    final_map = np.asarray(final_map, dtype=float)
-    encoded = np.rint(np.clip(final_map, 0.0, 1.0) * 255.0).astype(np.uint8).ravel()
-    active = np.flatnonzero(encoded)
-    payload = {
-        "rows": int(final_map.shape[0]),
-        "columns": int(final_map.shape[1]),
-        "values_sparse": [
-            [int(index), int(encoded[index])]
-            for index in active
-        ],
-        "x_axis": x_axis.round(4).tolist(),
-        "y_axis": y_axis.round(4).tolist(),
-        "levels": [0.0, 1.0],
-        "transpose": True,
-        "mirror_x": True,
-        "mirror_y": True,
+    payload = serialize_example2_plot(
+        processor,
+        {"map": final_map, "x_axis": exact.x_bin, "y_axis": exact.y_bin},
+        location,
+        score,
+        dict(getattr(exact, "last_detection", {}) or {}),
+    )
+    if not payload:
+        return {}
+    payload.update({
         "buffer_len": int(exact.xy_map_buffer.maxlen or 0),
         "buffer_decay": float(exact.buffer_decay),
         "marker_half_width_m": float(
@@ -267,10 +319,16 @@ def _update_example2_xy_plot(processor: Any) -> Dict[str, Any]:
         "source": "example_2_track/location_gui.py",
         "native_pipeline": True,
         "processing_source": "example_2_track/signal_proc.py::SigProc.target_detection",
-        "display_source": "example_2_track/location_gui.py::update_gui",
-    }
+        "display_source": "example_2_track/signal_proc.py::serialize_xy_plot",
+    })
     setattr(processor, "_thoth_example2_xy_payload", payload)
     return payload
+
+
+def _example2_playback_frame(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the playback frame produced by MMW-HAT itself."""
+    playback = payload.get("playback")
+    return dict(playback) if isinstance(playback, dict) else {}
 
 
 def _live_intensity_payload(processor: Any, room: Dict[str, Any]) -> Dict[str, Any]:
@@ -497,10 +555,15 @@ class StreamingChunkAnalyzer:
         green_threshold_percent: float = 60.0,
         identity: Optional[PersistentTargetIdentity] = None,
         live_state_path: Optional[Path] = LIVE_OCCUPANCY_PATH,
+        radar_detection_threshold_db: float = 8.0,
+        live_example2_only: bool = False,
     ):
         self.processor = processor
         self.processor.normalized_threshold = min(
             0.95, max(0.05, float(radar_detection_threshold_normalized))
+        )
+        self.radar_detection_threshold_db = min(
+            30.0, max(0.0, float(radar_detection_threshold_db))
         )
         self.radar_config = getattr(processor, "radar_config", None) or load_radar_config()
         self.csv_path = csv_path
@@ -527,9 +590,18 @@ class StreamingChunkAnalyzer:
         self.playback_frames: List[Dict[str, Any]] = []
         self.invalid_frames = 0
         self.live_state_path = live_state_path
+        self.live_example2_only = bool(live_example2_only)
         self.last_live_publish = 0.0
         self.frame_times: deque[float] = deque(maxlen=60)
         self.configured_frame_rate_hz = float(self.radar_config.get("frame_rate") or 0.0)
+        self.native_processor_available = _example2_processor(processor) is not None
+        # The native Example 2 pipeline supplies the live XY map and presence
+        # decision for every frame.  Run the heavier room/target tracker only
+        # once per 10-frame chunk; running it several times per chunk made the
+        # collector fall behind the 10 Hz sensor and spawned overlapping minute
+        # workers.  Non-native processors still use the advanced path on every
+        # frame.
+        self.advanced_tracking_stride = 10
         self.max_visualization_frames = 48
         self.max_point_frames = 32
         if csv_path and self.csv_temporary:
@@ -547,21 +619,40 @@ class StreamingChunkAnalyzer:
             self.invalid_frames += 1
             return False
         seq, frame = decoded
-        try:
-            targets = self.processor.update(frame)
-        except Exception:
-            self.invalid_frames += 1
-            return False
-        _update_example2_xy_plot(self.processor)
-        detection = dict(self.processor.last_detection or {})
-        shadow = dict(self.processor.last_motion_shadow or {})
+        native_plot = _update_example2_xy_plot(
+            self.processor,
+            frame,
+            self.radar_detection_threshold_db,
+        )
+        update_advanced = (
+            not self.native_processor_available
+            or not native_plot
+            or (
+                not self.live_example2_only
+                and self.evaluated_frames % self.advanced_tracking_stride == 0
+            )
+        )
+        if update_advanced:
+            try:
+                targets = self.processor.update(frame)
+            except Exception:
+                self.invalid_frames += 1
+                return False
+            advanced_detection = dict(self.processor.last_detection or {})
+        else:
+            targets = []
+            advanced_detection = {}
+        native_detection = native_plot.get("detection") if isinstance(native_plot.get("detection"), dict) else {}
+        detection = dict(native_detection or advanced_detection)
+        shadow = dict(self.processor.last_motion_shadow or {}) if update_advanced else {}
         shadow_points = np.asarray(shadow.get("points") if shadow.get("points") is not None else np.empty((0, 3)), dtype=float)
         shadow_intensity = np.asarray(shadow.get("intensity") if shadow.get("intensity") is not None else np.empty(0), dtype=float)
         frame_index = self.evaluated_frames
         self.evaluated_frames += 1
         self.frame_times.append(time.monotonic())
-        serialized_targets = [_serialize_target(target, self.room) for target in targets]
-        self.last_targets = self.identity.assign(serialized_targets) if self.identity else serialized_targets
+        if update_advanced:
+            serialized_targets = [_serialize_target(target, self.room) for target in targets]
+            self.last_targets = self.identity.assign(serialized_targets) if self.identity else serialized_targets
         # Occupancy follows current normalized-map candidates, not tracks that
         # persist briefly to smooth coordinates after a missed signal frame.
         if "candidate_count" in detection:
@@ -595,21 +686,23 @@ class StreamingChunkAnalyzer:
                 self.last_score = float(np.max(weights) if weights.size else 0.0)
 
         primary = self.last_targets[0] if self.last_targets else None
+        native_location = native_plot.get("location") if isinstance(native_plot.get("location"), list) else None
+        native_score = native_plot.get("score")
+        playback_location = native_location if native_location and all(value is not None for value in native_location) else list(self.last_position)
+        playback_score = float(native_score) if native_score is not None else self.last_score
         self.playback_frames.append({
-            **_xy_intensity_frame(self.processor, self.room),
+            **(_example2_playback_frame(native_plot) or _xy_intensity_frame(self.processor, self.room)),
             "name": f"chunk-{self.chunk_index:02d}-frame-{frame_index:04d}",
             "index": frame_index,
             "chunk_index": self.chunk_index,
             "seq": seq,
-            "location": list(self.last_position),
-            "score": self.last_score,
+            "location": playback_location,
+            "score": playback_score,
             "detected": bool(detection.get("detected")),
-            "snr_db": float(primary.get("snr_db")) if primary else float(detection.get("cfar_peak_db") or 0.0),
-            "threshold_normalized": float(
-                detection.get("threshold_normalized")
-                or self.processor.normalized_threshold
-            ),
-            "targets": self.last_targets,
+            "snr_db": float(detection.get("snr_db") or (primary.get("snr_db") if primary else 0.0)),
+            "threshold_db": float(detection.get("threshold_db") or self.radar_detection_threshold_db),
+            "threshold_normalized": float(getattr(self.processor, "normalized_threshold", 0.45)),
+            "targets": [],
         })
         if len(self.playback_frames) > self.max_visualization_frames:
             del self.playback_frames[0]
@@ -619,8 +712,8 @@ class StreamingChunkAnalyzer:
             "frame_index": frame_index,
             "seq": seq,
             "detected": bool(detection.get("detected")),
-            "target_count": len(targets),
-            "occupied": bool(targets),
+            "target_count": len(self.last_targets),
+            "occupied": person_detected,
             "primary_target_id": primary["id"] if primary else "",
             "x_m": primary["position"][0] if primary else "",
             "y_m": primary["position"][1] if primary else "",
@@ -635,7 +728,7 @@ class StreamingChunkAnalyzer:
             "threshold_normalized": detection.get(
                 "threshold_normalized", self.processor.normalized_threshold
             ),
-            "peak_power_db": detection.get("cfar_peak_db", ""),
+            "peak_power_db": detection.get("peak_power_db", detection.get("cfar_peak_db", "")),
             "motion_points": int(detection.get("motion_points") or 0),
             "targets_json": json.dumps(self.last_targets, separators=(",", ":")),
             "shadow_points_json": json.dumps(shadow_points.round(4).tolist(), separators=(",", ":")),
@@ -667,19 +760,30 @@ class StreamingChunkAnalyzer:
         ), {})
         try:
             self.live_state_path.parent.mkdir(parents=True, exist_ok=True)
+            if self.live_example2_only:
+                live_intensity = {
+                    "scale": {"minimum": 0.0, "maximum": 1.0, "label": "Normalized intensity"},
+                    "example2_xy": getattr(self.processor, "_thoth_example2_xy_payload", {}),
+                }
+                live_target_count = int(self.last_detection.get("candidate_count") or 0)
+                live_targets: list[Dict[str, Any]] = []
+                live_person_detected = bool(self.last_detection.get("signal_detected"))
+            else:
+                live_intensity = _live_intensity_payload(self.processor, self.room)
+                live_target_count = len(self.last_targets)
+                live_targets = self.last_targets
+                live_person_detected = bool(self.last_targets)
             temporary.write_text(json.dumps({
                 "updated_at": time.time(),
-                "occupied": occupancy_region(self.detected_frames, self.evaluated_frames, self.yellow_threshold_percent, self.green_threshold_percent) == "green",
-                "classification": occupancy_region(self.detected_frames, self.evaluated_frames, self.yellow_threshold_percent, self.green_threshold_percent),
-                "person_detected": bool(self.last_targets),
+                "occupied": self.detected_frames > 0,
+                "classification": "green" if self.detected_frames > 0 else "red",
+                "person_detected": live_person_detected,
                 "detected_frames": self.detected_frames,
                 "evaluated_frames": self.evaluated_frames,
                 "ratio": self.detected_frames / self.evaluated_frames if self.evaluated_frames else 0.0,
-                "threshold_percent": self.occupancy_threshold_percent,
-                "yellow_threshold_percent": self.yellow_threshold_percent,
-                "green_threshold_percent": self.green_threshold_percent,
-                "target_count": len(self.last_targets),
-                "targets": self.last_targets,
+                "threshold_db": self.radar_detection_threshold_db,
+                "target_count": live_target_count,
+                "targets": live_targets,
                 "shadow": np.asarray(world_points, dtype=float).round(3).tolist(),
                 "room": self.room,
                 "fov": {
@@ -691,7 +795,7 @@ class StreamingChunkAnalyzer:
                 "frame_index": self.evaluated_frames - 1,
                 "sensor_hz": round(measured_hz, 2),
                 "configured_hz": self.configured_frame_rate_hz,
-                "intensity": _live_intensity_payload(self.processor, self.room),
+                "intensity": live_intensity,
             }, separators=(",", ":")), encoding="utf-8")
             os.replace(temporary, self.live_state_path)
         except OSError:
@@ -710,7 +814,9 @@ class StreamingChunkAnalyzer:
         points = np.vstack(self.chunk_points) if self.chunk_points else np.empty((0, 3), dtype=float)
         weights = np.concatenate(self.chunk_weights) if self.chunk_weights else np.empty(0, dtype=float)
         x_axis, y_axis, z = _bin_points(points, self.room, weights=weights, resolution=72)
-        latest_intensity = _xy_intensity_frame(self.processor, self.room)
+        latest_intensity = _example2_playback_frame(
+            getattr(self.processor, "_thoth_example2_xy_payload", {})
+        ) or _xy_intensity_frame(self.processor, self.room)
         if latest_intensity:
             x_axis = latest_intensity["x"]
             y_axis = latest_intensity["y"]
@@ -719,41 +825,42 @@ class StreamingChunkAnalyzer:
             for row, column, value in latest_intensity["z_sparse"]:
                 z[row][column] = value
         ratio = self.detected_frames / self.evaluated_frames if self.evaluated_frames else 0.0
-        label = occupancy_label(
-            self.detected_frames,
-            self.evaluated_frames,
-            self.occupancy_threshold_percent,
-        )
+        # Example 2 already rejects noise and requires consecutive coherent
+        # detections.  A second user threshold here created an unnecessary
+        # ambiguous band, so chunks are always binary after that one gate.
+        label = "occupied" if self.detected_frames > 0 else "empty"
         classification = "green" if label == "occupied" else "red"
         primary = self.last_targets[0] if self.last_targets else None
         frame = {
             "name": f"chunk-{self.chunk_index:02d}", "index": self.chunk_index,
             "x": x_axis, "y": y_axis, "z": z, "location": self.last_position,
             "score": self.last_score, "detected": label == "occupied",
-            "snr_db": float(primary.get("snr_db")) if primary else float(self.last_detection.get("cfar_peak_db") or 0.0),
+            "snr_db": float(self.last_detection.get("snr_db") or (primary.get("snr_db") if primary else 0.0)),
             "threshold_normalized": float(
                 self.last_detection.get("threshold_normalized")
                 or self.processor.normalized_threshold
             ),
-            "peak_power_db": self.last_detection.get("cfar_peak_db"),
+            "peak_power_db": self.last_detection.get("peak_power_db", self.last_detection.get("cfar_peak_db")),
             "noise_floor_db": self.last_detection.get("noise_floor_db"),
             "targets": self.last_targets, "motion_points": int(self.last_detection.get("motion_points") or 0),
         }
         payload = {
-            "plot": "xy-tracking", "title": "Normalized X-Y presence", "x_label": "X (m)", "y_label": "Y (m)",
+            "plot": "xy-tracking", "title": "Example 2 X-Y presence", "x_label": "Y / lateral (m)", "y_label": "X / forward (m)",
             "intensity_scale": {"minimum": 0.0, "maximum": 1.0, "label": "Normalized intensity"},
             "x": x_axis, "y": y_axis, "z": z, "frames": self.playback_frames or [frame], "frame_count": self.evaluated_frames,
             "sample_count": self.evaluated_frames, "frame_interval_ms": max(50, int(round(self.chunk_seconds * 1000 / max(1, self.evaluated_frames)))),
             "updated": datetime.now(timezone.utc).isoformat(),
             "occupancy": {"label": label, "classification": classification, "detected_frames": self.detected_frames, "evaluated_frames": self.evaluated_frames,
-                          "ratio": ratio, "threshold_percent": self.occupancy_threshold_percent,
+                          "ratio": ratio, "threshold_db": self.radar_detection_threshold_db,
                           "chunk_seconds": self.chunk_seconds},
             "location": self.last_position, "score": self.last_score, "detected": label == "occupied",
             "snr_db": frame["snr_db"], "threshold_normalized": frame["threshold_normalized"], "peak_power_db": frame["peak_power_db"],
             "noise_floor_db": frame["noise_floor_db"], "targets": self.last_targets,
             "motion_points": frame["motion_points"], "chunk_index": self.chunk_index,
             "chunk_seconds": self.chunk_seconds, "room": self.room,
-            "xy_map": (_live_intensity_payload(self.processor, self.room).get("xy") or {}),
+            "xy_map": getattr(self.processor, "_thoth_example2_xy_payload", {}) or {},
+            "coordinate_space": "example2_sensor_local",
+            "native_pipeline": True,
             "invalid_frames": self.invalid_frames,
         }
         payload["performance"] = {
@@ -1186,19 +1293,17 @@ def compile_minute_xy_payload(chunk_payloads: List[Dict[str, Any]]) -> Dict[str,
         }
 
     occupancy_ratio = total_detected / total_evaluated if total_evaluated else 0.0
-    threshold_percent = float((latest.get("occupancy") or {}).get("threshold_percent", 50.0))
-    yellow_threshold = float((latest.get("occupancy") or {}).get("yellow_threshold_percent", 20.0))
-    green_threshold = float((latest.get("occupancy") or {}).get("green_threshold_percent", 60.0))
-    classification = occupancy_region(total_detected, total_evaluated, yellow_threshold, green_threshold)
+    threshold_db = float((latest.get("occupancy") or {}).get("threshold_db", 8.0))
+    classification = "green" if total_detected > 0 else "red"
     x_axis = latest.get("x") or []
     y_axis = latest.get("y") or []
     z = latest.get("z") or []
 
     return {
         "plot": "xy-tracking",
-        "title": "X-Y localization",
-        "x_label": "X (m)",
-        "y_label": "Y (m)",
+        "title": "Example 2 X-Y presence",
+        "x_label": "Y / lateral (m)",
+        "y_label": "X / forward (m)",
         "x": x_axis,
         "y": y_axis,
         "z": z,
@@ -1219,7 +1324,7 @@ def compile_minute_xy_payload(chunk_payloads: List[Dict[str, Any]]) -> Dict[str,
             "motion_points": int(latest.get("motion_points") or 0),
         }],
         "frame_count": len(frames) if frames else 1,
-        "sample_count": len(chunk_payloads),
+        "sample_count": len(frames),
         "frame_interval_ms": max(50, int(round(sum(float(chunk.get("chunk_seconds") or 10.0) for chunk in chunk_payloads) * 1000 / max(1, len(frames) or len(chunk_payloads) or 1)))),
         "updated": datetime.now(timezone.utc).isoformat(),
         "occupancy": {
@@ -1228,9 +1333,7 @@ def compile_minute_xy_payload(chunk_payloads: List[Dict[str, Any]]) -> Dict[str,
             "detected_frames": total_detected,
             "evaluated_frames": total_evaluated,
             "ratio": occupancy_ratio,
-            "threshold_percent": threshold_percent,
-            "yellow_threshold_percent": yellow_threshold,
-            "green_threshold_percent": green_threshold,
+            "threshold_db": threshold_db,
             "chunk_seconds": chunk_payloads[0].get("chunk_seconds") if chunk_payloads else 10.0,
         },
         "location": latest.get("location") or [0.0, 0.0],
@@ -1244,4 +1347,6 @@ def compile_minute_xy_payload(chunk_payloads: List[Dict[str, Any]]) -> Dict[str,
         "motion_points": int(latest.get("motion_points") or 0),
         "chunk_count": len(chunk_payloads),
         "room": room,
+        "coordinate_space": "example2_sensor_local",
+        "native_pipeline": True,
     }

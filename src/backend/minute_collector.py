@@ -26,6 +26,7 @@ if __package__ in (None, ""):
     from backend.radar_analysis import (  # type: ignore
         PersistentTargetIdentity,
         StreamingChunkAnalyzer,
+        compile_minute_xy_payload,
         create_signal_processor,
         load_room_config,
         occupancy_label,
@@ -35,6 +36,7 @@ else:
     from .radar_analysis import (
         PersistentTargetIdentity,
         StreamingChunkAnalyzer,
+        compile_minute_xy_payload,
         create_signal_processor,
         load_room_config,
         occupancy_label,
@@ -47,6 +49,11 @@ DATA_ROOT = Path(Config.CAPTURE_DATA_DIR).expanduser()
 CAPTURE_SETTINGS_PATH = Path(Config.CONFIG_DIR).expanduser() / "capture_settings.json"
 CSI_HEADER = "type,seq,mac,rssi,rate,noise_floor,fft_gain,agc_gain,channel,local_timestamp,sig_len,rx_state,len,first_word,data"
 RADAR_FRAMES_PER_CHUNK = 10
+# A minute contains at most about sixty 10-frame chunks. The dedicated live
+# worker now owns freshness, so archival jobs can be buffered for the whole
+# minute instead of discarding a valid saved chunk during a transient CPU spike.
+MAX_PENDING_ANALYSIS_CHUNKS = 64
+LIVE_VISUALIZATION_INTERVAL_SECONDS = 0.16
 
 sys.path.insert(0, str(MMW_RELEASE))
 
@@ -58,6 +65,7 @@ def enqueue_latest_chunk_frame(
     entry: dict[str, Any],
     frame: bytes,
     captured_at: float,
+    *metadata: Any,
 ) -> bool:
     """Queue a frame while retaining the newest pending samples for its chunk.
 
@@ -83,8 +91,45 @@ def enqueue_latest_chunk_frame(
             analysis_queue.unfinished_tasks = max(0, analysis_queue.unfinished_tasks - 1)
             analysis_queue.not_full.notify()
             replaced = True
-    analysis_queue.put_nowait(("frame", entry, frame, captured_at))
+    analysis_queue.put_nowait(("frame", entry, frame, captured_at, *metadata))
     return replaced
+
+
+def enqueue_analysis_chunk(
+    analysis_queue: queue.Queue[Any],
+    job: tuple[Any, ...],
+) -> list[dict[str, Any]]:
+    """Queue one exact 10-frame archival job.
+
+    The production queue holds a complete minute, so transient CPU pressure
+    cannot remove captured chunk statistics. The replacement branch remains a
+    final memory bound for callers that intentionally provide a smaller queue.
+    """
+    if len(job) < 4 or job[0] != "chunk" or len(job[3]) != RADAR_FRAMES_PER_CHUNK:
+        raise ValueError(
+            f"radar analysis chunks require exactly {RADAR_FRAMES_PER_CHUNK} frames"
+        )
+
+    dropped: list[dict[str, Any]] = []
+    while True:
+        try:
+            analysis_queue.put_nowait(job)
+            return dropped
+        except queue.Full:
+            try:
+                stale = analysis_queue.get_nowait()
+            except queue.Empty:
+                continue
+            try:
+                if (
+                    isinstance(stale, tuple)
+                    and len(stale) >= 2
+                    and stale[0] == "chunk"
+                    and isinstance(stale[1], dict)
+                ):
+                    dropped.append(stale[1])
+            finally:
+                analysis_queue.task_done()
 
 
 def live_chunk_statistics(analyzer: StreamingChunkAnalyzer) -> dict[str, Any]:
@@ -92,9 +137,7 @@ def live_chunk_statistics(analyzer: StreamingChunkAnalyzer) -> dict[str, Any]:
     evaluated = analyzer.evaluated_frames
     detected = analyzer.detected_frames
     label = occupancy_label(
-        detected,
-        evaluated,
-        analyzer.occupancy_threshold_percent,
+        detected, evaluated, (100.0 / evaluated) if evaluated else 100.0,
     )
     classification = "green" if label == "occupied" else "red"
     return {
@@ -215,13 +258,9 @@ def write_json_atomic(path: Path, payload: object) -> None:
 def load_processing_settings() -> dict[str, Any]:
     defaults: dict[str, Any] = {
         "labels": [],
-        "radar_detection_threshold_normalized": 0.45,
-        "occupancy_threshold_percent": 50.0,
-        "yellow_threshold_percent": 20.0,
-        "green_threshold_percent": 60.0,
+        "radar_detection_threshold_db": 8.0,
         "auto_occupancy_label_enabled": True,
         "system_mode": "balanced",
-        "occupancy_vote_chunks": 1,
         "prediction_label_style": "occupancy",
         "people_count_label_enabled": False,
         "sleep_study_enabled": False,
@@ -237,22 +276,16 @@ def load_processing_settings() -> dict[str, Any]:
         pass
     except Exception as exc:
         print(f"Unable to load processing settings: {exc}", file=sys.stderr)
-    if "radar_detection_threshold_normalized" not in loaded:
-        legacy_db = loaded.get("radar_detection_threshold_db")
-        if legacy_db is not None:
-            defaults["radar_detection_threshold_normalized"] = float(legacy_db) / 10.0
-    defaults["radar_detection_threshold_normalized"] = min(
-        0.95, max(0.05, float(defaults["radar_detection_threshold_normalized"]))
+    if "radar_detection_threshold_db" not in loaded:
+        legacy_normalized = loaded.get("radar_detection_threshold_normalized")
+        if legacy_normalized is not None:
+            defaults["radar_detection_threshold_db"] = float(legacy_normalized) * 10.0
+    defaults["radar_detection_threshold_db"] = min(
+        30.0, max(0.0, float(defaults["radar_detection_threshold_db"]))
     )
-    defaults["occupancy_threshold_percent"] = min(100.0, max(0.0, float(defaults["occupancy_threshold_percent"])))
-    defaults["yellow_threshold_percent"] = min(100.0, max(0.0, float(defaults["yellow_threshold_percent"])))
-    defaults["green_threshold_percent"] = min(100.0, max(0.0, float(defaults["green_threshold_percent"])))
-    if defaults["yellow_threshold_percent"] >= defaults["green_threshold_percent"]:
-        defaults["yellow_threshold_percent"], defaults["green_threshold_percent"] = 20.0, 60.0
     defaults["auto_occupancy_label_enabled"] = bool(defaults["auto_occupancy_label_enabled"])
     mode = str(defaults.get("system_mode") or "balanced").strip().lower()
     defaults["system_mode"] = mode if mode in {"responsive", "balanced", "precision"} else "balanced"
-    defaults["occupancy_vote_chunks"] = min(60, max(1, int(defaults.get("occupancy_vote_chunks") or 1)))
     style = str(defaults.get("prediction_label_style") or "occupancy").strip().lower()
     defaults["prediction_label_style"] = style if style in {"occupancy", "presence"} else "occupancy"
     defaults["people_count_label_enabled"] = bool(defaults.get("people_count_label_enabled"))
@@ -357,10 +390,9 @@ def annotate_chunk_result(
         "settings_snapshot": {
             "revision": int(settings.get("revision") or 0),
             "system_mode": str(settings.get("system_mode") or "balanced"),
-            "radar_detection_threshold_normalized": float(
-                settings.get("radar_detection_threshold_normalized") or 0.45
+            "radar_detection_threshold_db": float(
+                settings.get("radar_detection_threshold_db") or 8.0
             ),
-            "occupancy_threshold_percent": float(settings.get("occupancy_threshold_percent") or 50.0),
             "chunk_frames": RADAR_FRAMES_PER_CHUNK,
         },
         "labels": list(dict.fromkeys(labels)),
@@ -400,8 +432,8 @@ def summarize_minute_results(
     chunks: list[dict[str, Any]], settings: dict[str, Any], preset_labels: list[str]
 ) -> dict[str, Any]:
     occupied_chunks = sum((chunk.get("occupancy") or {}).get("label") == "occupied" for chunk in chunks)
-    vote_required = min(max(1, int(settings.get("occupancy_vote_chunks") or 1)), max(1, len(chunks)))
-    label = "occupied" if occupied_chunks >= vote_required else "empty"
+    vote_required = 1
+    label = "occupied" if occupied_chunks > 0 else "empty"
     detected_frames = sum(int((chunk.get("occupancy") or {}).get("detected_frames") or 0) for chunk in chunks)
     evaluated_frames = sum(int((chunk.get("occupancy") or {}).get("evaluated_frames") or 0) for chunk in chunks)
     ratio = detected_frames / evaluated_frames if evaluated_frames else 0.0
@@ -429,7 +461,7 @@ def summarize_minute_results(
             "detected_frames": detected_frames,
             "evaluated_frames": evaluated_frames,
             "ratio": ratio,
-            "threshold_percent": float((latest.get("occupancy") or {}).get("threshold_percent") or 50.0),
+            "threshold_db": float((latest.get("occupancy") or {}).get("threshold_db") or 8.0),
         },
         "labels": list(dict.fromkeys(labels)),
         "zones": occupied_zones,
@@ -784,8 +816,11 @@ def main() -> int:
     camera_thread: threading.Thread | None = None
     radar_reader_thread: threading.Thread | None = None
     radar_analysis_thread: threading.Thread | None = None
+    radar_live_thread: threading.Thread | None = None
     radar_upload_thread: threading.Thread | None = None
-    analysis_queue: queue.Queue[Any] = queue.Queue()
+    analysis_queue: queue.Queue[Any] = queue.Queue(maxsize=MAX_PENDING_ANALYSIS_CHUNKS)
+    live_analysis_queue: queue.Queue[Any] = queue.Queue(maxsize=1)
+    live_queue_key: dict[str, Any] = {"stream": folder_name}
     upload_queue: queue.Queue[Any] = queue.Queue()
     radar_chunk_results: list[dict[str, Any]] = []
     publish_lock = threading.Lock()
@@ -876,6 +911,23 @@ def main() -> int:
             manifest["primary_label"] = minute_summary["labels"][0]
             manifest["minute_summary"] = minute_summary
             manifest["auto_occupancy_label"] = minute_summary["occupancy"]
+            # Keep the live artifact bounded to one native 10-frame chunk.
+            # Rebuilding and serving the entire minute here produced
+            # multi-megabyte responses every second and made analysis fall
+            # progressively behind the sensor.  The complete minute playback
+            # is written once during finalization below.
+            xy_payload = compile_minute_xy_payload([completed[-1]])
+            xy_payload["z"] = []
+            xy_payload["occupancy"] = minute_summary["occupancy"]
+            xy_payload["frame_count"] = sum(
+                int((item.get("occupancy") or {}).get("evaluated_frames") or 0)
+                for item in completed
+            )
+            xy_payload["sample_count"] = len(xy_payload.get("frames") or [])
+            xy_payload["stream_window_frames"] = RADAR_FRAMES_PER_CHUNK
+            xy_payload["live"] = True
+            write_json_atomic(output_dir / "xy-tracking.json", xy_payload)
+            manifest["outputs"]["radar"]["xy_tracking"] = str(output_dir / "xy-tracking.json")
             write_live_manifest()
 
     def upload_live_chunk(index: int) -> None:
@@ -988,7 +1040,10 @@ def main() -> int:
                         return
                     failed_entry = failed_job[1]
                     failed_entry.update({
-                        "status": "loading",
+                        "status": "empty",
+                        "classification": "red",
+                        "occupied": False,
+                        "data_quality": "analysis_error",
                         "error": str(init_exc),
                         "finished": iso_now(),
                     })
@@ -1016,11 +1071,15 @@ def main() -> int:
                     int(entry["chunk_index"]),
                     float(entry["chunk_seconds"]),
                     room_config,
-                    float(settings_snapshot["radar_detection_threshold_normalized"]),
-                    float(settings_snapshot["occupancy_threshold_percent"]),
+                    0.45,
                     0.0,
-                    max(0.01, float(settings_snapshot["occupancy_threshold_percent"])),
+                    0.0,
+                    0.01,
                     identity=identity,
+                    live_state_path=None,
+                    radar_detection_threshold_db=float(
+                        settings_snapshot.get("radar_detection_threshold_db") or 8.0
+                    ),
                 )
                 entry["status"] = "analyzing"
                 with publish_lock:
@@ -1033,10 +1092,9 @@ def main() -> int:
                 result = analyzer.finish()
                 result["bin_path"] = entry.get("bin_path")
                 result["camera_path"] = entry.get("camera_path")
-                previous_frames = sum(
-                    int(((item.get("result") or {}).get("occupancy") or {}).get("evaluated_frames") or 0)
-                    for item in radar_chunk_results if item is not entry
-                )
+                # Frame offsets follow the captured 10-frame bins, even when a
+                # stale analysis job was deferred to keep the live view current.
+                previous_frames = int(entry["chunk_index"]) * RADAR_FRAMES_PER_CHUNK
                 chunk_labels = normalize_labels(settings_snapshot.get("labels")) or preset_labels
                 annotate_chunk_result(
                     result, settings_snapshot, room_config, chunk_labels,
@@ -1075,7 +1133,13 @@ def main() -> int:
             except Exception as exc:
                 if entry is not None:
                     entry["error"] = str(exc)
-                    entry.update({"status": "loading", "finished": iso_now()})
+                    entry.update({
+                        "status": "empty",
+                        "classification": "red",
+                        "occupied": False,
+                        "data_quality": "analysis_error",
+                        "finished": iso_now(),
+                    })
                     with publish_lock:
                         write_live_manifest()
                     upload_queue.put(int(entry["chunk_index"]))
@@ -1087,17 +1151,97 @@ def main() -> int:
             finally:
                 analysis_queue.task_done()
 
+    def run_live_analysis_worker() -> None:
+        """Analyze only the newest captured frame for the live Presence view.
+
+        Saved chunk analysis remains a separate exact 10-frame pipeline. This
+        lightweight worker is allowed to replace a pending visual frame when
+        rendering falls behind, which keeps Example 2 close to the sensor
+        without ever dropping a frame from the persisted chunk.
+        """
+        try:
+            processor = create_signal_processor()
+        except Exception as exc:
+            print(f"Live radar visualization unavailable: {exc}", file=sys.stderr)
+            while True:
+                failed_job = live_analysis_queue.get()
+                try:
+                    if failed_job is None:
+                        return
+                finally:
+                    live_analysis_queue.task_done()
+
+        analyzer: StreamingChunkAnalyzer | None = None
+        analyzer_chunk_index: int | None = None
+        try:
+            while True:
+                job = live_analysis_queue.get()
+                try:
+                    if job is None:
+                        return
+                    _, _, frame, captured_at, chunk_index, settings_snapshot = job
+                    chunk_index = int(chunk_index)
+                    if analyzer is None or analyzer_chunk_index != chunk_index:
+                        if analyzer is not None:
+                            analyzer.handle.close()
+                        mode = str(settings_snapshot.get("system_mode") or "balanced")
+                        if hasattr(processor, "set_system_mode"):
+                            processor.set_system_mode(mode)
+                        analyzer = StreamingChunkAnalyzer(
+                            processor,
+                            None,
+                            chunk_index,
+                            1.0,
+                            room_config,
+                            0.45,
+                            0.0,
+                            0.0,
+                            0.01,
+                            identity=None,
+                            radar_detection_threshold_db=float(
+                                settings_snapshot.get("radar_detection_threshold_db") or 8.0
+                            ),
+                            live_example2_only=True,
+                        )
+                        analyzer_chunk_index = chunk_index
+                    analyzer.max_queue_lag_ms = max(
+                        0.0, (time.monotonic() - float(captured_at)) * 1000
+                    )
+                    analyzer.process(frame)
+                except Exception as exc:
+                    print(f"Live radar frame deferred: {exc}", file=sys.stderr)
+                finally:
+                    live_analysis_queue.task_done()
+        finally:
+            if analyzer is not None:
+                analyzer.handle.close()
+
     def run_radar_reader(radar: Any) -> None:
         frames: list[bytes] = []
         frame_times: list[float] = []
+        live_settings: dict[str, Any] = {}
+        last_live_enqueue = 0.0
         while time.monotonic() < stop_at:
             remaining = stop_at - time.monotonic()
             try:
                 full_frame = bytes(radar.frame_buffer.get(timeout=min(0.1, max(0.01, remaining))))
             except queue.Empty:
                 continue
+            captured_at = time.monotonic()
+            if not frames:
+                live_settings = load_processing_settings()
+            if captured_at - last_live_enqueue >= LIVE_VISUALIZATION_INTERVAL_SECONDS:
+                enqueue_latest_chunk_frame(
+                    live_analysis_queue,
+                    live_queue_key,
+                    full_frame,
+                    captured_at,
+                    len(radar_chunk_results),
+                    live_settings,
+                )
+                last_live_enqueue = captured_at
             frames.append(full_frame)
-            frame_times.append(time.monotonic())
+            frame_times.append(captured_at)
             if len(frames) < RADAR_FRAMES_PER_CHUNK:
                 continue
 
@@ -1128,13 +1272,20 @@ def main() -> int:
                 write_live_manifest()
             camera_queue.put(chunk_entry)
             upload_queue.put(chunk_index)
-            analysis_queue.put((
+            analysis_job = (
                 "chunk",
                 chunk_entry,
                 settings_snapshot,
                 tuple(frames),
                 frame_times[-1],
-            ))
+            )
+            dropped_entries = enqueue_analysis_chunk(analysis_queue, analysis_job)
+            for dropped in dropped_entries:
+                dropped.update({
+                    "status": "captured",
+                    "data_quality": "analysis_deferred",
+                    "analysis_deferred_at": iso_now(),
+                })
             frames = []
             frame_times = []
 
@@ -1164,6 +1315,19 @@ def main() -> int:
                 "source": "USB-connected ESP32 receiver printing ESP-NOW CSI_DATA lines",
             }
         elif not args.no_csi and csi_port is None:
+            csi_file = output_dir / "wifi_csi.csv"
+            with open(csi_file, "w", encoding="utf-8", newline="") as output_fd:
+                csv.writer(output_fd).writerow(["host_timestamp", "monotonic_ns", "serial_port", "raw_csi_line"])
+            manifest["outputs"]["wifi_csi"] = {
+                "path": str(csi_file),
+                "type": "csv",
+                "device": None,
+                "baud": args.csi_baud,
+                "detected_candidates": csi_candidates,
+                "started": iso_now(),
+                "source": "CSI receiver unavailable; header-only minute artifact",
+                "data_quality": "sensor_missing",
+            }
             manifest["warnings"].append("No ESP32 CSI serial device found; skipping CSI for this minute.")
 
         if not args.no_camera:
@@ -1194,8 +1358,10 @@ def main() -> int:
             with publish_lock:
                 write_live_manifest()
             radar_analysis_thread = threading.Thread(target=run_analysis_worker, name="RadarAnalysis", daemon=True)
+            radar_live_thread = threading.Thread(target=run_live_analysis_worker, name="RadarLive", daemon=True)
             radar_upload_thread = threading.Thread(target=run_upload_worker, name="RadarUpload", daemon=True)
             radar_analysis_thread.start()
+            radar_live_thread.start()
             radar_upload_thread.start()
             radar = None
             try:
@@ -1233,6 +1399,9 @@ def main() -> int:
             radar_analysis_thread.join(timeout=90.0)
             if radar_analysis_thread.is_alive():
                 manifest["errors"].append("Radar analysis exceeded its shutdown deadline.")
+        if radar_live_thread is not None:
+            live_analysis_queue.put(None)
+            radar_live_thread.join(timeout=5.0)
         if camera_thread is not None:
             camera_queue.put(None)
             camera_thread.join(timeout=30.0)
@@ -1274,7 +1443,10 @@ def main() -> int:
                     chunk.pop("error", None)
             elif error:
                 chunk.update({
-                    "status": "loading",
+                    "status": "empty",
+                    "classification": "red",
+                    "occupied": False,
+                    "data_quality": "analysis_error",
                     "error": error,
                     "finished": iso_now(),
                 })
@@ -1290,30 +1462,42 @@ def main() -> int:
             manifest["primary_label"] = minute_summary["labels"][0]
             manifest["minute_summary"] = minute_summary
             manifest["chunk_metadata_schema_version"] = 3
+            xy_payload = compile_minute_xy_payload(completed_chunks)
+            xy_payload["live"] = False
+            write_json_atomic(output_dir / "xy-tracking.json", xy_payload)
+            manifest["outputs"].setdefault("radar", {})["xy_tracking"] = str(
+                output_dir / "xy-tracking.json"
+            )
             minute_entry = {"finished": iso_now()}
             enqueue_home_assistant(minute_entry, minute_summary["occupancy"], minute_summary, scope="minute")
             manifest["home_assistant"] = minute_entry.get("home_assistant")
         else:
             manifest["preset_labels"] = preset_labels
-            manifest["labels"] = preset_labels or ["no-radar-data"]
+            radar_files_present = any(output_dir.glob("radar_*.bin"))
+            quality_label = "radar-analysis-failed" if radar_files_present else "radar-missing"
+            manifest["labels"] = list(dict.fromkeys([*preset_labels, "empty", "absent", quality_label]))
             manifest["primary_label"] = manifest["labels"][0]
             manifest["minute_summary"] = {
                 "occupancy": {
-                    "label": "unavailable",
-                    "classification": "blue",
+                    "label": "empty",
+                    "classification": "red",
                     "occupied_chunks": 0,
                     "evaluated_chunks": 0,
                     "detected_frames": 0,
                     "evaluated_frames": 0,
                     "ratio": 0.0,
+                    "threshold_db": float(load_processing_settings().get("radar_detection_threshold_db") or 8.0),
                 },
                 "labels": manifest["labels"],
-                "activity_labels": ["no-radar-data"],
+                "activity_labels": ["absent", "empty", quality_label],
+                "data_quality": quality_label,
                 "people_count": 0,
                 "targets": [],
                 "location": None,
                 "score": None,
             }
+            if not radar_files_present and not args.no_radar:
+                manifest["errors"].append("Radar produced no complete 10-frame chunks for this minute.")
 
         radar_files = sorted(str(path) for path in output_dir.glob("radar_*.bin"))
         if radar_files:
@@ -1321,10 +1505,19 @@ def main() -> int:
         camera_files = sorted(str(path) for path in output_dir.glob("camera_*.jpg"))
         if camera_files:
             manifest["outputs"].setdefault("camera", {})["files"] = camera_files
+        if camera is not None and len(camera_files) != len(radar_files):
+            manifest["errors"].append(
+                f"Camera captured {len(camera_files)} of {len(radar_files)} expected chunk images."
+            )
 
         wifi_csi = manifest["outputs"].get("wifi_csi")
         if isinstance(wifi_csi, dict):
             path = Path(wifi_csi["path"])
+            if not path.exists() and not args.no_csi:
+                with open(path, "w", encoding="utf-8", newline="") as output_fd:
+                    csv.writer(output_fd).writerow(["host_timestamp", "monotonic_ns", "serial_port", "raw_csi_line"])
+                wifi_csi["data_quality"] = "capture_error"
+                manifest["errors"].append("CSI capture failed; wrote the required header-only minute CSV.")
             if path.exists():
                 wifi_csi["bytes"] = path.stat().st_size
             if path.exists() and path.stat().st_size < 100:

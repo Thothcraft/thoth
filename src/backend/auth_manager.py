@@ -40,9 +40,42 @@ class AuthManager:
         self.token_expiry = None
         self.refresh_token = None
         self.user_info = None
+        self.pairing_session = None
 
         # Load saved auth data if available
         self._load_auth_data()
+        self._load_pairing_session()
+
+    def _pairing_file(self) -> str:
+        return os.path.join(self.config.CONFIG_DIR, 'pairing.json')
+
+    def _load_pairing_session(self) -> None:
+        try:
+            pairing_file = self._pairing_file()
+            if os.path.exists(pairing_file):
+                with open(pairing_file, 'r') as handle:
+                    value = json.load(handle)
+                if isinstance(value, dict) and value.get('pairing_secret'):
+                    self.pairing_session = value
+        except Exception as exc:
+            logger.warning("Unable to restore pairing session: %s", exc)
+            self._clear_pairing_session()
+
+    def _save_pairing_session(self) -> None:
+        os.makedirs(self.config.CONFIG_DIR, exist_ok=True)
+        pairing_file = self._pairing_file()
+        with open(pairing_file, 'w') as handle:
+            json.dump(self.pairing_session or {}, handle, indent=2)
+        os.chmod(pairing_file, 0o600)
+
+    def _clear_pairing_session(self) -> None:
+        self.pairing_session = None
+        try:
+            pairing_file = self._pairing_file()
+            if os.path.exists(pairing_file):
+                os.remove(pairing_file)
+        except OSError:
+            logger.warning("Unable to remove pairing session", exc_info=True)
 
     def _load_auth_data(self) -> None:
         """Load authentication data from disk."""
@@ -156,6 +189,84 @@ class AuthManager:
         return {
             'Authorization': f'Bearer {self.token}',
             'Content-Type': 'application/json'
+        }
+
+    def start_pairing(
+        self,
+        device_id: str,
+        device_name: str,
+        hardware_info: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Open a one-time thothHUB pairing session for this device."""
+        import requests
+
+        response = requests.post(
+            f"{self.config.BRAIN_SERVER_URL}/api/device/pairing/start",
+            json={
+                'device_id': device_id,
+                'device_name': device_name,
+                'device_type': 'thoth',
+                'hardware_info': hardware_info or {},
+            },
+            timeout=(5, 20),
+        )
+        data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
+        if not response.ok:
+            raise Exception(data.get('detail') or f"Pairing service returned HTTP {response.status_code}")
+        self.pairing_session = {
+            'code': data['code'],
+            'pairing_secret': data['pairing_secret'],
+            'device_id': data['device_id'],
+            'expires_at': data['expires_at'],
+        }
+        self._save_pairing_session()
+        return {key: value for key, value in self.pairing_session.items() if key != 'pairing_secret'}
+
+    def pairing_status(self) -> Dict[str, Any]:
+        """Poll Brain and persist the device-scoped token after a claim."""
+        import requests
+
+        if not self.pairing_session or not self.pairing_session.get('pairing_secret'):
+            return {'success': True, 'status': 'idle'}
+        response = requests.get(
+            f"{self.config.BRAIN_SERVER_URL}/api/device/pairing/status",
+            headers={'X-Pairing-Secret': self.pairing_session['pairing_secret']},
+            timeout=(5, 15),
+        )
+        data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
+        if response.status_code in (404, 410):
+            self._clear_pairing_session()
+            return {'success': False, 'status': 'expired', 'message': data.get('detail') or 'Pairing code expired'}
+        if not response.ok:
+            raise Exception(data.get('detail') or f"Pairing status returned HTTP {response.status_code}")
+        if data.get('status') != 'paired':
+            return {
+                'success': True,
+                'status': 'pending',
+                'code': self.pairing_session.get('code'),
+                'expires_at': self.pairing_session.get('expires_at'),
+            }
+
+        token = str(data.get('access_token') or '')
+        token_data = _decode_unverified_jwt(token)
+        self.token = token
+        self.token_expiry = datetime.utcfromtimestamp(token_data['exp'])
+        self.user_info = data.get('user') or {
+            'username': token_data.get('username'),
+            'user_id': token_data.get('sub'),
+            'email': token_data.get('email'),
+        }
+        self.config.USER_AUTH_TOKEN = token
+        self.config.BRAIN_AUTH_TOKEN = token
+        self._save_auth_data()
+        self._clear_pairing_session()
+        return {
+            'success': True,
+            'status': 'paired',
+            'token': token,
+            'user': self.user_info,
+            'device_id': data.get('device_id'),
+            'device_name': data.get('device_name'),
         }
 
     def login(self, username: str, password: str) -> Dict[str, Any]:

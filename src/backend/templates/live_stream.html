@@ -23,8 +23,8 @@
                 <a href="{{ url_for('status') }}" class="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
                     Dashboard
                 </a>
-                <a href="{{ url_for('captures') }}" class="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
-                    Minutes
+                <a href="{{ url_for('status') }}#captures" class="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                    Archive
                 </a>
             </div>
         </div>
@@ -131,24 +131,37 @@ if (kind === 'video') {
   const host = document.getElementById('live-xy-tracking');
   const status = document.getElementById('localization-updated');
   if (host && window.ThothPlayback) {
+    let lastUpdate = '';
+    let stopped = false;
     const render = () => loadJson(xyTrackingUrl).then((payload) => {
       const data = payload?.data || {};
-      return ThothPlayback.renderAnimatedHeatmap(host, payload, {
+      const frames = Array.isArray(data.frames) ? data.frames : [];
+      const latestFrame = frames.length ? frames[frames.length - 1] : null;
+      const updateKey = `${payload?.minute || ''}:${data.updated || ''}:${latestFrame?.name || ''}`;
+      if (updateKey === lastUpdate) return false;
+      lastUpdate = updateKey;
+      const livePayload = {
+        ...payload,
+        data: {...data, frames: latestFrame ? [latestFrame] : []},
+      };
+      return ThothPlayback.renderAnimatedHeatmap(host, livePayload, {
         title: data?.title || payload?.title || 'X/Y localization',
         xLabel: data?.x_label || payload?.x_label || 'X',
         yLabel: data?.y_label || payload?.y_label || 'Y',
         uirevision: 'live-xy',
-      });
-    }).then(() => {
-      if (status) status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      }).then(() => true);
+    }).then((updated) => {
+      if (updated && status) status.textContent = `Live · ${new Date().toLocaleTimeString()}`;
     }).catch((error) => {
       if (status) status.textContent = 'Localization unavailable';
-      host.innerHTML = `<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">${String(error).replace(/[<>&]/g, '')}</div>`;
+      if (!host.data) host.innerHTML = `<div class="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm text-slate-500">${String(error).replace(/[<>&]/g, '')}</div>`;
     });
-    render();
-    setInterval(() => {
-      render();
-    }, 2000);
+    const poll = async () => {
+      await render();
+      if (!stopped) window.setTimeout(poll, document.hidden ? 1500 : 250);
+    };
+    window.addEventListener('pagehide', () => { stopped = true; }, {once: true});
+    poll();
   }
 }
 </script>

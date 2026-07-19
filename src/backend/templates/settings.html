@@ -47,11 +47,11 @@
       </section>
 
       <label class="block rounded-xl border border-slate-300 bg-slate-50 p-4">
-        <span class="block text-base font-semibold text-slate-950">Radar detection threshold</span>
-        <span class="mt-1 block text-sm text-slate-600">Minimum value on the normalized /presence intensity map. Raise it to reject more noise; lower it for weaker or more distant people.</span>
+        <span class="block text-base font-semibold text-slate-950">Detection threshold</span>
+        <span class="mt-1 block text-sm text-slate-600">The single Example 2 noise gate, measured in dB above the live noise floor. Every chunk and minute is classified occupied or empty from this gate.</span>
         <span class="mt-4 flex items-center gap-3">
-          <input type="range" name="radar_detection_threshold_normalized" min="0.05" max="0.95" step="0.01" value="{{ device_settings.radar_detection_threshold_normalized|default(0.45) }}" class="h-2 flex-1 accent-cyan-600" oninput="document.getElementById('radar-threshold-value').textContent = Number(this.value).toFixed(2)">
-          <output id="radar-threshold-value" class="w-20 text-right font-mono text-sm text-cyan-700">{{ '%.2f'|format(device_settings.radar_detection_threshold_normalized|default(0.45)|float) }}</output>
+          <input type="range" name="radar_detection_threshold_db" min="0" max="20" step="0.5" value="{{ device_settings.radar_detection_threshold_db|default(8.0) }}" class="h-2 flex-1 accent-cyan-600" oninput="document.getElementById('radar-threshold-value').textContent = Number(this.value).toFixed(1) + ' dB'">
+          <output id="radar-threshold-value" class="w-20 text-right font-mono text-sm text-cyan-700">{{ '%.1f'|format(device_settings.radar_detection_threshold_db|default(8.0)|float) }} dB</output>
         </span>
       </label>
 
@@ -72,14 +72,11 @@
       </div>
 
       <section class="rounded-xl border border-slate-300 bg-slate-50 p-4">
-        <span class="block text-base font-semibold text-slate-950">Capture labels and minute voting</span>
+        <span class="block text-base font-semibold text-slate-950">Capture labels</span>
         <label class="mt-3 block text-sm text-slate-700">Preset labels (comma-separated)
           <input name="labels" value="{{ device_settings.labels|join(', ') if device_settings.labels else '' }}" class="mt-1 w-full rounded-lg border border-slate-400 bg-white px-3 py-2 text-slate-950" placeholder="sleep-study, bedroom, participant-01">
         </label>
-        <div class="mt-3 grid gap-3 md:grid-cols-2">
-          <label class="text-sm text-slate-700">Occupied chunks required for minute vote
-            <input name="occupancy_vote_chunks" type="number" min="1" max="60" step="1" value="{{ device_settings.occupancy_vote_chunks|default(1) }}" class="mt-1 w-full rounded-lg border border-slate-400 bg-white px-3 py-2 text-slate-950">
-          </label>
+        <div class="mt-3 grid gap-3">
           <label class="text-sm text-slate-700">Prediction label vocabulary
             <select name="prediction_label_style" class="mt-1 w-full rounded-lg border border-slate-400 bg-white px-3 py-2 text-slate-950"><option value="occupancy" {% if device_settings.prediction_label_style|default('occupancy') == 'occupancy' %}selected{% endif %}>occupied / empty</option><option value="presence" {% if device_settings.prediction_label_style == 'presence' %}selected{% endif %}>present / absent</option></select>
           </label>
@@ -93,10 +90,6 @@
           <span class="block text-sm text-slate-400">Add the selected occupied/empty or present/absent prediction label to each chunk and minute.</span>
         </span>
         <input type="checkbox" name="auto_occupancy_label_enabled" class="mt-1 h-5 w-5 rounded border-slate-700 bg-slate-950 text-cyan-400" {% if device_settings.auto_occupancy_label_enabled|default(true) %}checked{% endif %}>
-      </label>
-
-      <label class="rounded-xl border border-slate-300 bg-slate-50 p-4 text-sm text-slate-700">Occupied when detected frames reach
-        <span class="mt-2 flex items-center gap-3"><input type="range" name="occupancy_threshold_percent" min="10" max="100" step="10" value="{{ device_settings.occupancy_threshold_percent|default(50.0) }}" class="h-2 flex-1 accent-emerald-500" oninput="document.getElementById('occupancy-threshold-value').textContent = Number(this.value).toFixed(0) + '%'"> <output id="occupancy-threshold-value" class="w-20 text-right font-mono text-sm text-emerald-700">{{ '%.0f'|format(device_settings.occupancy_threshold_percent|default(50.0)|float) }}%</output></span>
       </label>
 
       <label class="flex items-start justify-between gap-4 rounded-xl border border-slate-300 bg-slate-50 p-4">
@@ -130,13 +123,11 @@ document.getElementById('settings-form').addEventListener('submit', async (event
   const payload = Object.fromEntries(form.entries());
   payload.portal_upload_allowed = event.target.portal_upload_allowed.checked;
   payload.cloud_sync_allowed = event.target.cloud_sync_allowed.checked;
-  payload.radar_detection_threshold_normalized = Number(event.target.radar_detection_threshold_normalized.value);
+  payload.radar_detection_threshold_db = Number(event.target.radar_detection_threshold_db.value);
   payload.auto_occupancy_label_enabled = event.target.auto_occupancy_label_enabled.checked;
-  payload.occupancy_threshold_percent = Number(event.target.occupancy_threshold_percent.value);
   payload.chunk_seconds = Number(event.target.chunk_seconds.value);
   payload.system_mode = event.target.system_mode.value;
   payload.labels = event.target.labels.value.split(',').map((item) => item.trim()).filter(Boolean);
-  payload.occupancy_vote_chunks = Number(event.target.occupancy_vote_chunks.value);
   payload.prediction_label_style = event.target.prediction_label_style.value;
   payload.people_count_label_enabled = event.target.people_count_label_enabled.checked;
   payload.home_assistant_enabled = event.target.home_assistant_enabled.checked;
@@ -158,16 +149,13 @@ document.getElementById('settings-form').addEventListener('submit', async (event
     event.target.portal_upload_allowed.checked = canonical.portal_upload_allowed !== false;
     event.target.cloud_sync_allowed.checked = canonical.cloud_sync_allowed !== false;
     event.target.auto_occupancy_label_enabled.checked = canonical.auto_occupancy_label_enabled !== false;
-    event.target.radar_detection_threshold_normalized.value = canonical.radar_detection_threshold_normalized ?? 0.45;
-    event.target.occupancy_threshold_percent.value = canonical.occupancy_threshold_percent ?? 50;
+    event.target.radar_detection_threshold_db.value = canonical.radar_detection_threshold_db ?? 8;
     event.target.chunk_seconds.value = canonical.chunk_seconds ?? 10;
     event.target.system_mode.value = canonical.system_mode ?? 'balanced';
     event.target.labels.value = (canonical.labels || []).join(', ');
-    event.target.occupancy_vote_chunks.value = canonical.occupancy_vote_chunks ?? 1;
     event.target.prediction_label_style.value = canonical.prediction_label_style ?? 'occupancy';
     event.target.people_count_label_enabled.checked = canonical.people_count_label_enabled === true;
-    document.getElementById('radar-threshold-value').textContent = Number(event.target.radar_detection_threshold_normalized.value).toFixed(2);
-    document.getElementById('occupancy-threshold-value').textContent = Number(event.target.occupancy_threshold_percent.value).toFixed(0) + '%';
+    document.getElementById('radar-threshold-value').textContent = Number(event.target.radar_detection_threshold_db.value).toFixed(1) + ' dB';
     event.target.home_assistant_token.value = '';
     saveStatus.textContent = canonical.sync_pending ? 'Saved locally · cloud sync pending' : 'Saved';
     showAlert(saveStatus.textContent, 'success');

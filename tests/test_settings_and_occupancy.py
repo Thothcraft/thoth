@@ -26,13 +26,17 @@ from backend.radar_analysis import (
     PersistentTargetIdentity,
     SigProc,
     StreamingChunkAnalyzer,
+    _example2_playback_frame,
     _update_example2_xy_plot,
+    compile_minute_xy_payload,
     occupancy_label,
     occupancy_region,
 )
 from backend.calibration import derive_thresholds
 from backend.minute_collector import (
+    RADAR_FRAMES_PER_CHUNK,
     annotate_chunk_result,
+    enqueue_analysis_chunk,
     enqueue_latest_chunk_frame,
     live_chunk_statistics,
     load_processing_settings,
@@ -63,18 +67,36 @@ class SettingsTests(unittest.TestCase):
         scheduled = minute_start(False, "2026-07-13T12:35:00-04:00")
         self.assertEqual(scheduled.isoformat(), "2026-07-13T12:35:00-04:00")
 
+    def test_analysis_queue_stays_current_and_requires_ten_frame_chunks(self):
+        pending = queue.Queue(maxsize=2)
+
+        def job(index, frame_count=RADAR_FRAMES_PER_CHUNK):
+            return (
+                "chunk",
+                {"chunk_index": index},
+                {},
+                tuple(bytes([frame]) for frame in range(frame_count)),
+                float(index),
+            )
+
+        self.assertEqual(enqueue_analysis_chunk(pending, job(0)), [])
+        self.assertEqual(enqueue_analysis_chunk(pending, job(1)), [])
+        dropped = enqueue_analysis_chunk(pending, job(2))
+        self.assertEqual([entry["chunk_index"] for entry in dropped], [0])
+        queued = list(pending.queue)
+        self.assertEqual([entry[1]["chunk_index"] for entry in queued], [1, 2])
+        self.assertTrue(all(len(entry[3]) == RADAR_FRAMES_PER_CHUNK for entry in queued))
+        with self.assertRaisesRegex(ValueError, "exactly 10 frames"):
+            enqueue_analysis_chunk(pending, job(3, frame_count=9))
+
     def test_local_save_is_canonical_revisioned_and_survives_reload(self):
         with tempfile.TemporaryDirectory() as root:
             manager = DeviceManager(_Config(root))
             saved = manager.save_capture_settings({
-                "radar_detection_threshold_normalized": 0.52,
-                "occupancy_threshold_percent": 62,
-                "yellow_threshold_percent": 27,
-                "green_threshold_percent": 71,
+                "radar_detection_threshold_db": 7.5,
                 "auto_occupancy_label_enabled": False,
                 "chunk_seconds": 5,
                 "system_mode": "responsive",
-                "occupancy_vote_chunks": 3,
                 "prediction_label_style": "presence",
                 "people_count_label_enabled": True,
                 "sleep_study_enabled": True,
@@ -82,14 +104,11 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(saved["revision"], 1)
             self.assertIsNotNone(saved["updated_at"])
             reloaded = DeviceManager(_Config(root)).load_capture_settings()
-            self.assertEqual(reloaded["radar_detection_threshold_normalized"], 0.52)
-            self.assertEqual(reloaded["occupancy_threshold_percent"], 62.0)
-            self.assertEqual(reloaded["yellow_threshold_percent"], 27.0)
-            self.assertEqual(reloaded["green_threshold_percent"], 71.0)
+            self.assertEqual(reloaded["radar_detection_threshold_db"], 7.5)
+            self.assertNotIn("occupancy_threshold_percent", reloaded)
             self.assertFalse(reloaded["auto_occupancy_label_enabled"])
             self.assertEqual(reloaded["chunk_seconds"], 5.0)
             self.assertEqual(reloaded["system_mode"], "responsive")
-            self.assertEqual(reloaded["occupancy_vote_chunks"], 3)
             self.assertEqual(reloaded["prediction_label_style"], "presence")
             self.assertTrue(reloaded["people_count_label_enabled"])
             self.assertTrue(reloaded["sleep_study_enabled"])
@@ -134,7 +153,7 @@ class SettingsTests(unittest.TestCase):
                 "labels": [],
                 "outputs": {},
             }), encoding="utf-8")
-            self.assertEqual(minute_summary(empty_dir)["labels"], ["no-radar-data"])
+            self.assertEqual(minute_summary(empty_dir)["labels"], ["empty", "absent", "radar-missing"])
 
     def test_presence_example2_plot_uses_native_processor_and_grid(self):
         native_map = np.zeros((200, 400), dtype=float)
@@ -157,12 +176,47 @@ class SettingsTests(unittest.TestCase):
         first = _update_example2_xy_plot(processor)
         self.assertEqual((first["rows"], first["columns"]), (200, 400))
         self.assertEqual(first["levels"], [0.0, 1.0])
-        self.assertTrue(first["transpose"])
-        self.assertTrue(first["mirror_x"])
-        self.assertTrue(first["mirror_y"])
+        self.assertEqual(first["buffer_orientation"], "native_example_2")
+        self.assertEqual(first["display_source"], "example_2_track/signal_proc.py::serialize_xy_plot")
         self.assertEqual(max(value for _index, value in first["values_sparse"]), 255)
         exact.target_detection.assert_called_once()
         self.assertEqual(first["source"], "example_2_track/location_gui.py")
+
+    def test_example2_minute_playback_keeps_every_native_frame(self):
+        native = {
+            "rows": 2,
+            "columns": 3,
+            "x_axis": [0.0, 0.025],
+            "y_axis": [-0.025, 0.0, 0.025],
+            "values_sparse": [[4, 255]],
+            "playback": {
+                "x": [0.025, 0.0, -0.025],
+                "y": [0.025, 0.0],
+                "z_shape": [2, 3],
+                "z_sparse": [[0, 1, 1.0]],
+                "coordinate_space": "example2_sensor_local",
+                "native_pipeline": True,
+            },
+        }
+        frame = _example2_playback_frame(native)
+        self.assertEqual(frame["z_shape"], [2, 3])
+        self.assertEqual(frame["z_sparse"], [[0, 1, 1.0]])
+        self.assertEqual(frame["x"], [0.025, 0.0, -0.025])
+        self.assertEqual(frame["y"], [0.025, 0.0])
+        chunks = [
+            {
+                "x": frame["x"], "y": frame["y"], "z": [],
+                "frames": [{**frame, "name": f"frame-{index}"}],
+                "occupancy": {"detected_frames": index, "evaluated_frames": 1, "threshold_db": 8.0},
+                "chunk_seconds": 0.1,
+            }
+            for index in range(2)
+        ]
+        compiled = compile_minute_xy_payload(chunks)
+        self.assertEqual(compiled["sample_count"], 2)
+        self.assertEqual(len(compiled["frames"]), 2)
+        self.assertEqual(compiled["coordinate_space"], "example2_sensor_local")
+        self.assertEqual(compiled["occupancy"]["label"], "occupied")
 
     @mock.patch("backend.device_manager.requests.put")
     def test_device_command_labels_current_chunk_and_acknowledges(self, local_put):
@@ -201,7 +255,7 @@ class SettingsTests(unittest.TestCase):
                 settings = load_processing_settings()
         self.assertEqual(settings["labels"], ["cooking", "participant-4"])
 
-    def test_dashboard_saves_detection_regions_without_waiting_for_brain(self):
+    def test_dashboard_saves_single_detection_threshold_without_waiting_for_brain(self):
         with tempfile.TemporaryDirectory() as root:
             manager = DeviceManager(_Config(root))
             manager.registered = True
@@ -210,8 +264,7 @@ class SettingsTests(unittest.TestCase):
             remote = {**manager.default_capture_settings(), "revision": 7}
             canonical = {
                 **remote,
-                "yellow_threshold_percent": 31.0,
-                "green_threshold_percent": 74.0,
+                "radar_detection_threshold_db": 9.5,
                 "revision": 8,
                 "updated_at": "2026-07-14T12:00:00+00:00",
             }
@@ -223,20 +276,17 @@ class SettingsTests(unittest.TestCase):
                 manager.session, "put", return_value=put_response
             ) as put:
                 saved = manager.save_device_settings({
-                    "yellow_threshold_percent": 31,
-                    "green_threshold_percent": 74,
+                    "radar_detection_threshold_db": 9.5,
                 })
                 get.assert_not_called()
                 put.assert_not_called()
-                self.assertEqual(saved["yellow_threshold_percent"], 31.0)
-                self.assertEqual(saved["green_threshold_percent"], 74.0)
+                self.assertEqual(saved["radar_detection_threshold_db"], 9.5)
                 self.assertTrue(saved["sync_pending"])
 
                 self.assertTrue(manager._sync_capture_settings_to_brain(manager.load_capture_settings()))
                 sent = put.call_args.kwargs["json"]
                 self.assertEqual(sent["revision"], 7)
-                self.assertEqual(sent["yellow_threshold_percent"], 31.0)
-                self.assertEqual(sent["green_threshold_percent"], 74.0)
+                self.assertEqual(sent["radar_detection_threshold_db"], 9.5)
                 self.assertEqual(manager.load_capture_settings()["revision"], 8)
 
     def test_frequent_heartbeat_does_not_rescan_complete_inventory(self):
@@ -248,47 +298,41 @@ class SettingsTests(unittest.TestCase):
             ):
                 self.assertIsNone(manager._heartbeat_file_payload())
 
-    def test_region_thresholds_are_strictly_validated(self):
+    def test_single_detection_threshold_is_clamped(self):
         with tempfile.TemporaryDirectory() as root:
             manager = DeviceManager(_Config(root))
-            with self.assertRaisesRegex(ValueError, "yellow < green"):
-                manager.save_capture_settings({"yellow_threshold_percent": 70, "green_threshold_percent": 60})
+            self.assertEqual(manager.save_capture_settings({"radar_detection_threshold_db": 99})["radar_detection_threshold_db"], 30.0)
 
     def test_persistence_failure_is_reported(self):
         with tempfile.TemporaryDirectory() as root:
             manager = DeviceManager(_Config(root))
             with mock.patch("backend.device_manager.os.replace", side_effect=OSError("disk full")):
                 with self.assertRaisesRegex(OSError, "disk full"):
-                    manager.save_capture_settings({"occupancy_threshold_percent": 75})
+                    manager.save_capture_settings({"radar_detection_threshold_db": 7.5})
 
     def test_older_remote_revision_does_not_overwrite_offline_edit(self):
         with tempfile.TemporaryDirectory() as root:
             manager = DeviceManager(_Config(root))
-            local = manager.save_capture_settings({"occupancy_threshold_percent": 75})
+            local = manager.save_capture_settings({"radar_detection_threshold_db": 7.5})
             manager._apply_response_settings({"capture_settings": {
                 **local,
                 "revision": 0,
-                "occupancy_threshold_percent": 10,
+                "radar_detection_threshold_db": 2.0,
             }})
-            self.assertEqual(manager.load_capture_settings()["occupancy_threshold_percent"], 75.0)
+            self.assertEqual(manager.load_capture_settings()["radar_detection_threshold_db"], 7.5)
 
-    def test_newer_remote_revision_does_not_overwrite_pending_detection_regions(self):
+    def test_newer_remote_revision_does_not_overwrite_pending_detection_threshold(self):
         with tempfile.TemporaryDirectory() as root:
             manager = DeviceManager(_Config(root))
-            local = manager.save_capture_settings({
-                "yellow_threshold_percent": 31,
-                "green_threshold_percent": 74,
-            })
+            local = manager.save_capture_settings({"radar_detection_threshold_db": 9.5})
             manager._apply_response_settings({"capture_settings": {
                 **local,
                 "revision": int(local["revision"]) + 5,
                 "updated_at": "2999-01-01T00:00:00+00:00",
-                "yellow_threshold_percent": 20,
-                "green_threshold_percent": 60,
+                "radar_detection_threshold_db": 4.0,
             }})
             persisted = manager.load_capture_settings()
-            self.assertEqual(persisted["yellow_threshold_percent"], 31.0)
-            self.assertEqual(persisted["green_threshold_percent"], 74.0)
+            self.assertEqual(persisted["radar_detection_threshold_db"], 9.5)
             self.assertTrue(manager._settings_sync_pending)
 
 
@@ -520,7 +564,7 @@ class OccupancyTests(unittest.TestCase):
 
     def test_chunk_labels_join_metadata_and_minute_vote(self):
         room = {"zones": [{"id": "bed", "label": "Bedroom", "x": 0.5, "y": 0.5, "width": 1.5, "depth": 1.5}]}
-        settings = {"auto_occupancy_label_enabled": True, "prediction_label_style": "presence", "people_count_label_enabled": True, "occupancy_vote_chunks": 2}
+        settings = {"auto_occupancy_label_enabled": True, "prediction_label_style": "presence", "people_count_label_enabled": True}
         chunks = []
         for index, label in enumerate(("occupied", "empty", "occupied")):
             tracked = {"id": 4, "position": [1.1, 1.1, 1]}
@@ -536,7 +580,7 @@ class OccupancyTests(unittest.TestCase):
         self.assertEqual(chunks[1]["join"]["previous_chunk_id"], "20260713_1200:00")
         summary = summarize_minute_results(chunks, settings, ["care", "participant-1"])
         self.assertEqual(summary["occupancy"]["label"], "occupied")
-        self.assertEqual(summary["occupancy"]["vote_required_chunks"], 2)
+        self.assertEqual(summary["occupancy"]["vote_required_chunks"], 1)
         self.assertEqual(summary["people_count"], 1)
 
 

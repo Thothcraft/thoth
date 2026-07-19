@@ -21,6 +21,52 @@ def range_angle_map_2_x_y_map_binary(polar_image, r, theta, x, y, sz):
     return output
 
 
+def serialize_xy_plot(gui_plot, location, score, detection=None):
+    """Return the browser representation of the native Example 2 XY plot.
+
+    Keep the dashboard coordinate transform beside the MMW-HAT processing
+    implementation. Consumers should call this function instead of copying
+    the GUI's axis reversal and map orientation rules.
+    """
+    native_map = np.asarray(gui_plot["map"], dtype=float)
+    x_axis = np.asarray(gui_plot["x_axis"], dtype=float)
+    y_axis = np.asarray(gui_plot["y_axis"], dtype=float)
+    encoded = np.rint(np.clip(native_map, 0.0, 1.0) * 255.0).astype(np.uint8)
+    active = np.argwhere(encoded > 0)
+    rows, columns = native_map.shape
+    safe_location = [
+        float(value) if np.isfinite(value) else None
+        for value in np.asarray(location, dtype=float)
+    ]
+    safe_score = float(score) if np.isfinite(score) else None
+    return {
+        "rows": int(rows),
+        "columns": int(columns),
+        "values_sparse": [
+            [int(row * columns + column), int(encoded[row, column])]
+            for row, column in active
+        ],
+        "x_axis": x_axis.round(4).tolist(),
+        "y_axis": y_axis.round(4).tolist(),
+        "levels": [0.0, 1.0],
+        "buffer_orientation": "native_example_2",
+        "location": safe_location,
+        "score": safe_score,
+        "detection": dict(detection or {}),
+        "playback": {
+            "x": y_axis[::-1].round(4).tolist(),
+            "y": x_axis[::-1].round(4).tolist(),
+            "z_shape": [int(rows), int(columns)],
+            "z_sparse": [
+                [int(rows - 1 - row), int(columns - 1 - column), round(float(encoded[row, column]) / 255.0, 4)]
+                for row, column in active
+            ],
+            "coordinate_space": "example2_sensor_local",
+            "native_pipeline": True,
+        },
+    }
+
+
 class SigProc:
     def __init__(self, processing_config_fn, radar_config):
         with open(processing_config_fn, 'r') as file:

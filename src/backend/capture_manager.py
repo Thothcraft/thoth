@@ -577,7 +577,7 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
                     "present" if latest["state"] == "occupied" else "absent",
                 ]
         elif isinstance(manifest, dict) and manifest.get("capture_finished"):
-            labels = ["no-radar-data"]
+            labels = ["empty", "absent", "radar-missing"]
         else:
             labels = ["collecting"]
 
