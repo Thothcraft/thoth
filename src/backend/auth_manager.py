@@ -68,6 +68,10 @@ class AuthManager:
             token = str(auth_data.get('token') or '').strip()
             token_data = _decode_unverified_jwt(token)
             expiry = datetime.utcfromtimestamp(token_data['exp']) if token_data.get('exp') else None
+            if expiry is None:
+                logger.info("Saved authentication token has no expiry")
+                self.logout()
+                return
             if expiry and datetime.utcnow() >= expiry:
                 logger.info("Saved authentication token expired")
                 self.logout()
@@ -91,6 +95,9 @@ class AuthManager:
 
         except Exception as e:
             logger.error(f"Error loading auth data: {e}")
+            # A malformed or otherwise unusable token must not remain in the
+            # runtime config, where the registration scheduler would retry it.
+            self.logout()
 
     def _save_auth_data(self) -> None:
         """Save authentication data to disk."""
@@ -132,6 +139,7 @@ class AuthManager:
         # Check if token is expired
         if self.token_expiry and datetime.utcnow() >= self.token_expiry:
             logger.info("Authentication token expired")
+            self.logout()
             return False
 
         return True
@@ -164,13 +172,29 @@ class AuthManager:
             Exception: If login fails
         """
         import requests
+        from requests.adapters import HTTPAdapter
         from requests.exceptions import RequestException
+        from urllib3.util.retry import Retry
 
         if not self.config.BRAIN_SERVER_URL:
             raise Exception("Brain server URL not configured")
 
         try:
-            response = requests.post(
+            # Railway may need several seconds to wake after an idle period.
+            # Keep connection failures bounded, but allow a cold login request
+            # enough time to complete.
+            client = requests.Session()
+            client.mount('https://', HTTPAdapter(max_retries=Retry(
+                total=1,
+                connect=1,
+                read=0,
+                status=1,
+                backoff_factor=0.4,
+                status_forcelist=(502, 503, 504),
+                allowed_methods=frozenset({'POST'}),
+                raise_on_status=False,
+            )))
+            response = client.post(
                 f"{self.config.BRAIN_SERVER_URL}/api/token",
                 json={
                     'username': username,
@@ -180,7 +204,7 @@ class AuthManager:
                     'accept': 'application/json',
                     'Content-Type': 'application/json'
                 },
-                timeout=10
+                timeout=(5, 35),
             )
 
             if response.status_code == 200:
@@ -201,6 +225,9 @@ class AuthManager:
                     'scopes': token_data.get('scopes', [])
                 }
 
+                self.config.USER_AUTH_TOKEN = self.token
+                self.config.BRAIN_AUTH_TOKEN = self.token
+
                 # Save auth data
                 self._save_auth_data()
 
@@ -213,7 +240,11 @@ class AuthManager:
                     'expires_in': (self.token_expiry - datetime.utcnow()).total_seconds()
                 }
             else:
-                error_msg = f"Login failed: {response.status_code} - {response.text}"
+                try:
+                    detail = response.json().get('detail')
+                except (ValueError, AttributeError):
+                    detail = None
+                error_msg = str(detail or f"Brain login returned HTTP {response.status_code}")
                 logger.error(error_msg)
                 raise Exception(error_msg)
 
@@ -221,10 +252,8 @@ class AuthManager:
             error_msg = f"Error connecting to Brain server: {str(e)}"
             logger.error(error_msg)
             raise Exception(error_msg)
-        except Exception as e:
-            error_msg = f"Error during login: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            raise Exception(error_msg)
+        except Exception:
+            raise
 
     def refresh_auth_token(self) -> bool:
         """Refresh the authentication token using the refresh token.
@@ -258,6 +287,8 @@ class AuthManager:
                 # Update auth state
                 self.token = result['access_token']
                 self.token_expiry = datetime.utcfromtimestamp(token_data['exp'])
+                self.config.USER_AUTH_TOKEN = self.token
+                self.config.BRAIN_AUTH_TOKEN = self.token
 
                 # Save the new refresh token if provided
                 if 'refresh_token' in result:
@@ -288,6 +319,10 @@ class AuthManager:
         self.refresh_token = None
         self.token_expiry = None
         self.user_info = None
+        # The scheduler reads these class attributes directly. Clearing only
+        # auth.json would leave an expired bearer token active until restart.
+        self.config.USER_AUTH_TOKEN = ''
+        self.config.BRAIN_AUTH_TOKEN = ''
 
         # Remove auth file
         try:
