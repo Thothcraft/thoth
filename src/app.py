@@ -13,7 +13,9 @@ from pathlib import Path
 THOTH_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(THOTH_ROOT / "src"))
 os.environ.setdefault("THOTH_ROOT", str(THOTH_ROOT))
-os.environ.setdefault("FLASK_PORT", "5000")
+# The device dashboard has a documented, stable LAN port. Keep a separate
+# opt-in override so a legacy FLASK_PORT value in .env cannot silently move it.
+os.environ["FLASK_PORT"] = os.environ.get("THOTH_DASHBOARD_PORT", "5000")
 
 from backend.app import app, device_manager, socketio  # noqa: E402
 from backend.config import Config  # noqa: E402

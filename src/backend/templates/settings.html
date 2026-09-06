@@ -84,6 +84,20 @@
         <label class="mt-3 flex items-center justify-between gap-4 text-sm text-slate-700"><span>Add numeric people-count labels</span><input name="people_count_label_enabled" type="checkbox" {% if device_settings.people_count_label_enabled %}checked{% endif %}></label>
       </section>
 
+      {% if csi_devices %}
+      <section class="rounded-xl border border-slate-300 bg-slate-50 p-4">
+        <span class="block text-base font-semibold text-slate-950">CSI receiver device IDs</span>
+        <span class="mt-1 block text-sm text-slate-600">These persistent IDs are written beside each receiver CSV in every minute manifest.</span>
+        <div class="mt-3 grid gap-3">
+          {% for port in csi_devices %}
+          <label class="text-sm text-slate-700"><span class="font-mono text-xs">{{ port }}</span>
+            <input data-csi-port="{{ port }}" value="{{ device_settings.csi_device_ids.get(port, 'csi-' ~ loop.index) if device_settings.csi_device_ids else 'csi-' ~ loop.index }}" class="mt-1 w-full rounded-lg border border-slate-400 bg-white px-3 py-2 text-slate-950" placeholder="csi-{{ loop.index }}">
+          </label>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
+
       <label class="flex items-start justify-between gap-4 rounded-xl border border-slate-300 bg-slate-50 p-4">
         <span>
           <span class="block text-base font-semibold text-slate-950">Automatic occupancy labels</span>
@@ -130,6 +144,7 @@ document.getElementById('settings-form').addEventListener('submit', async (event
   payload.labels = event.target.labels.value.split(',').map((item) => item.trim()).filter(Boolean);
   payload.prediction_label_style = event.target.prediction_label_style.value;
   payload.people_count_label_enabled = event.target.people_count_label_enabled.checked;
+  payload.csi_device_ids = Object.fromEntries([...event.target.querySelectorAll('[data-csi-port]')].map((input) => [input.dataset.csiPort, input.value.trim()]).filter(([, value]) => value));
   payload.home_assistant_enabled = event.target.home_assistant_enabled.checked;
   payload.home_assistant_base_url = event.target.home_assistant_base_url.value;
   payload.home_assistant_entity_id = event.target.home_assistant_entity_id.value;

@@ -47,9 +47,9 @@
                     <button type="button" id="reload-video" class="rounded-lg border border-slate-200 px-3 py-1.5 text-slate-700 hover:bg-slate-50">
                         Refresh
                     </button>
-                    <a href="{{ video_url }}" target="_blank" class="rounded-lg border border-slate-200 px-3 py-1.5 text-slate-700 hover:bg-slate-50">
+                    {% if has_mp4 %}<a href="{{ video_url }}" target="_blank" class="rounded-lg border border-slate-200 px-3 py-1.5 text-slate-700 hover:bg-slate-50">
                         Open MP4
-                    </a>
+                    </a>{% endif %}
                 </div>
             </div>
         </div>

@@ -70,8 +70,16 @@ from backend.capture_manager import (
     minute_metrics,
     cleanup_old_minutes,
     zip_minute_folder,
+    stream_minute_folders,
     update_minute_labels,
     preview_text,
+)
+from backend.capture_container import (
+    csi_average_series as container_csi_average_series,
+    first_camera_frame,
+    radar_bytes as container_radar_bytes,
+    read_camera_frame,
+    read_capture_metadata,
 )
 
 THOTH_ROOT = Path(__file__).resolve().parents[2]
@@ -291,7 +299,11 @@ def _radar_setting() -> Optional[Dict[str, Any]]:
 
 
 def _iter_radar_frames(path: Path):
-    with open(path, 'rb') as handle:
+    if path.suffix.lower() == '.npz':
+        handle_context = io.BytesIO(container_radar_bytes(path))
+    else:
+        handle_context = open(path, 'rb')
+    with handle_context as handle:
         while True:
             version_bytes = handle.read(4)
             if not version_bytes or len(version_bytes) < 4:
@@ -349,6 +361,11 @@ def _parse_csi_payload(raw: str) -> List[float]:
 def _parse_csi_average_series(path: Path, limit: int = 2400) -> List[float]:
     if not path.exists():
         return []
+    if path.suffix.lower() == '.npz':
+        try:
+            return container_csi_average_series(path, limit=limit)
+        except Exception:
+            return []
 
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as handle:
@@ -462,16 +479,29 @@ def _current_live_video_path() -> Optional[Path]:
 def _best_live_minute_for_kind(kind: str) -> tuple[Optional[Path], Dict[str, Optional[Path]]]:
     """Return the best available minute folder and file map for a live kind."""
     def _has_kind(files: Dict[str, Optional[Path]]) -> bool:
+        container = files.get('container')
+        container_info: Dict[str, Any] = {}
+        if container and container.exists():
+            try:
+                seconds = read_capture_metadata(container).get('seconds') or []
+                container_info = {
+                    'camera': sum(int(item.get('camera_frames') or 0) for item in seconds if isinstance(item, dict)),
+                    'csi': sum(int(item.get('csi_samples') or 0) for item in seconds if isinstance(item, dict)),
+                    'radar': sum(int(item.get('radar_samples') or 0) for item in seconds if isinstance(item, dict)),
+                }
+            except Exception:
+                container_info = {}
         if kind == 'video':
-            return bool(files.get('video') and files['video'].exists())
+            return bool((files.get('video') and files['video'].exists()) or files.get('camera_images') or container_info.get('camera'))
         if kind == 'csi':
             return bool(
                 (files.get('csi_csv') and files['csi_csv'].exists())
                 or (files.get('csi_timestamped') and files['csi_timestamped'].exists())
                 or (files.get('csi_serial') and files['csi_serial'].exists())
+                or container_info.get('csi')
             )
         if kind == 'radar':
-            return bool(files.get('radar') and files['radar'].exists())
+            return bool((files.get('radar') and files['radar'].exists()) or container_info.get('radar'))
         return False
 
     current = current_minute()
@@ -945,7 +975,7 @@ def get_capture_overview() -> Dict[str, Any]:
     latest = minutes[0] if minutes else None
     return {
         "capture_dir": Config.CAPTURE_DATA_DIR,
-        "keep_minutes": Config.CAPTURE_KEEP_MINUTES,
+        "max_disk_percent": Config.CAPTURE_MAX_DISK_PERCENT,
         "minute_count": len(minutes),
         "latest_minute": latest,
     }
@@ -1143,6 +1173,13 @@ def register_device_periodically():
         if device_manager.pairing_required:
             logger.debug("Device registration paused until thothHUB pairing is completed")
             return False
+        # Registration establishes identity and ownership. A single heartbeat
+        # loop maintains presence, inventory and settings after that; posting
+        # both every ten seconds doubled traffic and repeatedly retried identity.
+        if device_manager.registered and device_manager.auth_token:
+            if not (device_manager.heartbeat_thread and device_manager.heartbeat_thread.is_alive()):
+                device_manager.start_heartbeat(Config.HEARTBEAT_INTERVAL)
+            return True
 
         success, message = device_manager.register_device(auth_token.strip())
         if success:
@@ -1195,7 +1232,7 @@ device_scheduler.add_job(
     replace_existing=True
 )
 device_scheduler.add_job(
-    lambda: cleanup_old_minutes(Config.CAPTURE_KEEP_MINUTES),
+    lambda: cleanup_old_minutes(max_disk_percent=Config.CAPTURE_MAX_DISK_PERCENT),
     'interval',
     minutes=10,
     id='capture_cleanup',
@@ -1205,7 +1242,7 @@ device_scheduler.start()
 
 # Load registration info if available
 device_manager.load_registration_info()
-cleanup_old_minutes(Config.CAPTURE_KEEP_MINUTES)
+cleanup_old_minutes(max_disk_percent=Config.CAPTURE_MAX_DISK_PERCENT)
 if not auth_manager.is_authenticated() and not getattr(Config, 'BRAIN_AUTH_TOKEN', None):
     try:
         device_manager.mark_device_offline()
@@ -1789,6 +1826,7 @@ def settings():
             'prediction_label_style': payload.get('prediction_label_style', 'occupancy'),
             'people_count_label_enabled': str(payload.get('people_count_label_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
             'sleep_study_enabled': str(payload.get('sleep_study_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
+            'csi_device_ids': payload.get('csi_device_ids', {}),
         }
         try:
             saved = device_manager.save_device_settings(updates)
@@ -1814,6 +1852,7 @@ def settings():
         username=session.get('username'),
         device_settings=device_manager.get_device_settings(),
         home_assistant=load_home_assistant_config(),
+        csi_devices=next((sensor.get('devices', []) for sensor in detect_sensor_inventory() if sensor.get('key') == 'esp32_csi'), []),
     )
 
 
@@ -1837,6 +1876,23 @@ def api_home_assistant_test():
         return jsonify({'success': False, 'message': 'Authentication required'}), 401
     result = test_home_assistant_connection()
     return jsonify(result), (200 if result.get('success') else 502)
+
+
+@app.route('/api/device/identity', methods=['PUT'])
+def api_device_identity():
+    payload = request.get_json(silent=True) or {}
+    try:
+        device_name = device_manager.save_device_name(payload.get('device_id') or payload.get('device_name'))
+    except (OSError, ValueError, TypeError) as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 422
+    return jsonify({'success': True, 'device_id': device_name, 'device_name': device_name})
+
+
+@app.route('/api/sensors', methods=['GET'])
+def api_sensor_inventory():
+    """Return hot-plug-aware sensor inventory for dashboard polling."""
+    sensors = detect_sensor_inventory()
+    return jsonify({'success': True, 'sensors': sensors})
 
 
 @app.route('/api/internal/capture-chunk', methods=['POST'])
@@ -2073,6 +2129,10 @@ def capture_detail(minute):
         chunk.pop("xy_map", None)
     metrics = minute_metrics(minute_dir)
     video_preview = f"/api/captures/{minute}/file/video" if files.get("video") else None
+    camera_preview = (
+        f"/api/captures/{minute}/video/frame"
+        if files.get("camera_images") or files.get("container") else None
+    )
     radar_preview = preview_text(files.get("radar"), 12000)
     csi_preview = preview_text(files.get("csi_timestamped") or files.get("csi_csv"), 12000)
     serial_preview = preview_text(files.get("csi_serial"), 12000)
@@ -2085,6 +2145,7 @@ def capture_detail(minute):
         files=files,
         capture_metrics=metrics,
         video_url=video_preview,
+        camera_frame_url=camera_preview,
         manifest_url=url_for('api_capture_file', minute=minute_dir.name, kind='manifest'),
         xy_tracking_url=url_for('api_capture_radar_data', minute=minute_dir.name, plot='xy-tracking'),
         csi_data_url=url_for('api_capture_csi_data', minute=minute_dir.name),
@@ -2124,6 +2185,11 @@ def download_capture_minute(minute):
 
 def _requested_capture_minutes() -> tuple[list[str], list[Path], tuple[Response, int] | None]:
     payload = request.get_json(silent=True) or {}
+    if not request.is_json and request.form.get('minutes'):
+        try:
+            payload = {'minutes': json.loads(request.form['minutes'])}
+        except (TypeError, json.JSONDecodeError):
+            payload = {'minutes': []}
     requested = payload.get('minutes', [])
     if not isinstance(requested, list):
         return [], [], (jsonify({'status': 'error', 'message': 'minutes must be a list'}), 400)
@@ -2150,36 +2216,21 @@ def _requested_capture_minutes() -> tuple[list[str], list[Path], tuple[Response,
 
 @app.route('/api/captures/bulk-download', methods=['POST'])
 def bulk_download_captures():
-    """Download selected capture folders in one ZIP archive."""
+    """Stream selected capture folders in one ZIP archive."""
     names, minute_dirs, error = _requested_capture_minutes()
     if error:
         return error
 
-    temp = tempfile.NamedTemporaryFile(prefix='thoth-captures-', suffix='.zip', delete=False)
-    zip_path = Path(temp.name)
-    temp.close()
-    try:
-        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-            for minute_dir in minute_dirs:
-                for path in sorted(minute_dir.rglob('*')):
-                    if path.is_file():
-                        archive.write(path, arcname=str(Path(minute_dir.name) / path.relative_to(minute_dir)))
-    except Exception:
-        zip_path.unlink(missing_ok=True)
-        raise
-
-    @after_this_request
-    def cleanup_bulk_archive(response):
-        zip_path.unlink(missing_ok=True)
-        return response
-
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    return send_file(
-        zip_path,
-        as_attachment=True,
-        download_name=f'thoth-captures-{timestamp}.zip',
+    return Response(
+        stream_minute_folders(minute_dirs),
         mimetype='application/zip',
-        conditional=True,
+        headers={
+            'Content-Disposition': f'attachment; filename="thoth-captures-{timestamp}.zip"',
+            'Cache-Control': 'no-store',
+            'X-Archive-Mode': 'streaming',
+        },
+        direct_passthrough=True,
     )
 
 
@@ -2240,7 +2291,7 @@ def api_list_captures():
         'count': len(minutes),
         'active_minute': current_minute().name if current_minute() else None,
         'capture_dir': Config.CAPTURE_DATA_DIR,
-        'keep_minutes': Config.CAPTURE_KEEP_MINUTES,
+        'max_disk_percent': Config.CAPTURE_MAX_DISK_PERCENT,
     })
 
 
@@ -2264,7 +2315,10 @@ def api_capture_detail(minute):
         response.headers['Cache-Control'] = 'no-store, max-age=0'
         return response
     metrics = minute_metrics(minute_dir)
-    detail['files_on_disk'] = {key: str(path) if path else None for key, path in files.items()}
+    detail['files_on_disk'] = {
+        key: ([str(path) for path in value] if isinstance(value, list) else str(value) if value else None)
+        for key, value in files.items()
+    }
     detail['metrics'] = metrics
     return jsonify({'status': 'success', 'capture': detail})
 
@@ -2326,11 +2380,20 @@ def api_capture_video_frame(minute):
 
     files = capture_files(minute_dir)
     video_path = files.get('video')
-    if not video_path or not video_path.exists():
-        abort(404, description='No video available for this minute')
-
     try:
-        jpeg_bytes = _render_video_frame(video_path)
+        requested_second = max(0, int(request.args.get('second', 0)))
+        container = files.get('container')
+        if container and container.exists():
+            jpeg_bytes = read_camera_frame(container, requested_second) or first_camera_frame(container)
+            if not jpeg_bytes:
+                abort(404, description='No camera frame available for this minute')
+        elif files.get('camera_images'):
+            images = files['camera_images']
+            jpeg_bytes = images[min(requested_second, len(images) - 1)].read_bytes()
+        elif video_path and video_path.exists():
+            jpeg_bytes = _render_video_frame(video_path)
+        else:
+            abort(404, description='No camera data available for this minute')
     except Exception as exc:
         logger.exception(f'Failed to render minute video frame {minute}: {exc}')
         abort(500, description=str(exc))
@@ -2356,6 +2419,7 @@ def api_capture_file(minute, kind):
         'manifest': files.get('manifest'),
         'predictions': files.get('predictions'),
         'log': files.get('video_log'),
+        'container': files.get('container'),
     }
     file_path = mapping.get(kind)
     if not file_path or not file_path.exists():
@@ -2372,6 +2436,8 @@ def api_capture_file(minute, kind):
         mime = 'application/x-ndjson'
     elif file_path.suffix == '.log':
         mime = 'text/plain'
+    elif file_path.suffix == '.npz':
+        mime = 'application/x-npz'
 
     return send_file(file_path, as_attachment=False, mimetype=mime, conditional=True)
 
@@ -2387,7 +2453,7 @@ def api_capture_csi_plot(minute):
         abort(404, description='Minute folder not found')
 
     files = capture_files(minute_dir)
-    path = files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial')
+    path = files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial') or files.get('container')
     if not path or not path.exists():
         abort(404, description='No CSI data available')
 
@@ -2404,7 +2470,7 @@ def api_capture_csi_data(minute):
         abort(404, description='Minute folder not found')
 
     files = capture_files(minute_dir)
-    path = files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial')
+    path = files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial') or files.get('container')
     if not path or not path.exists():
         abort(404, description='No CSI data available')
 
@@ -2428,7 +2494,7 @@ def api_capture_radar_plot(minute, plot):
         abort(404, description=f'Unsupported radar plot kind: {plot}')
 
     files = capture_files(minute_dir)
-    radar_path = files.get('radar')
+    radar_path = files.get('radar') or files.get('container')
     if not radar_path or not radar_path.exists():
         abort(404, description='No radar data available')
 
@@ -2527,14 +2593,15 @@ def upload_capture_minute(minute):
     skipped = []
     import base64
 
+    has_container = (minute_dir / 'capture.npz').exists()
     all_files = sorted(
         path for path in minute_dir.iterdir()
         if path.is_file()
         and (
-            path.name == 'manifest.json'
-            or path.name == 'wifi_csi.csv'
-            or (path.name.startswith('radar_') and path.suffix == '.bin')
-            or (path.name.startswith('camera_') and path.suffix.lower() in {'.jpg', '.jpeg'})
+            path.name in {'manifest.json', 'capture.npz', 'xy-tracking.json', 'predictions.json'}
+            or (not has_container and path.name == 'wifi_csi.csv')
+            or (not has_container and path.name.startswith('radar_') and path.suffix == '.bin')
+            or (not has_container and path.name.startswith('camera_') and path.suffix.lower() in {'.jpg', '.jpeg'})
         )
     )
 
@@ -2548,6 +2615,8 @@ def upload_capture_minute(minute):
             key = 'predictions'
         elif path.name == 'manifest.json':
             key = 'manifest'
+        elif path.name == 'capture.npz':
+            key = 'synchronized-container'
         elif path.name.startswith('radar_') or path.name.startswith('mmw_radar_raw_'):
             key = 'radar-bin'
         elif path.name.startswith('mmw_radar_xy_'):
@@ -2570,6 +2639,8 @@ def upload_capture_minute(minute):
                 content_type = 'application/json'
             elif suffix == '.jsonl':
                 content_type = 'application/x-ndjson'
+            elif suffix == '.npz':
+                content_type = 'application/x-npz'
             else:
                 content_type = 'application/octet-stream'
             headers = {
@@ -2643,9 +2714,11 @@ def live_capture_stream(kind):
         abort(404, description=f'Unsupported live stream kind: {kind}')
 
     minute_dir, files = _best_live_minute_for_kind(kind)
-    has_video = bool(files.get('video') and files['video'].exists()) if minute_dir else False
-    has_csi = bool(files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial'))
-    has_radar = bool(files.get('radar'))
+    summary = minute_summary(minute_dir) if minute_dir else {}
+    summary_files = summary.get('files') if isinstance(summary.get('files'), dict) else {}
+    has_video = bool(summary_files.get('video'))
+    has_csi = bool(summary_files.get('csi'))
+    has_radar = bool(summary_files.get('radar'))
     live_metrics = minute_metrics(minute_dir) if minute_dir else None
 
     return render_template(
@@ -2659,6 +2732,7 @@ def live_capture_stream(kind):
         csi_data_url=url_for('api_live_capture_csi_data'),
         xy_tracking_url=url_for('api_live_capture_radar_data', plot='xy-tracking'),
         has_video=has_video,
+        has_mp4=bool(files.get('video') and files['video'].exists()) if minute_dir else False,
         has_csi=has_csi,
         has_radar=has_radar,
     )
@@ -2680,11 +2754,22 @@ def api_live_capture_video_frame():
     """Render a live JPEG preview from the current or latest video minute."""
     minute_dir, files = _best_live_minute_for_kind('video')
     video_path = files.get('video') if files else None
-    if not minute_dir or not video_path or not video_path.exists():
+    if not minute_dir:
         abort(404, description='No live video available')
 
     try:
-        jpeg_bytes = _render_video_frame(video_path)
+        images = files.get('camera_images') or []
+        container = files.get('container')
+        if images:
+            jpeg_bytes = images[-1].read_bytes()
+        elif container and container.exists():
+            jpeg_bytes = first_camera_frame(container)
+            if not jpeg_bytes:
+                abort(404, description='No live camera frame available')
+        elif video_path and video_path.exists():
+            jpeg_bytes = _render_video_frame(video_path)
+        else:
+            abort(404, description='No live camera frame available')
     except Exception as exc:
         logger.exception(f"Failed to render live video frame: {exc}")
         abort(500, description=str(exc))
@@ -2711,7 +2796,7 @@ def api_live_capture_csi_data():
     if not minute_dir:
         abort(404, description='No live capture minute available')
 
-    path = files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial')
+    path = files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial') or files.get('container')
     if not path or not path.exists():
         abort(404, description='No CSI data available')
 
@@ -2730,7 +2815,7 @@ def api_live_capture_csi_plot():
     if not minute_dir:
         abort(404, description='No live capture minute available')
 
-    path = files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial')
+    path = files.get('csi_csv') or files.get('csi_timestamped') or files.get('csi_serial') or files.get('container')
     if not path or not path.exists():
         abort(404, description='No CSI data available')
 
@@ -2775,7 +2860,7 @@ def api_live_capture_plot(plot):
     if not minute_dir:
         abort(404, description='No live capture minute available')
 
-    radar_path = files.get('radar')
+    radar_path = files.get('radar') or files.get('container')
     if not radar_path or not radar_path.exists():
         abort(404, description='No radar data available')
 

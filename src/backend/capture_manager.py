@@ -9,16 +9,24 @@ import os
 import re
 import shutil
 import math
+import queue
 import subprocess
 import tempfile
+import threading
 import zipfile
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .config import Config
+from .capture_container import (
+    CONTAINER_FILENAME,
+    csi_average_series as _container_csi_average_series,
+    read_capture_metadata,
+    update_capture_metadata,
+)
 
 MINUTE_DIR_RE = re.compile(r"^\d{8}_\d{4}$")
 TIMESTAMP_FMT = "%Y%m%d_%H%M"
@@ -392,13 +400,18 @@ def list_minute_folders() -> List[Path]:
     return folders
 
 
-def _file_map(minute_dir: Path) -> Dict[str, Path]:
+def _file_map(minute_dir: Path) -> Dict[str, Any]:
     files = {item.name: item for item in minute_dir.iterdir() if item.is_file()}
-    csi_csv = files.get("wifi_csi.csv") or files.get("wifi_csi_raw.csv")
+    csi_csvs = sorted(
+        [item for name, item in files.items() if re.match(r"^wifi_csi(?:_\d+)?\.csv$", name)],
+        key=lambda item: item.name,
+    )
+    csi_csv = files.get("wifi_csi.csv") or (csi_csvs[0] if csi_csvs else None) or files.get("wifi_csi_raw.csv")
     csi_timestamped = files.get("wifi_csi_timestamped.csv")
     csi_serial = files.get("wifi_csi_serial_all.jsonl")
     xy_tracking = files.get("xy-tracking.json")
     result = {
+        "container": files.get(CONTAINER_FILENAME),
         "manifest": files.get("manifest.json"),
         "predictions": files.get("predictions.json"),
         "xy_tracking": xy_tracking,
@@ -410,6 +423,7 @@ def _file_map(minute_dir: Path) -> Dict[str, Path]:
         "csi_timestamped": csi_timestamped,
         "csi_serial": csi_serial,
         "csi": csi_timestamped or csi_csv or csi_serial,
+        "csi_csvs": csi_csvs,
     }
     radar_candidates = sorted(
         [
@@ -449,7 +463,7 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
         expected_chunks = max(len(radar_bins), len(radar_csvs), len((predictions or {}).get("timeline") or []), 6)
     expected_chunks = max(1, expected_chunks)
 
-    stored_chunks = len(radar_bins)
+    container_present = bool(files.get("container") and files["container"].exists())
     prediction_entries = {
         int(entry.get("chunk_index")): entry
         for entry in ((predictions or {}).get("timeline") or [])
@@ -464,6 +478,16 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
                 for entry in (radar_output.get("chunks") or [])
                 if isinstance(entry, dict) and str(entry.get("chunk_index", "")).isdigit()
             }
+    stored_chunks = len(radar_bins)
+    if container_present:
+        stored_chunks = sum(
+            int(entry.get("chunk_frames") or entry.get("sample_count") or 0) > 0
+            for entry in manifest_chunks.values()
+        )
+        if not manifest_chunks:
+            container_info = manifest.get("container") if isinstance(manifest, dict) else None
+            if isinstance(container_info, dict) and int(container_info.get("radar_samples") or 0) > 0:
+                stored_chunks = int(container_info.get("second_count") or expected_chunks)
     analyzed_chunks = sum(
         str(entry.get("status") or "") in {"occupied", "empty"}
         for entry in manifest_chunks.values()
@@ -552,6 +576,21 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
     files = _file_map(minute_dir)
     stat = minute_dir.stat()
     manifest = _load_manifest(minute_dir)
+    container_info = manifest.get("container") if isinstance(manifest, dict) and isinstance(manifest.get("container"), dict) else {}
+    container_path = files.get("container")
+    if container_path and container_path.exists() and not container_info:
+        try:
+            metadata = read_capture_metadata(container_path)
+            seconds = metadata.get("seconds") if isinstance(metadata.get("seconds"), list) else []
+            container_info = {
+                "second_count": len(seconds),
+                "camera_frames": sum(int(item.get("camera_frames") or 0) for item in seconds if isinstance(item, dict)),
+                "radar_samples": sum(int(item.get("radar_samples") or 0) for item in seconds if isinstance(item, dict)),
+                "csi_samples": sum(int(item.get("csi_samples") or 0) for item in seconds if isinstance(item, dict)),
+                "sense_hat_samples": sum(int(item.get("sense_hat_samples") or 0) for item in seconds if isinstance(item, dict)),
+            }
+        except Exception:
+            container_info = {}
     seconds_recorded = _manifest_seconds(manifest)
     progress = _minute_progress(manifest, files, seconds_recorded)
     folder_label = _label_for_minute_dir(minute_dir)
@@ -598,15 +637,17 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
         "occupancy": ((manifest.get("minute_summary") or {}).get("occupancy") or manifest.get("auto_occupancy_label")) if isinstance(manifest, dict) else None,
         "predictions": bool(files["predictions"] and files["predictions"].exists()),
         "files": {
-            "video": bool((files["video"] and files["video"].exists()) or files.get("camera_images")),
-            "radar": bool(files["radar"] and files["radar"].exists()),
+            "container": bool(container_path and container_path.exists()),
+            "video": bool((files["video"] and files["video"].exists()) or files.get("camera_images") or int(container_info.get("camera_frames") or 0)),
+            "radar": bool((files["radar"] and files["radar"].exists()) or int(container_info.get("radar_samples") or 0)),
             "xy_tracking": bool(files.get("xy_tracking") and files["xy_tracking"].exists()),
-            "csi": bool((files["csi_csv"] and files["csi_csv"].exists()) or (files["csi_timestamped"] and files["csi_timestamped"].exists()) or (files["csi_serial"] and files["csi_serial"].exists())),
-            "sense_hat": bool(files["sense_hat"] and files["sense_hat"].exists()),
+            "csi": bool((files["csi_csv"] and files["csi_csv"].exists()) or (files["csi_timestamped"] and files["csi_timestamped"].exists()) or (files["csi_serial"] and files["csi_serial"].exists()) or int(container_info.get("csi_samples") or 0)),
+            "sense_hat": bool((files["sense_hat"] and files["sense_hat"].exists()) or int(container_info.get("sense_hat_samples") or 0)),
             "manifest": bool(files["manifest"] and files["manifest"].exists()),
             "predictions": bool(files["predictions"] and files["predictions"].exists()),
         },
         "sizes": {
+            "container": container_path.stat().st_size if container_path and container_path.exists() else 0,
             "video": sum(path.stat().st_size for path in (files.get("camera_images") or [])) or (files["video"].stat().st_size if files["video"] and files["video"].exists() else 0),
             "radar": sum(path.stat().st_size for path in (files.get("radar_bins") or [])),
             "xy_tracking": files["xy_tracking"].stat().st_size if files.get("xy_tracking") and files["xy_tracking"].exists() else 0,
@@ -625,13 +666,17 @@ def minute_metrics(minute_dir: Path) -> Dict[str, object]:
     manifest = _load_manifest(minute_dir)
     seconds_recorded = _manifest_seconds(manifest)
     progress = _minute_progress(manifest, files, seconds_recorded)
+    container_path = files.get("container")
+    container_info = manifest.get("container") if isinstance(manifest, dict) and isinstance(manifest.get("container"), dict) else {}
 
     video_meta = _probe_video_metadata(files.get("video"))
     csi_path = files.get("csi_timestamped") or files.get("csi_csv") or files.get("csi_serial")
-    csi_points = _parse_csi_average_series(csi_path) if csi_path and csi_path.exists() else []
+    csi_points = _parse_csi_average_series(csi_path) if csi_path and csi_path.exists() else (
+        _container_csi_average_series(container_path) if container_path and container_path.exists() else []
+    )
     csi_width = _csi_subcarrier_count(csi_path) if csi_path and csi_path.exists() else None
     radar_path = files.get("radar")
-    radar_frames = 0
+    radar_frames = int(container_info.get("radar_samples") or 0)
     radar_sampled = 0
     radar_shape = None
     radar_fps = None
@@ -672,24 +717,24 @@ def minute_metrics(minute_dir: Path) -> Dict[str, object]:
             "codec": video_meta.get("codec"),
             "width": video_meta.get("width"),
             "height": video_meta.get("height"),
-            "frame_count": video_meta.get("frame_count"),
+            "frame_count": video_meta.get("frame_count") or int(container_info.get("camera_frames") or 0),
             "data_shape": video_meta.get("data_shape"),
-            "file_size": files["video"].stat().st_size if files["video"] and files["video"].exists() else 0,
+            "file_size": files["video"].stat().st_size if files["video"] and files["video"].exists() else (container_path.stat().st_size if container_path and int(container_info.get("camera_frames") or 0) else 0),
         },
         "csi": {
             "sample_count": len(csi_points),
             "subcarrier_count": csi_width,
             "effective_rate_hz": csi_fps,
             "data_shape": csi_shape,
-            "file_size": csi_path.stat().st_size if csi_path and csi_path.exists() else 0,
+            "file_size": csi_path.stat().st_size if csi_path and csi_path.exists() else (container_path.stat().st_size if container_path and int(container_info.get("csi_samples") or 0) else 0),
         },
         "radar": {
             "frame_count": radar_frames,
             "sampled_frames": radar_sampled,
             "effective_fps": radar_fps,
             "data_shape": radar_shape,
-            "file_size": radar_path.stat().st_size if radar_path and radar_path.exists() else 0,
-            "chunk_count": len(radar_paths),
+            "file_size": radar_path.stat().st_size if radar_path and radar_path.exists() else (container_path.stat().st_size if container_path and radar_frames else 0),
+            "chunk_count": len(radar_paths) or int(container_info.get("second_count") or 0),
             "chunk_seconds": progress.get("chunk_seconds"),
             "expected_chunks": progress.get("expected_chunks"),
             "storage_percent": progress.get("storage_percent"),
@@ -728,12 +773,9 @@ def current_minute() -> Optional[Path]:
     return folders[0] if folders else None
 
 
-def capture_files(minute_dir: Path) -> Dict[str, Optional[Path]]:
-    return {
-        key: value
-        for key, value in _file_map(minute_dir).items()
-        if isinstance(value, Path) or value is None
-    }
+def capture_files(minute_dir: Path) -> Dict[str, Any]:
+    """Return legacy assets plus the synchronized container and image lists."""
+    return _file_map(minute_dir)
 
 
 def preview_text(path: Optional[Path], limit: int = 20000) -> str:
@@ -782,24 +824,12 @@ def update_minute_labels(minute_dir: Path, labels: object, replace: bool = True)
                 merged.append(label)
 
     manifest["labels"] = merged
-    target_dir = minute_dir
-    root = _capture_root()
-    if replace:
-        if merged:
-            target_dir = root / merged[0] / minute_dir.name
-        else:
-            target_dir = root / minute_dir.name
-        if target_dir != minute_dir:
-            target_dir.parent.mkdir(parents=True, exist_ok=True)
-            if target_dir.exists():
-                raise FileExistsError(f"Target capture folder already exists: {target_dir}")
-            shutil.move(str(minute_dir), str(target_dir))
-            minute_dir = target_dir
-            manifest_path = minute_dir / "manifest.json"
-
     manifest["primary_label"] = merged[0] if merged else None
     manifest["relative_path"] = _relative_capture_path(minute_dir)
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    container_path = minute_dir / CONTAINER_FILENAME
+    if container_path.exists():
+        update_capture_metadata(container_path, {"labels": merged})
     return merged
 
 
@@ -823,6 +853,71 @@ def zip_minute_folder(minute_dir: Path) -> Path:
             if item.is_file():
                 archive.write(item, item.relative_to(minute_dir))
     return zip_path
+
+
+class _StreamingZipWriter:
+    """Non-seekable ZIP target with bounded buffering and cancellation."""
+
+    def __init__(self, chunks: "queue.Queue[object]", cancelled: threading.Event):
+        self.chunks = chunks
+        self.cancelled = cancelled
+
+    def write(self, data: bytes) -> int:
+        if not data:
+            return 0
+        while not self.cancelled.is_set():
+            try:
+                self.chunks.put(bytes(data), timeout=0.25)
+                return len(data)
+            except queue.Full:
+                continue
+        raise BrokenPipeError("Archive download was cancelled")
+
+    def flush(self) -> None:
+        return None
+
+
+def stream_minute_folders(minute_dirs: List[Path]) -> Iterator[bytes]:
+    """Stream capture folders as a ZIP without preparing a temporary archive."""
+    chunks: "queue.Queue[object]" = queue.Queue(maxsize=32)
+    cancelled = threading.Event()
+    finished = object()
+
+    def produce() -> None:
+        writer = _StreamingZipWriter(chunks, cancelled)
+        try:
+            # Sensor binaries and videos are already compressed or
+            # incompressible; ZIP_STORED removes the costly preparation pass.
+            with zipfile.ZipFile(writer, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+                for minute_dir in minute_dirs:
+                    for item in sorted(minute_dir.rglob("*")):
+                        if cancelled.is_set():
+                            return
+                        if item.is_file():
+                            archive.write(
+                                item,
+                                arcname=str(Path(minute_dir.name) / item.relative_to(minute_dir)),
+                            )
+        except BrokenPipeError:
+            pass
+        finally:
+            while not cancelled.is_set():
+                try:
+                    chunks.put(finished, timeout=0.25)
+                    break
+                except queue.Full:
+                    continue
+
+    producer = threading.Thread(target=produce, name="capture-zip-stream", daemon=True)
+    producer.start()
+    try:
+        while True:
+            chunk = chunks.get()
+            if chunk is finished:
+                break
+            yield chunk  # type: ignore[misc]
+    finally:
+        cancelled.set()
 
 
 def read_prediction_file(minute_dir: Path) -> Optional[Dict[str, object]]:
@@ -894,15 +989,33 @@ def collect_prediction_timelines() -> Dict[str, List[Dict[str, object]]]:
     return timelines
 
 
-def cleanup_old_minutes(keep: Optional[int] = None) -> Dict[str, object]:
-    keep = int(keep or Config.CAPTURE_KEEP_MINUTES)
+def cleanup_old_minutes(
+    keep: Optional[int] = None,
+    max_disk_percent: Optional[float] = None,
+) -> Dict[str, object]:
+    """Delete the oldest captures only after storage reaches its disk limit."""
+    del keep  # Retained for compatibility with older callers; no count cap.
+    threshold = min(99.0, max(1.0, float(
+        max_disk_percent if max_disk_percent is not None else Config.CAPTURE_MAX_DISK_PERCENT
+    )))
+    root = _capture_root()
     folders = list_minute_folders()
     removed: List[str] = []
-    if len(folders) <= keep:
-        return {"kept": len(folders), "removed": removed}
-
-    for minute_dir in folders[keep:]:
+    # The newest folder may still be recording. Reclaim completed history
+    # oldest-first while always preserving that active candidate.
+    candidates = list(reversed(folders[1:])) if len(folders) > 1 else []
+    usage = shutil.disk_usage(root)
+    percent_used = (usage.used / usage.total * 100.0) if usage.total else 0.0
+    while percent_used >= threshold and candidates:
+        minute_dir = candidates.pop(0)
         shutil.rmtree(minute_dir, ignore_errors=True)
         removed.append(minute_dir.name)
+        usage = shutil.disk_usage(root)
+        percent_used = (usage.used / usage.total * 100.0) if usage.total else 0.0
 
-    return {"kept": min(keep, len(folders)), "removed": removed}
+    return {
+        "kept": max(0, len(folders) - len(removed)),
+        "removed": removed,
+        "max_disk_percent": threshold,
+        "disk_percent": round(percent_used, 2),
+    }

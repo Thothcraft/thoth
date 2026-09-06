@@ -14,6 +14,7 @@ import time
 import threading
 import base64
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Any, Tuple, List
@@ -22,7 +23,10 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .capture_manager import list_minutes, list_minute_folders, capture_files, minute_summary, get_minute
+from .capture_manager import (
+    list_minutes, list_minute_folders, capture_files, minute_summary,
+    get_minute, update_minute_labels,
+)
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -45,7 +49,15 @@ class DeviceManager:
         self.session = self._create_session()
         self.stop_event = threading.Event()
         self.heartbeat_thread = None
+        self._device_name_sync_pending = False
         self.device_settings = self.load_device_settings()
+        self._migrate_legacy_device_name()
+        try:
+            identity_path = self._config_dir() / 'device_config.json'
+            identity = json.loads(identity_path.read_text(encoding='utf-8')) if identity_path.exists() else {}
+            self._device_name_sync_pending = bool(identity.get('device_name_sync_pending'))
+        except Exception:
+            self._device_name_sync_pending = False
         self._last_file_report_at = 0.0
         self._last_file_report_signature = None
         self._inventory_revision = int(time.time() * 1000)
@@ -258,7 +270,28 @@ class DeviceManager:
         self.device_settings = settings
         return settings
 
+    def _migrate_legacy_device_name(self) -> None:
+        """Move IDs saved by the old settings endpoint into identity storage."""
+        legacy_name = str(self.device_settings.get('device_name') or '').strip()
+        if not legacy_name:
+            return
+        config_path = self._config_dir() / 'device_config.json'
+        try:
+            config_data = json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+            if not isinstance(config_data, dict):
+                config_data = {}
+        except Exception:
+            config_data = {}
+        if not config_data.get('device_name_user_set'):
+            self.save_device_name(legacy_name)
+        self.device_settings.pop('device_name', None)
+        self._write_json_atomic(self._settings_path(), self.device_settings)
+
     def save_device_settings(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        updates = dict(updates or {})
+        device_name = updates.pop('device_name', None)
+        if device_name is not None:
+            self.save_device_name(device_name)
         processing_keys = {
             'labels',
             'sensors',
@@ -274,9 +307,10 @@ class DeviceManager:
             'prediction_label_style',
             'people_count_label_enabled',
             'sleep_study_enabled',
+            'csi_device_ids',
         }
-        capture_updates = {key: value for key, value in (updates or {}).items() if key in processing_keys}
-        device_updates = {key: value for key, value in (updates or {}).items() if key not in processing_keys}
+        capture_updates = {key: value for key, value in updates.items() if key in processing_keys}
+        device_updates = {key: value for key, value in updates.items() if key not in processing_keys}
         settings = self.load_device_settings()
         settings.update({k: self._coerce_setting_value(k, v) for k, v in device_updates.items()})
         self._write_json_atomic(self._settings_path(), settings)
@@ -406,6 +440,7 @@ class DeviceManager:
             'prediction_label_style': 'occupancy',
             'people_count_label_enabled': False,
             'sleep_study_enabled': False,
+            'csi_device_ids': {},
             'calibrations': {},
             'revision': 0,
             'updated_at': None,
@@ -464,6 +499,11 @@ class DeviceManager:
             'sleep_study_enabled': self._coerce_setting_value(
                 'sleep_study_enabled', source.get('sleep_study_enabled', False)
             ),
+            'csi_device_ids': {
+                str(port): str(device_id).strip()
+                for port, device_id in (source.get('csi_device_ids') or {}).items()
+                if str(port).strip() and str(device_id).strip()
+            } if isinstance(source.get('csi_device_ids'), dict) else {},
             'calibrations': source.get('calibrations') if isinstance(source.get('calibrations'), dict) else {},
             'revision': revision,
             'updated_at': str(updated_at) if updated_at else None,
@@ -529,6 +569,19 @@ class DeviceManager:
             return
         settings = result.get('capture_settings')
         data = result.get('data')
+        canonical_device_name = result.get('device_name')
+        if canonical_device_name is None and isinstance(data, dict):
+            canonical_device_name = data.get('device_name')
+        if canonical_device_name and not self._device_name_sync_pending:
+            try:
+                path = self._config_dir() / 'device_config.json'
+                config_data = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+                if not isinstance(config_data, dict):
+                    config_data = {}
+                config_data.update({'device_id': self.device_id, 'device_name': str(canonical_device_name)})
+                self._write_json_atomic(path, config_data)
+            except Exception as exc:
+                logger.warning("Unable to persist canonical device ID: %s", exc)
         if settings is None and isinstance(data, dict):
             settings = data.get('capture_settings')
         if isinstance(settings, dict):
@@ -604,6 +657,32 @@ class DeviceManager:
                     json={'labels': [label] if label else []},
                     timeout=15,
                 )
+            elif name == 'update_capture_labels':
+                minute = str(payload.get('minute') or '')
+                minute_dir = get_minute(minute)
+                if minute_dir is None:
+                    raise FileNotFoundError(f'Capture {minute} is not available on this device')
+                labels = update_minute_labels(minute_dir, payload.get('labels') or [], replace=True)
+                self._last_file_report_at = 0.0
+                success = True
+                message = f'Updated {minute} labels: {", ".join(labels) if labels else "none"}'
+                response = None
+            elif name == 'delete_capture_minutes':
+                deleted: list[str] = []
+                for minute in payload.get('minutes') or []:
+                    minute = str(minute or '')
+                    minute_dir = get_minute(minute)
+                    if minute_dir is None:
+                        continue
+                    summary = minute_summary(minute_dir)
+                    if self.status.get('collection_active') and not summary.get('capture_finished'):
+                        raise RuntimeError(f'Capture {minute} is still recording')
+                    shutil.rmtree(minute_dir)
+                    deleted.append(minute)
+                self._last_file_report_at = 0.0
+                success = True
+                message = f'Deleted {len(deleted)} capture minute(s)'
+                response = None
             else:
                 response = None
             if response is not None:
@@ -918,10 +997,13 @@ class DeviceManager:
             # Prepare registration data
             hardware_info = self._build_hardware_info()
             saved_name = None
+            saved_name_user_set = False
             try:
                 registration_path = self._config_dir() / 'device_config.json'
                 if registration_path.exists():
-                    saved_name = json.loads(registration_path.read_text(encoding='utf-8')).get('device_name')
+                    saved_identity = json.loads(registration_path.read_text(encoding='utf-8'))
+                    saved_name = saved_identity.get('device_name')
+                    saved_name_user_set = bool(saved_identity.get('device_name_user_set'))
             except Exception:
                 saved_name = None
             data = {
@@ -957,7 +1039,11 @@ class DeviceManager:
                 self.auth_token = user_token
                 self._apply_pending_deployments(result)
 
-                if 'device_name' in result:
+                if saved_name_user_set and saved_name and self._device_name_sync_pending:
+                    data['device_name'] = saved_name
+                    self.save_device_name(saved_name)
+                elif 'device_name' in result:
+                    self._device_name_sync_pending = False
                     data['device_name'] = result['device_name']
 
                 self._save_registration_info(data, user_token)
@@ -1017,7 +1103,11 @@ class DeviceManager:
             summary = minute_summary(minute_dir)
             relative_path = str(summary.get('relative_path') or minute_dir.name)
             minute_files = capture_files(minute_dir)
-            file_count = sum(1 for file_path in minute_files.values() if file_path and file_path.exists())
+            file_count = sum(
+                1
+                for file_path in minute_files.values()
+                if isinstance(file_path, Path) and file_path.exists()
+            )
             sizes = summary.get('sizes') if isinstance(summary, dict) else {}
             total_size = sum(int(value or 0) for value in (sizes.values() if isinstance(sizes, dict) else []))
             manifest = {}
@@ -1103,9 +1193,22 @@ class DeviceManager:
 
             config_file = os.path.join(config_dir, 'device_config.json')
 
+            existing: Dict[str, Any] = {}
+            if os.path.exists(config_file):
+                try:
+                    loaded = json.loads(Path(config_file).read_text(encoding='utf-8'))
+                    existing = loaded if isinstance(loaded, dict) else {}
+                except Exception:
+                    existing = {}
+            user_set = bool(existing.get('device_name_user_set'))
             config_data = {
                 'device_id': device_info['device_id'],
-                'device_name': device_info.get('device_name', f"Thoth-{device_info['device_id'][:8]}"),
+                'device_name': (
+                    existing.get('device_name') if user_set
+                    else device_info.get('device_name', f"Thoth-{device_info['device_id'][:8]}")
+                ),
+                'device_name_user_set': user_set,
+                'device_name_sync_pending': bool(existing.get('device_name_sync_pending')),
                 'device_type': device_info.get('device_type', 'thoth'),
                 'registered_at': datetime.utcnow().isoformat(),
                 'auth_token': auth_token,
@@ -1266,6 +1369,8 @@ class DeviceManager:
                         if synchronized:
                             self._settings_sync_pending = False
                             self._settings_sync_error = None
+                    if self._device_name_sync_pending and self.registered and self.auth_token:
+                        self.save_device_name(self.get_device_info()['device_name'])
                     # Update status with current system information
                     self.update_status({
                         'battery_level': self.status.get('battery_level'),
@@ -1299,12 +1404,78 @@ class DeviceManager:
 
     def get_device_info(self) -> Dict[str, Any]:
         """Get current device information."""
+        device_name = f"Thoth-{self.device_id[:8]}"
+        try:
+            path = self._config_dir() / 'device_config.json'
+            if path.exists():
+                device_name = str(json.loads(path.read_text(encoding='utf-8')).get('device_name') or device_name)
+        except Exception:
+            pass
+        try:
+            from .sensor_detection import detect_esp32_csi
+            csi_sensor = detect_esp32_csi()
+        except Exception:
+            csi_sensor = {}
         return {
             'device_id': self.device_id,
+            'device_name': device_name,
+            'csi_display': csi_sensor.get('name') if csi_sensor.get('online') else 'offline',
             'registered': self.registered,
             'status': self.status,
             'brain_server': self.config.BRAIN_SERVER_URL if hasattr(self.config, 'BRAIN_SERVER_URL') else None
         }
+
+    def save_device_name(self, value: object) -> str:
+        """Persist the editable ID locally and mirror it to Brain when paired."""
+        device_name = " ".join(str(value or "").strip().split())
+        if not 1 <= len(device_name) <= 255:
+            raise ValueError("Device ID must be between 1 and 255 characters")
+        path = self._config_dir() / 'device_config.json'
+        config_data: Dict[str, Any] = {}
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding='utf-8'))
+                config_data = loaded if isinstance(loaded, dict) else {}
+            except Exception:
+                config_data = {}
+        config_data.update({
+            'device_id': self.device_id,
+            'device_name': device_name,
+            'device_name_user_set': True,
+            'device_name_sync_pending': True,
+            'device_type': config_data.get('device_type') or 'thoth',
+            'brain_server_url': self.config.BRAIN_SERVER_URL,
+        })
+        self._write_json_atomic(path, config_data)
+        self._device_name_sync_pending = True
+        if self.registered and self.auth_token:
+            try:
+                url = f"{self.config.BRAIN_SERVER_URL}/api/device/{self.device_id}/identity"
+                response = self.session.put(
+                    url,
+                    json={'device_name': device_name},
+                    headers={'Authorization': f'Bearer {self.auth_token}', 'Content-Type': 'application/json'},
+                    timeout=5,
+                )
+                # Older Brain deployments did not expose /identity and
+                # returned 405 through the dynamic device route. Use the
+                # backwards-compatible identity route in either case.
+                if response.status_code in {404, 405}:
+                    response = self.session.put(
+                        f"{self.config.BRAIN_SERVER_URL}/api/device/{self.device_id}",
+                        json={'device_name': device_name},
+                        headers={'Authorization': f'Bearer {self.auth_token}', 'Content-Type': 'application/json'},
+                        timeout=5,
+                    )
+                if not response.ok:
+                    logger.warning("Remote device ID update failed: %s", response.text)
+                else:
+                    self._device_name_sync_pending = False
+                    config_data['device_name_sync_pending'] = False
+                    self._write_json_atomic(path, config_data)
+            except requests.exceptions.RequestException as exc:
+                logger.warning("Remote device ID update deferred: %s", exc)
+        return device_name
 
     def sync_files_to_cloud(self) -> Tuple[int, int, list]:
         """Sync local data files to the Brain server.
@@ -1336,8 +1507,8 @@ class DeviceManager:
             for minute_dir in list_minute_folders():
                 summary = minute_summary(minute_dir)
                 files = capture_files(minute_dir)
-                for name, file_path in files.items():
-                    if file_path and file_path.exists():
+                for file_path in files.values():
+                    if isinstance(file_path, Path) and file_path.exists():
                         local_files.append((minute_dir.name, file_path, summary))
 
             if not local_files:

@@ -1,10 +1,12 @@
 import json
+import io
 import os
 import queue
 import sys
 import tempfile
 import types
 import unittest
+import zipfile
 from collections import deque
 from pathlib import Path
 from unittest import mock
@@ -21,7 +23,13 @@ if "dotenv" not in sys.modules:
 
 from backend.device_manager import DeviceManager
 from backend import home_assistant
-from backend.capture_manager import minute_summary
+from backend.capture_manager import cleanup_old_minutes, minute_summary, stream_minute_folders, update_minute_labels
+from backend.sensor_detection import (
+    detect_esp32_csi,
+    detect_usb_camera,
+    likely_csi_serial_candidates,
+    usable_usb_camera_devices,
+)
 from backend.radar_analysis import (
     PersistentTargetIdentity,
     SigProc,
@@ -36,11 +44,15 @@ from backend.calibration import derive_thresholds
 from backend.minute_collector import (
     RADAR_FRAMES_PER_CHUNK,
     annotate_chunk_result,
+    csi_capture_stats,
+    compact_manifest,
     enqueue_analysis_chunk,
     enqueue_latest_chunk_frame,
     live_chunk_statistics,
+    find_csi_ports,
     load_processing_settings,
     minute_start,
+    output_dir_for_minute,
     summarize_minute_results,
 )
 from collector import next_minute_boundary
@@ -58,6 +70,199 @@ class _Config:
 
 
 class SettingsTests(unittest.TestCase):
+    def test_bulk_capture_zip_streams_valid_minute_folders(self):
+        with tempfile.TemporaryDirectory() as root:
+            capture_root = Path(root)
+            first = capture_root / "20260824_1200"
+            second = capture_root / "20260824_1201"
+            first.mkdir()
+            second.mkdir()
+            (first / "radar.bin").write_bytes(b"radar")
+            (second / "wifi.csv").write_text("timestamp,value\n1,2\n", encoding="utf-8")
+
+            payload = b"".join(stream_minute_folders([first, second]))
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                self.assertEqual(archive.namelist(), [
+                    "20260824_1200/radar.bin",
+                    "20260824_1201/wifi.csv",
+                ])
+                self.assertEqual(archive.read("20260824_1200/radar.bin"), b"radar")
+
+    def test_compact_manifest_keeps_rates_without_repeated_chunk_analysis(self):
+        compact = compact_manifest({
+            "folder_minute": "20260817_1200",
+            "labels": ["baseline"],
+            "outputs": {
+                "wifi_csi": {"receivers": [
+                    {"path": "/data/wifi_csi_01.csv", "device": "/dev/ttyACM0", "device_id": "left", "sample_count": 100, "average_sampling_rate_hz": 20.0},
+                    {"path": "/data/wifi_csi_02.csv", "device": "/dev/ttyUSB0", "device_id": "right", "sample_count": 90, "average_sampling_rate_hz": 18.0},
+                ]},
+                "radar": {"sample_count": 600, "average_sampling_rate_hz": 10.0, "chunks": [{
+                    "chunk_index": 0, "status": "occupied", "settings": {"labels": ["baseline"]},
+                    "analysis": {"xy_map": {"values": list(range(1000))}},
+                }]},
+            },
+            "minute_summary": {"labels": ["baseline", "occupied"], "occupancy": {"label": "occupied"}},
+        })
+        self.assertEqual(compact["schema"], "thoth-minute-manifest/v6")
+        self.assertEqual(compact["outputs"]["wifi_csi"]["display_name"], "csix2")
+        self.assertEqual(compact["outputs"]["wifi_csi"]["receivers"][1]["average_sampling_rate_hz"], 18.0)
+        self.assertEqual(compact["outputs"]["radar"]["average_sampling_rate_hz"], 10.0)
+        self.assertNotIn("settings", compact["outputs"]["radar"]["chunks"][0])
+        self.assertNotIn("analysis", compact["outputs"]["radar"]["chunks"][0])
+
+    def test_retention_uses_disk_threshold_and_deletes_oldest_first(self):
+        with tempfile.TemporaryDirectory() as root:
+            capture_root = Path(root)
+            folders = []
+            for index, name in enumerate(("20260817_1200", "20260817_1201", "20260817_1202")):
+                folder = capture_root / name
+                folder.mkdir()
+                os.utime(folder, (100 + index, 100 + index))
+                folders.append(folder)
+            usage = [
+                types.SimpleNamespace(total=100, used=96, free=4),
+                types.SimpleNamespace(total=100, used=96, free=4),
+                types.SimpleNamespace(total=100, used=94, free=6),
+            ]
+            with mock.patch("backend.capture_manager.Config.CAPTURE_DATA_DIR", str(capture_root)), mock.patch(
+                "backend.capture_manager.shutil.disk_usage", side_effect=usage,
+            ):
+                result = cleanup_old_minutes(max_disk_percent=95)
+            self.assertEqual(result["removed"], ["20260817_1200", "20260817_1201"])
+            self.assertTrue(folders[2].exists())
+
+    def test_labels_are_manifest_metadata_and_never_change_minute_path(self):
+        with mock.patch("backend.minute_collector.DATA_ROOT", Path("/captures")):
+            self.assertEqual(
+                output_dir_for_minute("20260817_1200", ["participant-1", "baseline"]),
+                Path("/captures/20260817_1200"),
+            )
+
+        with tempfile.TemporaryDirectory() as root:
+            capture_root = Path(root)
+            minute_dir = capture_root / "20260817_1200"
+            minute_dir.mkdir()
+            (minute_dir / "manifest.json").write_text(
+                json.dumps({"labels": ["old"], "relative_path": minute_dir.name}),
+                encoding="utf-8",
+            )
+            with mock.patch("backend.capture_manager.Config.CAPTURE_DATA_DIR", str(capture_root)):
+                labels = update_minute_labels(
+                    minute_dir, ["participant-1", "baseline"], replace=True,
+                )
+
+            self.assertEqual(labels, ["participant-1", "baseline"])
+            self.assertTrue(minute_dir.is_dir())
+            self.assertFalse((capture_root / "participant-1").exists())
+            manifest = json.loads((minute_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["labels"], labels)
+            self.assertEqual(manifest["relative_path"], minute_dir.name)
+
+    def test_multiple_csi_receivers_are_retained_and_rates_are_calculated(self):
+        with mock.patch(
+            "backend.sensor_detection.serial_candidates",
+            return_value=["/dev/ttyACM0", "/dev/ttyUSB0", "/dev/ttyAMA10"],
+        ):
+            self.assertEqual(
+                likely_csi_serial_candidates(),
+                ["/dev/ttyACM0", "/dev/ttyUSB0"],
+            )
+        with mock.patch("backend.minute_collector.serial_candidates", return_value=["/dev/ttyACM0", "/dev/ttyACM1"]):
+            ports, candidates = find_csi_ports(None, 115200, 0)
+        self.assertEqual(ports, ["/dev/ttyACM0", "/dev/ttyACM1"])
+        self.assertEqual(candidates, ports)
+
+        with tempfile.TemporaryDirectory() as root:
+            csv_path = Path(root) / "wifi_csi_01.csv"
+            csv_path.write_text(
+                "host_timestamp,monotonic_ns,serial_port,raw_csi_line\n"
+                "now,1000000000,/dev/ttyACM0,CSI_DATA one\n"
+                "now,1500000000,/dev/ttyACM0,CSI_DATA two\n"
+                "now,2000000000,/dev/ttyACM0,CSI_DATA three\n",
+                encoding="utf-8",
+            )
+            stats = csi_capture_stats(csv_path)
+        self.assertEqual(stats["sample_count"], 3)
+        self.assertEqual(stats["average_sampling_rate_hz"], 2.0)
+
+        with mock.patch("backend.sensor_detection.csi_serial_candidates", return_value=ports):
+            inventory = detect_esp32_csi()
+        self.assertEqual(inventory["name"], "csix2")
+        self.assertEqual(inventory["receiver_count"], 2)
+
+    def test_camera_requires_a_verified_usb_capture_capability(self):
+        probe = types.SimpleNamespace(
+            returncode=0,
+            stdout="Driver name: uvcvideo\nBus info: usb-0000:01\nDevice Caps: Video Capture\n",
+        )
+        with mock.patch("backend.sensor_detection.glob.glob", return_value=["/dev/video0"]), mock.patch(
+            "backend.sensor_detection._usb_parent_for_video", return_value=Path("/sys/mock-usb"),
+        ), mock.patch("backend.sensor_detection.shutil.which", return_value="/usr/bin/v4l2-ctl"), mock.patch(
+            "backend.sensor_detection.subprocess.run", return_value=probe,
+        ):
+            self.assertEqual(usable_usb_camera_devices(), ["/dev/video0"])
+
+        metadata_only = types.SimpleNamespace(
+            returncode=0,
+            stdout="Driver name: uvcvideo\nBus info: usb-0000:01\nDevice Caps: Metadata Capture\n",
+        )
+        with mock.patch("backend.sensor_detection.glob.glob", return_value=["/dev/video0"]), mock.patch(
+            "backend.sensor_detection._usb_parent_for_video", return_value=Path("/sys/mock-usb"),
+        ), mock.patch("backend.sensor_detection.shutil.which", return_value="/usr/bin/v4l2-ctl"), mock.patch(
+            "backend.sensor_detection.subprocess.run", return_value=metadata_only,
+        ), mock.patch("backend.sensor_detection.Config.CAPTURE_CAMERA_DEVICE", "/dev/video0"):
+            inventory = detect_usb_camera()
+        self.assertFalse(inventory["online"])
+        self.assertIsNone(inventory["source"])
+
+    def test_csi_device_ids_are_persistent_capture_settings(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = DeviceManager(_Config(root))
+            manager.save_capture_settings({"csi_device_ids": {"/dev/ttyACM0": "bed-csi"}})
+            reloaded = DeviceManager(_Config(root)).load_capture_settings()
+            self.assertEqual(reloaded["csi_device_ids"], {"/dev/ttyACM0": "bed-csi"})
+
+    def test_editable_device_id_is_persistent_without_changing_hardware_uuid(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = DeviceManager(_Config(root))
+            hardware_uuid = manager.device_id
+            manager.save_device_settings({"device_name": "bedroom-thoth"})
+            reloaded = DeviceManager(_Config(root))
+            self.assertEqual(reloaded.device_id, hardware_uuid)
+            self.assertEqual(reloaded.get_device_info()["device_name"], "bedroom-thoth")
+
+    def test_device_identity_uses_legacy_fallback_once_for_old_brain(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = _Config(root)
+            config.BRAIN_SERVER_URL = "https://brain.example"
+            manager = DeviceManager(config)
+            manager.registered = True
+            manager.auth_token = "device-token"
+            unavailable = mock.Mock(status_code=405, ok=False, text="Method Not Allowed")
+            accepted = mock.Mock(status_code=200, ok=True, text="ok")
+            manager.session.put = mock.Mock(side_effect=[unavailable, accepted])
+
+            manager.save_device_name("bedroom-thoth")
+
+            self.assertEqual(manager.session.put.call_count, 2)
+            self.assertTrue(manager.session.put.call_args_list[1].args[0].endswith(f"/{manager.device_id}"))
+            self.assertFalse(manager._device_name_sync_pending)
+            identity = json.loads((Path(root) / "device_config.json").read_text(encoding="utf-8"))
+            self.assertFalse(identity["device_name_sync_pending"])
+
+    def test_legacy_settings_device_name_is_migrated_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "device_settings.json").write_text(
+                json.dumps({"device_name": "participant-device"}), encoding="utf-8",
+            )
+            manager = DeviceManager(_Config(root))
+            self.assertEqual(manager.get_device_info()["device_name"], "participant-device")
+            identity = json.loads(Path(root, "device_config.json").read_text(encoding="utf-8"))
+            self.assertTrue(identity["device_name_user_set"])
+            settings = json.loads(Path(root, "device_settings.json").read_text(encoding="utf-8"))
+            self.assertNotIn("device_name", settings)
+
     def test_next_capture_is_aligned_to_wall_clock(self):
         from datetime import datetime
         current = datetime.fromisoformat("2026-07-13T12:34:17-04:00")

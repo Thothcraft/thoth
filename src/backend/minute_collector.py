@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import fcntl
 import glob
 import json
+import logging
 import math
 import os
 import queue
@@ -23,6 +25,8 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from backend.config import Config  # type: ignore
+    from backend.sensor_detection import likely_csi_serial_candidates, usable_usb_camera_devices  # type: ignore
+    from backend.capture_container import build_capture_container  # type: ignore
     from backend.radar_analysis import (  # type: ignore
         PersistentTargetIdentity,
         StreamingChunkAnalyzer,
@@ -33,6 +37,8 @@ if __package__ in (None, ""):
     )
 else:
     from .config import Config
+    from .sensor_detection import likely_csi_serial_candidates, usable_usb_camera_devices
+    from .capture_container import build_capture_container
     from .radar_analysis import (
         PersistentTargetIdentity,
         StreamingChunkAnalyzer,
@@ -54,6 +60,9 @@ RADAR_FRAMES_PER_CHUNK = 10
 # minute instead of discarding a valid saved chunk during a transient CPU spike.
 MAX_PENDING_ANALYSIS_CHUNKS = 64
 LIVE_VISUALIZATION_INTERVAL_SECONDS = 0.16
+RADAR_LOCK_PATH = Path("/tmp/thoth-radar-hardware.lock")
+RADAR_GPIO_RETRY_SECONDS = 12.0
+RADAR_GPIO_SETTLE_SECONDS = 0.5
 
 sys.path.insert(0, str(MMW_RELEASE))
 
@@ -160,7 +169,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--duration", type=float, default=59.5, help="Capture duration in seconds.")
     parser.add_argument("--camera", default=None, help="USB camera device, for example /dev/video0.")
-    parser.add_argument("--csi-port", default="auto", help="ESP32 CSI receiver serial port, or 'auto'.")
+    parser.add_argument(
+        "--csi-port",
+        action="append",
+        default=None,
+        help="ESP32 CSI receiver serial port. Repeat for multiple receivers; omit for auto detection.",
+    )
     parser.add_argument("--csi-baud", type=int, default=115200, help="ESP32 CSI receiver baud rate.")
     parser.add_argument(
         "--csi-detect-seconds",
@@ -215,10 +229,8 @@ def normalize_labels(labels: object) -> list[str]:
 
 
 def output_dir_for_minute(folder_name: str, labels: list[str]) -> Path:
-    root = DATA_ROOT
-    if labels:
-        return root / labels[0] / folder_name
-    return root / folder_name
+    """Return the stable minute path; labels are manifest metadata only."""
+    return DATA_ROOT / folder_name
 
 
 def minute_start(start_now: bool, scheduled_start: str | None = None) -> dt.datetime:
@@ -255,6 +267,89 @@ def write_json_atomic(path: Path, payload: object) -> None:
     temporary.replace(path)
 
 
+def compact_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Create the concise on-disk v6 index for a synchronized container."""
+    outputs = manifest.get("outputs") if isinstance(manifest.get("outputs"), dict) else {}
+    compact_outputs: dict[str, Any] = {}
+
+    wifi = outputs.get("wifi_csi") if isinstance(outputs.get("wifi_csi"), dict) else None
+    if wifi is not None:
+        raw_receivers = wifi.get("receivers") if isinstance(wifi.get("receivers"), list) else [wifi]
+        receivers = []
+        for index, receiver in enumerate(raw_receivers, start=1):
+            if not isinstance(receiver, dict):
+                continue
+            receiver_summary = {
+                "device_id": receiver.get("device_id") or f"csi-{index}",
+                "port": receiver.get("device"),
+                "samples": int(receiver.get("sample_count") or 0),
+                "average_sampling_rate_hz": float(receiver.get("average_sampling_rate_hz") or 0.0),
+            }
+            if not manifest.get("container"):
+                receiver_summary["file"] = Path(str(receiver.get("path") or f"wifi_csi_{index:02d}.csv")).name
+            receivers.append(receiver_summary)
+        compact_outputs["wifi_csi"] = {
+            "display_name": f"csix{len(receivers)}" if len(receivers) > 1 else "csi",
+            "receiver_count": len(receivers),
+            "receivers": receivers,
+        }
+
+    radar = outputs.get("radar") if isinstance(outputs.get("radar"), dict) else None
+    if radar is not None:
+        chunk_keys = (
+            "chunk_index", "started", "finished_capture", "chunk_seconds", "chunk_frames",
+            "status", "classification", "detected_frames", "evaluated_frames", "ratio",
+            "occupied", "location", "score", "people_count", "targets", "error", "performance",
+        )
+        chunks = []
+        for entry in radar.get("chunks") or []:
+            if not isinstance(entry, dict):
+                continue
+            chunk = {key: entry[key] for key in chunk_keys if key in entry and entry[key] is not None}
+            if entry.get("bin_path") and not manifest.get("container"):
+                chunk["bin_path"] = Path(str(entry["bin_path"])).name
+            if entry.get("camera_path") and not manifest.get("container"):
+                chunk["camera_path"] = Path(str(entry["camera_path"])).name
+            chunks.append(chunk)
+        compact_outputs["radar"] = {
+            "sample_count": int(radar.get("sample_count") or 0),
+            "average_sampling_rate_hz": float(radar.get("average_sampling_rate_hz") or 0.0),
+            "chunks": chunks,
+        }
+        if not manifest.get("container"):
+            compact_outputs["radar"]["files"] = [Path(str(value)).name for value in (radar.get("files") or [])]
+        if radar.get("xy_tracking"):
+            compact_outputs["radar"]["xy_tracking"] = Path(str(radar["xy_tracking"])).name
+
+    for sensor in ("camera", "sense_hat"):
+        output = outputs.get(sensor) if isinstance(outputs.get(sensor), dict) else None
+        if output is not None:
+            compact_outputs[sensor] = {
+                key: value for key, value in output.items()
+                if key in {"type", "device", "sample_count", "average_sampling_rate_hz"}
+            }
+            if output.get("files"):
+                if not manifest.get("container"):
+                    compact_outputs[sensor]["files"] = [Path(str(value)).name for value in output["files"]]
+
+    summary = dict(manifest.get("minute_summary") or {})
+    summary.pop("labels", None)
+    compact = {
+        key: manifest[key] for key in (
+            "folder_minute", "scheduled_start", "capture_started", "capture_finished",
+            "duration_seconds", "chunk_seconds", "expected_chunks", "status", "host",
+            "labels", "sensors_enabled", "warnings", "errors",
+            "device_id", "device_name", "capture_settings", "container", "assets",
+        ) if key in manifest
+    }
+    compact.update({
+        "schema": "thoth-minute-manifest/v6",
+        "outputs": compact_outputs,
+        "minute_summary": summary,
+    })
+    return compact
+
+
 def load_processing_settings() -> dict[str, Any]:
     defaults: dict[str, Any] = {
         "labels": [],
@@ -264,6 +359,7 @@ def load_processing_settings() -> dict[str, Any]:
         "prediction_label_style": "occupancy",
         "people_count_label_enabled": False,
         "sleep_study_enabled": False,
+        "csi_device_ids": {},
         "revision": 0,
         "updated_at": None,
     }
@@ -290,6 +386,11 @@ def load_processing_settings() -> dict[str, Any]:
     defaults["prediction_label_style"] = style if style in {"occupancy", "presence"} else "occupancy"
     defaults["people_count_label_enabled"] = bool(defaults.get("people_count_label_enabled"))
     defaults["sleep_study_enabled"] = bool(defaults.get("sleep_study_enabled"))
+    defaults["csi_device_ids"] = {
+        str(port): str(device_id).strip()
+        for port, device_id in (defaults.get("csi_device_ids") or {}).items()
+        if str(port).strip() and str(device_id).strip()
+    } if isinstance(defaults.get("csi_device_ids"), dict) else {}
     defaults["labels"] = normalize_labels(defaults.get("labels"))
     return defaults
 
@@ -482,42 +583,10 @@ def summarize_minute_results(
 
 
 def find_camera(requested: str | None) -> str | None:
-    if requested:
+    devices = usable_usb_camera_devices()
+    if requested and requested in devices:
         return requested
-
-    devices = sorted(
-        glob.glob("/dev/video*"),
-        key=lambda path: int(Path(path).name.removeprefix("video")),
-    )
-    usb_devices = []
-    for device in devices:
-        sysfs_device = Path("/sys/class/video4linux") / Path(device).name / "device"
-        try:
-            resolved = sysfs_device.resolve(strict=True)
-        except OSError:
-            continue
-        if any((parent / "idVendor").exists() for parent in (resolved, *resolved.parents)):
-            usb_devices.append(device)
-
-    v4l2_ctl = shutil.which("v4l2-ctl")
-    if v4l2_ctl:
-        for device in usb_devices:
-            try:
-                probe = subprocess.run(
-                    [v4l2_ctl, "--device", device, "--all"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    timeout=3,
-                    check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                continue
-            is_usb_camera = "Driver name      : uvcvideo" in probe.stdout or "Bus info         : usb-" in probe.stdout
-            is_capture_node = "Video Capture" in probe.stdout and "Video Output" not in probe.stdout
-            if probe.returncode == 0 and is_usb_camera and is_capture_node:
-                return device
-    return None
+    return devices[0] if devices else None
 
 
 def serial_candidates() -> list[str]:
@@ -564,37 +633,64 @@ def probe_csi_port(port: str, baud: int, timeout_s: float) -> bool:
                 if not line:
                     continue
                 text = line.decode("utf-8", errors="ignore").strip()
-                if text.startswith("CSI_DATA,"):
+                if "CSI_DATA" in text:
                     return True
     except Exception:
         return False
     return False
 
 
-def find_csi_port(requested: str, baud: int, detect_seconds: float) -> tuple[str | None, list[str]]:
+def find_csi_ports(
+    requested: list[str] | str | None,
+    baud: int,
+    detect_seconds: float,
+) -> tuple[list[str], list[str]]:
+    requested_ports = [requested] if isinstance(requested, str) else list(requested or [])
+    requested_ports = list(dict.fromkeys(port for port in requested_ports if port and port != "auto"))
     candidates = serial_candidates()
-    if requested and requested != "auto":
-        return requested, candidates
+    if requested_ports:
+        return requested_ports, candidates
 
-    try:
-        import serial.tools.list_ports as list_ports
-
-        for port in list_ports.comports():
-            manufacturer = (port.manufacturer or "").lower()
-            description = (port.description or "").lower()
-            if port.vid == 0x303A or "espressif" in manufacturer or "espressif" in description:
-                return port.device, candidates
-    except Exception:
-        pass
+    esp32_ports = likely_csi_serial_candidates()
+    if esp32_ports:
+        return sorted(esp32_ports), candidates
 
     if detect_seconds <= 0:
-        return (candidates[0] if candidates else None), candidates
+        return candidates, candidates
 
     per_port_timeout = max(0.2, detect_seconds / max(1, len(candidates)))
+    detected: list[str] = []
     for port in candidates:
         if probe_csi_port(port, baud, per_port_timeout):
-            return port, candidates
-    return (candidates[0] if candidates else None), candidates
+            detected.append(port)
+    return (detected or candidates), candidates
+
+
+def csi_capture_stats(path: Path) -> dict[str, float | int | None]:
+    """Calculate the average observed packet rate from one receiver CSV."""
+    sample_count = 0
+    first_ns: int | None = None
+    last_ns: int | None = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as handle:
+            for row in csv.DictReader(handle):
+                try:
+                    timestamp_ns = int(row.get("monotonic_ns") or 0)
+                except (TypeError, ValueError):
+                    timestamp_ns = 0
+                sample_count += 1
+                if timestamp_ns > 0:
+                    first_ns = timestamp_ns if first_ns is None else min(first_ns, timestamp_ns)
+                    last_ns = timestamp_ns if last_ns is None else max(last_ns, timestamp_ns)
+    except OSError:
+        pass
+    span_seconds = ((last_ns - first_ns) / 1_000_000_000) if first_ns is not None and last_ns is not None else 0.0
+    rate = ((sample_count - 1) / span_seconds) if sample_count > 1 and span_seconds > 0 else 0.0
+    return {
+        "sample_count": sample_count,
+        "average_sampling_rate_hz": round(rate, 3),
+        "observed_span_seconds": round(span_seconds, 3),
+    }
 
 
 def collect_csi(
@@ -610,30 +706,46 @@ def collect_csi(
             json.dump({"timestamp": iso_now(), "error": f"pyserial import failed: {exc}"}, fd, indent=2)
         return
 
+    error_path = output_file.with_suffix(".error.json")
+    last_error: Exception | None = None
+    sample_count = 0
     try:
-        with (
-            open_serial_without_reset(port, baud, 0.05) as ser,
-            open(output_file, "w", encoding="utf-8", newline="", buffering=1) as output_fd,
-        ):
+        with open(output_file, "w", encoding="utf-8", newline="", buffering=1) as output_fd:
             writer = csv.writer(output_fd)
             writer.writerow(["host_timestamp", "monotonic_ns", "serial_port", "raw_csi_line"])
-
-            if ser.in_waiting:
-                ser.read(ser.in_waiting)
-
             while not stop_event.is_set():
-                line = ser.readline()
-                if not line:
-                    continue
-                host_timestamp = iso_now()
-                monotonic_ns = time.monotonic_ns()
-                text = line.decode("utf-8", errors="ignore").strip()
-                if not text:
-                    continue
-                if text.startswith("CSI_DATA,"):
-                    writer.writerow([host_timestamp, monotonic_ns, port, text])
+                try:
+                    with open_serial_without_reset(port, baud, 0.05) as ser:
+                        last_error = None
+                        error_path.unlink(missing_ok=True)
+                        if ser.in_waiting:
+                            ser.read(ser.in_waiting)
+                        while not stop_event.is_set():
+                            line = ser.readline()
+                            if not line:
+                                continue
+                            host_timestamp = iso_now()
+                            monotonic_ns = time.monotonic_ns()
+                            text = line.decode("utf-8", errors="ignore").strip()
+                            if not text:
+                                continue
+                            marker = text.find("CSI_DATA")
+                            if marker >= 0:
+                                writer.writerow([host_timestamp, monotonic_ns, port, text[marker:]])
+                                sample_count += 1
+                except (OSError, serial.SerialException) as exc:
+                    last_error = exc
+                    if not stop_event.wait(0.2):
+                        continue
+            if last_error is not None and sample_count == 0:
+                with open(error_path, "w", encoding="utf-8") as fd:
+                    json.dump(
+                        {"timestamp": iso_now(), "port": port, "baud": baud, "error": str(last_error)},
+                        fd,
+                        indent=2,
+                    )
     except Exception as exc:
-        with open(output_file.with_suffix(".error.json"), "w", encoding="utf-8") as fd:
+        with open(error_path, "w", encoding="utf-8") as fd:
             json.dump({"timestamp": iso_now(), "port": port, "baud": baud, "error": str(exc)}, fd, indent=2)
 
 
@@ -714,10 +826,20 @@ def start_radar_capture(output_prefix: Path | None = None) -> Any:
 
     bgt60tr13c = None
     try:
-        bgt60tr13c = BGT60TR13C(
-            spi_speed=50_000_000,
-            save_to_file=str(output_prefix) if output_prefix is not None else None,
-        )
+        deadline = time.monotonic() + RADAR_GPIO_RETRY_SECONDS
+        while True:
+            try:
+                bgt60tr13c = BGT60TR13C(
+                    spi_speed=50_000_000,
+                    save_to_file=str(output_prefix) if output_prefix is not None else None,
+                    strict_gpio=True,
+                )
+                break
+            except Exception as exc:
+                if time.monotonic() >= deadline or "GPIO busy" not in str(exc):
+                    raise
+                logging.info("Waiting for radar GPIO handoff: %s", exc)
+                time.sleep(0.2)
         if bgt60tr13c.check_chip_id() != RET_VAL_OK:
             raise RuntimeError("BGT60TR13C chip ID check failed.")
 
@@ -742,6 +864,37 @@ def start_radar_capture(output_prefix: Path | None = None) -> Any:
 def stop_radar_capture(radar: Any | None) -> None:
     if radar is not None:
         radar.stop()
+        # gpiozero's per-process pin factory can retain lgpio line claims after
+        # individual devices close. This worker will not touch GPIO again, so
+        # close the factory explicitly before the next minute takes ownership.
+        try:
+            from gpiozero import Device
+
+            if Device.pin_factory is not None:
+                Device.pin_factory.close()
+        except Exception as exc:
+            logging.warning("Unable to close radar GPIO factory cleanly: %s", exc)
+
+
+def settle_radar_gpio() -> None:
+    """Give the GPIO daemon time to publish released lines before handoff."""
+    time.sleep(RADAR_GPIO_SETTLE_SECONDS)
+
+
+def acquire_radar_lock() -> Any:
+    """Serialize physical radar ownership across overlapping minute workers."""
+    handle = open(RADAR_LOCK_PATH, "a+", encoding="utf-8")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def release_radar_lock(handle: Any | None) -> None:
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def chown_to_invoking_user(path: Path) -> None:
@@ -762,6 +915,13 @@ def chown_to_invoking_user(path: Path) -> None:
 def main() -> int:
     args = parse_args()
     preset_labels = normalize_labels(args.label or [])
+    initial_settings = load_processing_settings()
+    device_identity: dict[str, Any] = {}
+    try:
+        value = json.loads((Path(Config.CONFIG_DIR).expanduser() / "device_config.json").read_text(encoding="utf-8"))
+        device_identity = value if isinstance(value, dict) else {}
+    except (FileNotFoundError, OSError, ValueError):
+        pass
     chunk_seconds = 1.0
     expected_chunks = max(1, int(math.floor(float(args.duration))))
     target_start = minute_start(args.start_now, args.scheduled_start)
@@ -779,7 +939,11 @@ def main() -> int:
         "chunk_seconds": chunk_seconds,
         "chunk_frames": RADAR_FRAMES_PER_CHUNK,
         "expected_chunks": expected_chunks,
+        "preset_labels": preset_labels,
         "labels": preset_labels or ["collecting"],
+        "device_id": device_identity.get("device_id"),
+        "device_name": device_identity.get("device_name"),
+        "capture_settings": initial_settings,
         "outputs": {},
         "assets": [],
         "errors": [],
@@ -794,27 +958,37 @@ def main() -> int:
         },
     }
 
-    csi_port = None
+    csi_ports: list[str] = []
     csi_candidates: list[str] = []
     if not args.no_csi:
-        csi_port, csi_candidates = find_csi_port(args.csi_port, args.csi_baud, args.csi_detect_seconds)
-        if csi_port is None:
+        csi_ports, csi_candidates = find_csi_ports(args.csi_port, args.csi_baud, args.csi_detect_seconds)
+        if not csi_ports:
             manifest["errors"].append("No ESP32 CSI serial device found.")
+    manifest["csi_receiver_count"] = len(csi_ports)
+    manifest["sensor_labels"] = {
+        "esp32_csi": f"csix{len(csi_ports)}" if len(csi_ports) > 1 else "csi",
+    }
 
     print(f"Output folder: {output_dir}")
     print(f"Waiting for real-clock minute: {target_start.isoformat(timespec='seconds')}")
     sleep_until(target_start)
 
-    stop_at = time.monotonic() + args.duration
+    capture_started_monotonic = time.monotonic()
+    capture_started_monotonic_ns = time.monotonic_ns()
+    stop_at = capture_started_monotonic + args.duration
     capture_started = iso_now()
+    manifest["capture_started_monotonic_ns"] = capture_started_monotonic_ns
     print(f"Capture started: {capture_started}")
 
     csi_stop = threading.Event()
-    csi_thread: threading.Thread | None = None
+    csi_threads: list[threading.Thread] = []
+    sense_thread: threading.Thread | None = None
     camera: str | None = None
-    camera_queue: queue.Queue[Any] = queue.Queue()
     camera_thread: threading.Thread | None = None
+    camera_frames: list[dict[str, Any]] = []
     radar_reader_thread: threading.Thread | None = None
+    radar: Any | None = None
+    radar_lock: Any | None = None
     radar_analysis_thread: threading.Thread | None = None
     radar_live_thread: threading.Thread | None = None
     radar_upload_thread: threading.Thread | None = None
@@ -823,8 +997,28 @@ def main() -> int:
     live_queue_key: dict[str, Any] = {"stream": folder_name}
     upload_queue: queue.Queue[Any] = queue.Queue()
     radar_chunk_results: list[dict[str, Any]] = []
+    radar_frame_count = 0
+    radar_first_frame_at: float | None = None
+    radar_last_frame_at: float | None = None
     publish_lock = threading.Lock()
     room_config = load_room_config()
+
+    def effective_preset_labels() -> list[str]:
+        """Use the latest labels so additions and removals affect this minute."""
+        return normalize_labels(load_processing_settings().get("labels"))
+
+    def refresh_manifest_labels() -> list[str]:
+        active_labels = effective_preset_labels()
+        previous_preset_labels = normalize_labels(manifest.get("preset_labels"))
+        existing = normalize_labels(manifest.get("labels"))
+        existing = [
+            label for label in existing
+            if label != "collecting" and label not in previous_preset_labels
+        ]
+        manifest["preset_labels"] = active_labels
+        manifest["labels"] = list(dict.fromkeys([*active_labels, *existing])) or ["collecting"]
+        manifest["primary_label"] = manifest["labels"][0]
+        return active_labels
 
     def merge_home_assistant_status() -> None:
         status_path = output_dir / ".home_assistant_status.json"
@@ -842,6 +1036,7 @@ def main() -> int:
                 entry["home_assistant"] = status
 
     def write_live_manifest() -> None:
+        refresh_manifest_labels()
         merge_home_assistant_status()
         assets: list[dict[str, Any]] = []
         for entry in radar_chunk_results:
@@ -866,21 +1061,39 @@ def main() -> int:
             radar_name = Path(str(entry.get("bin_path") or "")).name
             if radar_name:
                 assets.append({**common, "sensor": "radar", "filename": radar_name, "content_type": "application/octet-stream"})
-            camera_name = Path(str(entry.get("camera_path") or "")).name
+        for frame in camera_frames:
+            camera_name = Path(str(frame.get("path") or "")).name
             if camera_name:
-                assets.append({**common, "sensor": "camera", "filename": camera_name, "content_type": "image/jpeg"})
+                assets.append({
+                    "sensor": "camera",
+                    "second_index": frame.get("second_index"),
+                    "started_at": frame.get("captured_at"),
+                    "filename": camera_name,
+                    "content_type": "image/jpeg",
+                })
         csi_output = (manifest.get("outputs") or {}).get("wifi_csi")
-        if isinstance(csi_output, dict) and csi_output.get("path"):
-            assets.append({
-                "sensor": "wifi_csi",
-                "filename": Path(str(csi_output["path"])).name,
-                "content_type": "text/csv",
-                "started_at": csi_output.get("started"),
-                "duration_seconds": args.duration,
-                "coverage": "continuous minute stream",
-                "labels": manifest.get("labels") or [],
-                "properties": {"baud": csi_output.get("baud"), "device": csi_output.get("device")},
-            })
+        if isinstance(csi_output, dict):
+            receivers = csi_output.get("receivers") if isinstance(csi_output.get("receivers"), list) else []
+            if not receivers and csi_output.get("path"):
+                receivers = [csi_output]
+            for receiver in receivers:
+                if not isinstance(receiver, dict) or not receiver.get("path"):
+                    continue
+                assets.append({
+                    "sensor": "wifi_csi",
+                    "filename": Path(str(receiver["path"])).name,
+                    "content_type": "text/csv",
+                    "started_at": receiver.get("started") or csi_output.get("started"),
+                    "duration_seconds": args.duration,
+                    "coverage": "continuous minute stream",
+                    "labels": manifest.get("labels") or [],
+                    "properties": {
+                        "baud": receiver.get("baud", csi_output.get("baud")),
+                        "device": receiver.get("device"),
+                        "device_id": receiver.get("device_id"),
+                        "average_sampling_rate_hz": receiver.get("average_sampling_rate_hz"),
+                    },
+                })
         manifest["assets"] = assets
         snapshot = dict(manifest)
         snapshot["capture_started"] = capture_started
@@ -906,7 +1119,7 @@ def main() -> int:
                 item.get("settings") for item in radar_chunk_results
                 if isinstance(item.get("settings"), dict)
             ), load_processing_settings())
-            minute_summary = summarize_minute_results(completed, active_settings, preset_labels)
+            minute_summary = summarize_minute_results(completed, active_settings, effective_preset_labels())
             manifest["labels"] = minute_summary["labels"]
             manifest["primary_label"] = minute_summary["labels"][0]
             manifest["minute_summary"] = minute_summary
@@ -1006,28 +1219,44 @@ def main() -> int:
                 upload_queue.task_done()
 
     def run_camera_worker() -> None:
-        while True:
-            item = camera_queue.get()
+        """Capture one usable image for each real-clock second, independently of radar."""
+        if not camera:
+            return
+        second_index = 0
+        while second_index < expected_chunks:
+            target = capture_started_monotonic + second_index
+            remaining = target - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(remaining, 1.0))
+                continue
+            if time.monotonic() >= stop_at:
+                return
+            captured_at = iso_now()
+            monotonic_ns = time.monotonic_ns()
+            stamp = captured_at.replace("-", "").replace(":", "").replace("T", "_")
+            stamp = stamp.replace("+", "_").replace(".", "_")[:19]
+            image_path = output_dir / f"camera_{second_index:03d}_{stamp}.jpg"
+            frame = {
+                "second_index": second_index,
+                "captured_at": captured_at,
+                "monotonic_ns": monotonic_ns,
+                "path": str(image_path),
+            }
             try:
-                if item is None:
-                    return
-                entry = item
-                if not camera:
-                    continue
-                stamp = str(entry.get("started") or iso_now()).replace("-", "").replace(":", "").replace("T", "_")
-                stamp = stamp.replace("+", "_").replace(".", "_")[:19]
-                image_path = output_dir / f"camera_{int(entry['chunk_index']):03d}_{stamp}.jpg"
-                try:
-                    capture_camera_image(camera, image_path)
-                    entry["camera_path"] = str(image_path)
-                    with publish_lock:
-                        write_live_manifest()
-                    if isinstance(entry.get("result"), dict):
-                        upload_queue.put(int(entry["chunk_index"]))
-                except Exception as exc:
-                    entry["camera_error"] = str(exc)
-            finally:
-                camera_queue.task_done()
+                capture_camera_image(camera, image_path)
+                with publish_lock:
+                    camera_frames.append(frame)
+                    manifest["outputs"].setdefault("camera", {})["frames"] = camera_frames
+                    if second_index < len(radar_chunk_results):
+                        radar_chunk_results[second_index].update({
+                            "camera_path": str(image_path),
+                            "camera_captured_at": captured_at,
+                            "camera_monotonic_ns": monotonic_ns,
+                        })
+                    write_live_manifest()
+            except Exception as exc:
+                manifest["warnings"].append(f"Camera second {second_index} failed: {exc}")
+            second_index += 1
 
     def run_analysis_worker() -> None:
         try:
@@ -1217,6 +1446,7 @@ def main() -> int:
                 analyzer.handle.close()
 
     def run_radar_reader(radar: Any) -> None:
+        nonlocal radar_frame_count, radar_first_frame_at, radar_last_frame_at
         frames: list[bytes] = []
         frame_times: list[float] = []
         live_settings: dict[str, Any] = {}
@@ -1228,6 +1458,9 @@ def main() -> int:
             except queue.Empty:
                 continue
             captured_at = time.monotonic()
+            radar_frame_count += 1
+            radar_first_frame_at = captured_at if radar_first_frame_at is None else radar_first_frame_at
+            radar_last_frame_at = captured_at
             if not frames:
                 live_settings = load_processing_settings()
             if captured_at - last_live_enqueue >= LIVE_VISUALIZATION_INTERVAL_SECONDS:
@@ -1264,13 +1497,13 @@ def main() -> int:
                 "settings": settings_snapshot,
                 "frame_sequence_start": int.from_bytes(frames[0][4:8], "little"),
                 "frame_sequence_end": int.from_bytes(frames[-1][4:8], "little"),
+                "frame_monotonic_ns": [int(value * 1_000_000_000) for value in frame_times],
             }
             radar_chunk_results.append(chunk_entry)
             manifest["outputs"]["radar"]["chunks"].append(chunk_entry)
             manifest["expected_chunks"] = max(expected_chunks, len(radar_chunk_results))
             with publish_lock:
                 write_live_manifest()
-            camera_queue.put(chunk_entry)
             upload_queue.put(chunk_index)
             analysis_job = (
                 "chunk",
@@ -1296,25 +1529,61 @@ def main() -> int:
             )
 
     try:
-        if not args.no_csi and csi_port is not None:
-            csi_file = output_dir / "wifi_csi.csv"
-            csi_started = iso_now()
-            csi_thread = threading.Thread(
-                target=collect_csi,
-                args=(csi_port, args.csi_baud, csi_file, csi_stop),
+        if not args.no_sensehat:
+            sense_file = output_dir / "sense_hat.jsonl"
+            manifest["outputs"]["sense_hat"] = {
+                "type": "json-lines",
+                "path": str(sense_file),
+                "files": [str(sense_file)],
+                "started": iso_now(),
+            }
+            sense_thread = threading.Thread(
+                target=collect_sensehat,
+                args=(sense_file, csi_stop),
+                name="SenseHat",
                 daemon=True,
             )
-            csi_thread.start()
+            sense_thread.start()
+
+        if not args.no_csi and csi_ports:
+            csi_started = iso_now()
+            receivers: list[dict[str, Any]] = []
+            for index, csi_port in enumerate(csi_ports, start=1):
+                csi_file = output_dir / (
+                    "wifi_csi.csv" if len(csi_ports) == 1 else f"wifi_csi_{index:02d}.csv"
+                )
+                csi_thread = threading.Thread(
+                    target=collect_csi,
+                    args=(csi_port, args.csi_baud, csi_file, csi_stop),
+                    name=f"CSIReceiver-{index}",
+                    daemon=True,
+                )
+                csi_thread.start()
+                csi_threads.append(csi_thread)
+                receivers.append({
+                    "path": str(csi_file),
+                    "type": "csv",
+                    "device": csi_port,
+                    "device_id": str(
+                        (load_processing_settings().get("csi_device_ids") or {}).get(csi_port)
+                        or f"csi-{index}"
+                    ),
+                    "baud": args.csi_baud,
+                    "started": csi_started,
+                })
             manifest["outputs"]["wifi_csi"] = {
-                "path": str(csi_file),
+                # Primary fields preserve compatibility with v4 readers.
+                **receivers[0],
                 "type": "csv",
-                "device": csi_port,
                 "baud": args.csi_baud,
+                "receiver_count": len(receivers),
+                "display_name": f"csix{len(receivers)}" if len(receivers) > 1 else "csi",
+                "receivers": receivers,
                 "detected_candidates": csi_candidates,
                 "started": csi_started,
                 "source": "USB-connected ESP32 receiver printing ESP-NOW CSI_DATA lines",
             }
-        elif not args.no_csi and csi_port is None:
+        elif not args.no_csi and not csi_ports:
             csi_file = output_dir / "wifi_csi.csv"
             with open(csi_file, "w", encoding="utf-8", newline="") as output_fd:
                 csv.writer(output_fd).writerow(["host_timestamp", "monotonic_ns", "serial_port", "raw_csi_line"])
@@ -1336,9 +1605,9 @@ def main() -> int:
                 manifest["warnings"].append("No /dev/video* USB camera device found; skipping chunk images.")
             else:
                 manifest["outputs"]["camera"] = {
-                    "type": "chunked-jpeg",
+                    "type": "one-jpeg-per-synchronized-second",
                     "device": camera,
-                    "frames_per_image": RADAR_FRAMES_PER_CHUNK,
+                    "frames": camera_frames,
                 }
                 camera_thread = threading.Thread(
                     target=run_camera_worker,
@@ -1363,11 +1632,13 @@ def main() -> int:
             radar_analysis_thread.start()
             radar_live_thread.start()
             radar_upload_thread.start()
-            radar = None
             try:
+                radar_lock = acquire_radar_lock()
                 radar = start_radar_capture()
             except Exception as exc:
                 manifest["warnings"].append(f"Radar failed to start: {exc}")
+                release_radar_lock(radar_lock)
+                radar_lock = None
             if radar is not None:
                 radar_reader_thread = threading.Thread(
                     target=run_radar_reader,
@@ -1384,16 +1655,25 @@ def main() -> int:
             time.sleep(min(remaining, 0.25))
         if radar_reader_thread is not None:
             radar_reader_thread.join(timeout=2)
-        stop_radar_capture(radar if not args.no_radar else None)
+        stop_radar_capture(radar)
+        radar = None
+        if radar_lock is not None:
+            settle_radar_gpio()
+        release_radar_lock(radar_lock)
+        radar_lock = None
 
     except KeyboardInterrupt:
         manifest["errors"].append("Interrupted by user.")
     except Exception as exc:
         manifest["errors"].append(str(exc))
     finally:
+        stop_radar_capture(radar)
+        release_radar_lock(radar_lock)
         csi_stop.set()
-        if csi_thread is not None:
+        for csi_thread in csi_threads:
             csi_thread.join(timeout=5)
+        if sense_thread is not None:
+            sense_thread.join(timeout=5)
         if radar_analysis_thread is not None:
             analysis_queue.put(None)
             radar_analysis_thread.join(timeout=90.0)
@@ -1403,7 +1683,6 @@ def main() -> int:
             live_analysis_queue.put(None)
             radar_live_thread.join(timeout=5.0)
         if camera_thread is not None:
-            camera_queue.put(None)
             camera_thread.join(timeout=30.0)
         if radar_upload_thread is not None:
             upload_queue.put(None)
@@ -1456,8 +1735,9 @@ def main() -> int:
                 chunk.get("settings") for chunk in radar_chunk_results
                 if isinstance(chunk.get("settings"), dict)
             ), load_processing_settings())
-            minute_summary = summarize_minute_results(completed_chunks, minute_settings, preset_labels)
-            manifest["preset_labels"] = preset_labels
+            current_labels = effective_preset_labels()
+            minute_summary = summarize_minute_results(completed_chunks, minute_settings, current_labels)
+            manifest["preset_labels"] = current_labels
             manifest["labels"] = minute_summary["labels"]
             manifest["primary_label"] = minute_summary["labels"][0]
             manifest["minute_summary"] = minute_summary
@@ -1472,10 +1752,11 @@ def main() -> int:
             enqueue_home_assistant(minute_entry, minute_summary["occupancy"], minute_summary, scope="minute")
             manifest["home_assistant"] = minute_entry.get("home_assistant")
         else:
-            manifest["preset_labels"] = preset_labels
+            current_labels = effective_preset_labels()
+            manifest["preset_labels"] = current_labels
             radar_files_present = any(output_dir.glob("radar_*.bin"))
             quality_label = "radar-analysis-failed" if radar_files_present else "radar-missing"
-            manifest["labels"] = list(dict.fromkeys([*preset_labels, "empty", "absent", quality_label]))
+            manifest["labels"] = list(dict.fromkeys([*current_labels, "empty", "absent", quality_label]))
             manifest["primary_label"] = manifest["labels"][0]
             manifest["minute_summary"] = {
                 "occupancy": {
@@ -1502,26 +1783,73 @@ def main() -> int:
         radar_files = sorted(str(path) for path in output_dir.glob("radar_*.bin"))
         if radar_files:
             manifest["outputs"].setdefault("radar", {})["files"] = radar_files
+        radar_span = (
+            radar_last_frame_at - radar_first_frame_at
+            if radar_first_frame_at is not None and radar_last_frame_at is not None
+            else 0.0
+        )
+        radar_rate = (
+            (radar_frame_count - 1) / radar_span
+            if radar_frame_count > 1 and radar_span > 0
+            else 0.0
+        )
+        if "radar" in manifest["outputs"]:
+            manifest["outputs"]["radar"].update({
+                "sample_count": radar_frame_count,
+                "average_sampling_rate_hz": round(radar_rate, 3),
+                "observed_span_seconds": round(radar_span, 3),
+            })
         camera_files = sorted(str(path) for path in output_dir.glob("camera_*.jpg"))
         if camera_files:
             manifest["outputs"].setdefault("camera", {})["files"] = camera_files
-        if camera is not None and len(camera_files) != len(radar_files):
-            manifest["errors"].append(
-                f"Camera captured {len(camera_files)} of {len(radar_files)} expected chunk images."
+        if camera is not None and len(camera_files) != expected_chunks:
+            manifest["warnings"].append(
+                f"Camera captured {len(camera_files)} of {expected_chunks} synchronized second images."
             )
 
         wifi_csi = manifest["outputs"].get("wifi_csi")
         if isinstance(wifi_csi, dict):
-            path = Path(wifi_csi["path"])
-            if not path.exists() and not args.no_csi:
-                with open(path, "w", encoding="utf-8", newline="") as output_fd:
-                    csv.writer(output_fd).writerow(["host_timestamp", "monotonic_ns", "serial_port", "raw_csi_line"])
-                wifi_csi["data_quality"] = "capture_error"
-                manifest["errors"].append("CSI capture failed; wrote the required header-only minute CSV.")
-            if path.exists():
-                wifi_csi["bytes"] = path.stat().st_size
-            if path.exists() and path.stat().st_size < 100:
-                manifest["warnings"].append("ESP32 CSI receiver was detected but produced no CSI_DATA samples this minute.")
+            receivers = wifi_csi.get("receivers") if isinstance(wifi_csi.get("receivers"), list) else [wifi_csi]
+            for receiver in receivers:
+                if not isinstance(receiver, dict) or not receiver.get("path"):
+                    continue
+                path = Path(str(receiver["path"]))
+                receiver["device_id"] = str(
+                    (load_processing_settings().get("csi_device_ids") or {}).get(str(receiver.get("device")))
+                    or receiver.get("device_id")
+                    or "csi"
+                )
+                if not path.exists() and not args.no_csi:
+                    with open(path, "w", encoding="utf-8", newline="") as output_fd:
+                        csv.writer(output_fd).writerow(["host_timestamp", "monotonic_ns", "serial_port", "raw_csi_line"])
+                    receiver["data_quality"] = "capture_error"
+                    manifest["errors"].append(
+                        f"CSI capture failed for {receiver.get('device')}; wrote a header-only minute CSV."
+                    )
+                if path.exists():
+                    receiver["bytes"] = path.stat().st_size
+                    receiver.update(csi_capture_stats(path))
+                if path.exists() and receiver.get("sample_count", 0) == 0:
+                    manifest["warnings"].append(
+                        f"ESP32 CSI receiver {receiver.get('device')} produced no CSI_DATA samples this minute."
+                    )
+            if receivers:
+                primary = receivers[0]
+                for key in ("bytes", "sample_count", "average_sampling_rate_hz", "observed_span_seconds"):
+                    if key in primary:
+                        wifi_csi[key] = primary[key]
+            wifi_csi["receivers"] = receivers
+        manifest["sampling_rates_hz"] = {
+            "radar": round(radar_rate, 3),
+            "wifi_csi": {
+                str(receiver.get("device_id") or receiver.get("device") or index): receiver.get("average_sampling_rate_hz", 0.0)
+                for index, receiver in enumerate(
+                    (wifi_csi.get("receivers") if isinstance(wifi_csi, dict) and isinstance(wifi_csi.get("receivers"), list) else []),
+                    start=1,
+                )
+                if isinstance(receiver, dict)
+            },
+        }
         manifest["expected_chunks"] = len(radar_chunk_results)
 
         manifest["capture_started"] = capture_started
@@ -1530,6 +1858,27 @@ def main() -> int:
         manifest["status"] = "success" if not manifest["errors"] else "partial" if manifest["warnings"] else "error"
         manifest_file = output_dir / "manifest.json"
         merge_home_assistant_status()
+        try:
+            manifest["container"] = build_capture_container(output_dir, manifest, remove_fragments=True)
+            manifest["assets"] = [
+                {
+                    "sensor": "synchronized_capture",
+                    "filename": "capture.npz",
+                    "content_type": "application/x-npz",
+                    "coverage": "all synchronized sensor samples",
+                    "labels": manifest.get("labels") or [],
+                },
+                *([{
+                    "sensor": "radar_tracking",
+                    "filename": "xy-tracking.json",
+                    "content_type": "application/json",
+                    "labels": manifest.get("labels") or [],
+                }] if (output_dir / "xy-tracking.json").exists() else []),
+            ]
+        except Exception as exc:
+            manifest["errors"].append(f"Synchronized container finalization failed: {exc}")
+        manifest["status"] = "success" if not manifest["errors"] else "partial" if manifest["warnings"] else "error"
+        manifest = compact_manifest(manifest)
         write_json_atomic(manifest_file, manifest)
 
         chown_to_invoking_user(output_dir)

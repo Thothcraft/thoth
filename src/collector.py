@@ -20,6 +20,10 @@ DEFAULT_CAPTURE_SCRIPT = Path(
 )
 DEFAULT_PYTHON = os.environ.get("THOTH_CAPTURE_PYTHON", sys.executable)
 PREPARE_LEAD_SECONDS = 5.0
+# Finish physical acquisition before the next wall-clock boundary. This gives
+# serial and GPIO drivers time to release their devices while CPU-heavy radar
+# analysis from the completed minute may continue in the old worker.
+CAPTURE_DURATION_SECONDS = 58.0
 CAPTURE_SETTINGS_PATH = Path(
     os.environ.get("THOTH_CAPTURE_SETTINGS", THOTH_ROOT / "config" / "capture_settings.json")
 )
@@ -28,6 +32,7 @@ active_captures: list[subprocess.Popen] = []
 shutdown_requested = False
 
 sys.path.insert(0, str(THOTH_ROOT / "src"))
+from backend.capture_manager import cleanup_old_minutes
 
 
 DEFAULT_CAPTURE_SETTINGS = {
@@ -53,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run synchronized Thoth minute captures continuously.")
     parser.add_argument("--capture-script", default=str(DEFAULT_CAPTURE_SCRIPT))
     parser.add_argument("--python", default=DEFAULT_PYTHON)
-    parser.add_argument("--keep-minutes", type=int, default=300)
+    parser.add_argument("--max-disk-percent", type=float, default=95.0)
     return parser.parse_args()
 
 
@@ -136,18 +141,19 @@ def reap_captures() -> None:
 def start_capture(python: str, capture_script: str, target: datetime) -> subprocess.Popen:
     settings = load_capture_settings()
     command = [
-        python, capture_script, "--duration", "59.5",
+        python, capture_script, "--duration", str(CAPTURE_DURATION_SECONDS),
         "--chunk-seconds", str(settings["chunk_seconds"]),
         "--scheduled-start", target.isoformat(),
     ]
-    preferred_csi = os.environ.get("THOTH_CSI_PORT")
-    if not preferred_csi:
-        preferred_csi = next((
-            str(path) for pattern in ("ttyACM*", "ttyUSB*")
-            for path in sorted(Path("/dev").glob(pattern))
-        ), None)
-    if preferred_csi:
-        command.extend(["--csi-port", preferred_csi])
+    # Explicit ports may be comma-separated.  With no override the minute
+    # collector performs its own ESP32-aware multi-device discovery.
+    preferred_csi = [
+        item.strip()
+        for item in os.environ.get("THOTH_CSI_PORT", "").split(",")
+        if item.strip()
+    ]
+    for port in preferred_csi:
+        command.extend(["--csi-port", port])
     for label in settings["labels"]:
         command.extend(["--label", label])
     for sensor, flag in SENSOR_FLAGS.items():
@@ -171,7 +177,7 @@ def main() -> int:
         return 1
 
     print(f"Thoth collector using {capture_script}")
-    print(f"Retention limit is {args.keep_minutes} minute folders (enforced by the dashboard cleanup job)")
+    print(f"Capture retention uses up to {args.max_disk_percent:.1f}% of disk space")
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
     # Always start on an actual wall-clock minute boundary. Starting a full
@@ -201,6 +207,7 @@ def main() -> int:
         # its explicit target. At most two children coexist for a few seconds:
         # one finishing the prior minute and one waiting for the next boundary.
         reap_captures()
+        cleanup_old_minutes(max_disk_percent=args.max_disk_percent)
         start_capture(args.python, capture_script, target)
         target += timedelta(minutes=1)
         if target.timestamp() + 5 < time.time():

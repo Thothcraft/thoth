@@ -154,8 +154,15 @@
             {% if minute == active_minute %}
             <p class="mt-3 text-xs text-slate-500">This minute is still being written. Playback may improve once capture closes.</p>
             {% endif %}
+            {% elif camera_frame_url %}
+            <img id="minute-camera" class="w-full rounded-2xl bg-black object-contain shadow-inner" src="{{ camera_frame_url }}?second=0" alt="Camera frame for synchronized second 1">
+            <div class="mt-3 flex items-center gap-3 text-xs text-slate-600">
+                <button id="camera-play" type="button" class="rounded-lg border border-slate-300 px-3 py-1.5 font-semibold">Play</button>
+                <input id="camera-second" aria-label="Camera second" type="range" min="0" max="{{ (minute_info.expected_chunks or 1) - 1 }}" value="0" class="min-w-0 flex-1 accent-slate-950">
+                <span id="camera-second-label" class="w-20 text-right font-mono">1 / {{ minute_info.expected_chunks or 1 }}</span>
+            </div>
             {% else %}
-            <p class="text-sm text-slate-500">No video file found.</p>
+            <p class="text-sm text-slate-500">No camera data found.</p>
             {% endif %}
         </div>
 
@@ -185,7 +192,21 @@
         <div id="tab-manifest" class="tab-panel hidden pt-5">
             <pre id="capture-manifest" data-url="{{ manifest_url }}" class="max-h-[640px] overflow-auto whitespace-pre-wrap rounded-2xl bg-slate-950 p-4 text-xs text-emerald-200">Open this tab to load the manifest.</pre>
         </div>
-    </section>
+</section>
+
+{% if camera_frame_url %}
+<script>
+(() => {
+  const image=document.getElementById('minute-camera'), slider=document.getElementById('camera-second'), label=document.getElementById('camera-second-label'), play=document.getElementById('camera-play');
+  if(!image||!slider||!play)return;
+  let timer=null;
+  function show(){const second=Number(slider.value);image.src=`{{ camera_frame_url }}?second=${second}`;image.alt=`Camera frame for synchronized second ${second+1}`;label.textContent=`${second+1} / ${Number(slider.max)+1}`}
+  function stop(){window.clearInterval(timer);timer=null;play.textContent='Play'}
+  slider.addEventListener('input',()=>{stop();show()});
+  play.addEventListener('click',()=>{if(timer){stop();return}play.textContent='Pause';timer=window.setInterval(()=>{const next=Number(slider.value)+1;slider.value=String(next>Number(slider.max)?0:next);show()},1000)});
+})();
+</script>
+{% endif %}
 </div>
 
 <div id="chunk-dialog" class="chunk-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="chunk-dialog-title">

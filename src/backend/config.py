@@ -55,7 +55,7 @@ class Config:
     CAPTURE_DATA_DIR = os.getenv('CAPTURE_DATA_DIR', os.path.join(BASE_DIR, 'data'))
     LEGACY_CONFIG_DIR = os.path.join(DATA_DIR, 'config')
     LEGACY_DEVICE_ID_FILE = os.path.join(DATA_DIR, 'device_id.txt')
-    CAPTURE_KEEP_MINUTES = int(os.getenv('CAPTURE_KEEP_MINUTES', 300))
+    CAPTURE_MAX_DISK_PERCENT = min(99.0, max(1.0, float(os.getenv('CAPTURE_MAX_DISK_PERCENT', 95.0))))
     CAPTURE_CAMERA_DEVICE = os.getenv('CAPTURE_CAMERA_DEVICE', '/dev/video0')
     CAPTURE_CAMERA_WIDTH = int(os.getenv('CAPTURE_CAMERA_WIDTH', 640))
     CAPTURE_CAMERA_HEIGHT = int(os.getenv('CAPTURE_CAMERA_HEIGHT', 480))
