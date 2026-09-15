@@ -81,6 +81,7 @@ from backend.capture_container import (
     read_camera_frame,
     read_capture_metadata,
 )
+from backend.model_runtime import ModelRegistry, ModelValidationError
 
 THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / 'WS' / 'MMW-HAT' / 'MMW-HAT-Release'
@@ -181,6 +182,7 @@ os.makedirs(Config.CAPTURE_DATA_DIR, exist_ok=True)
 auth_manager = AuthManager(Config)
 device_manager = DeviceManager(Config)
 terminal_manager = SSHTerminalManager(socketio, Config)
+model_registry = ModelRegistry(THOTH_ROOT / 'models' / 'user')
 
 # Global state
 collection_active = False
@@ -1652,12 +1654,13 @@ def _write_json_file(path: Path, value: Dict[str, Any]) -> None:
 
 @app.route('/presence')
 def presence_view():
-    """Live browser visualization shared by the device and Research Portal."""
-    return render_template('presence.html')
+    return jsonify({'error': 'Built-in presence prediction has been removed; use an uploaded model'}), 410
 
 
 @app.route('/api/radar/occupancy', methods=['GET'])
 def api_radar_occupancy():
+    return jsonify({'error': 'Built-in occupancy prediction has been removed; use an uploaded model'}), 410
+    # Historical implementation retained below only to keep old capture readers compatible.
     state = _read_json_file(RADAR_OCCUPANCY_STATE, {
         'updated_at': 0,
         'occupied': False,
@@ -1818,24 +1821,11 @@ def settings():
         updates = {
             'portal_upload_allowed': str(payload.get('portal_upload_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
             'cloud_sync_allowed': str(payload.get('cloud_sync_allowed', '')).lower() in {'1', 'true', 'on', 'yes'},
-            'radar_detection_threshold_db': payload.get('radar_detection_threshold_db', 8.0),
-            'auto_occupancy_label_enabled': str(payload.get('auto_occupancy_label_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
-            'chunk_seconds': payload.get('chunk_seconds', 10.0),
-            'system_mode': payload.get('system_mode', 'balanced'),
             'labels': payload.get('labels', []),
-            'prediction_label_style': payload.get('prediction_label_style', 'occupancy'),
-            'people_count_label_enabled': str(payload.get('people_count_label_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
-            'sleep_study_enabled': str(payload.get('sleep_study_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
             'csi_device_ids': payload.get('csi_device_ids', {}),
         }
         try:
             saved = device_manager.save_device_settings(updates)
-            home_assistant = save_home_assistant_config({
-                'enabled': str(payload.get('home_assistant_enabled', '')).lower() in {'1', 'true', 'on', 'yes'},
-                'base_url': payload.get('home_assistant_base_url'),
-                'entity_id': payload.get('home_assistant_entity_id'),
-                'token': payload.get('home_assistant_token'),
-            })
         except (OSError, ValueError, TypeError) as exc:
             logger.error('Settings persistence failed: %s', exc)
             if request.is_json:
@@ -1843,7 +1833,7 @@ def settings():
             flash(f'Unable to persist settings: {exc}', 'error')
             return redirect(url_for('settings'))
         if request.is_json:
-            return jsonify({'success': True, 'settings': saved, 'home_assistant': home_assistant, 'sync_status': saved.get('sync_status')})
+            return jsonify({'success': True, 'settings': saved, 'sync_status': saved.get('sync_status')})
         flash('Sync pending' if saved.get('sync_pending') else 'Settings saved', 'success')
         return redirect(url_for('settings'))
 
@@ -1854,6 +1844,62 @@ def settings():
         home_assistant=load_home_assistant_config(),
         csi_devices=next((sensor.get('devices', []) for sensor in detect_sensor_inventory() if sensor.get('key') == 'esp32_csi'), []),
     )
+
+
+@app.route('/models')
+def models_page():
+    if 'username' not in session:
+        return redirect(url_for('login', next=url_for('models_page')))
+    return render_template('models.html', username=session.get('username'))
+
+
+@app.route('/api/models', methods=['GET', 'POST'])
+def api_models():
+    if 'username' not in session:
+        return jsonify({'success': False, 'message': 'Authentication required'}), 401
+    if request.method == 'GET':
+        return jsonify({'success': True, 'models': model_registry.list()})
+    uploaded = request.files.get('model')
+    if uploaded is None or not uploaded.filename:
+        return jsonify({'success': False, 'message': 'A .pt or .pth model is required'}), 400
+    try:
+        metadata = json.loads(request.form.get('metadata') or '{}')
+    except json.JSONDecodeError as exc:
+        return jsonify({'success': False, 'message': f'Invalid metadata JSON: {exc}'}), 422
+    suffix = Path(uploaded.filename).suffix.lower()
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temporary:
+            uploaded.save(temporary)
+            temporary_path = Path(temporary.name)
+        model = model_registry.add(temporary_path, metadata, source='local')
+        return jsonify({'success': True, 'model': model}), 201
+    except ModelValidationError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 422
+    finally:
+        if temporary_path:
+            temporary_path.unlink(missing_ok=True)
+
+
+@app.route('/api/models/<model_id>', methods=['GET', 'PATCH', 'DELETE'])
+def api_model(model_id):
+    if 'username' not in session:
+        return jsonify({'success': False, 'message': 'Authentication required'}), 401
+    model = next((item for item in model_registry.list() if item.get('id') == model_id), None)
+    if model is None:
+        return jsonify({'success': False, 'message': 'Model not found'}), 404
+    if request.method == 'GET':
+        return jsonify({'success': True, 'model': model})
+    try:
+        if request.method == 'DELETE':
+            model_registry.delete(model_id)
+            return jsonify({'success': True})
+        payload = request.get_json(silent=True) or {}
+        if 'enabled' not in payload:
+            return jsonify({'success': False, 'message': 'enabled is required'}), 400
+        return jsonify({'success': True, 'model': model_registry.set_enabled(model_id, bool(payload['enabled']))})
+    except KeyError:
+        return jsonify({'success': False, 'message': 'Model not found'}), 404
 
 
 @app.route('/api/settings', methods=['GET', 'PATCH'])
@@ -1897,19 +1943,13 @@ def api_sensor_inventory():
 
 @app.route('/api/internal/capture-chunk', methods=['POST'])
 def api_internal_capture_chunk():
-    """Forward one compact analyzed chunk to Brain."""
-    if request.remote_addr not in {'127.0.0.1', '::1', None}:
-        return jsonify({'success': False, 'message': 'Local requests only'}), 403
-    payload = request.get_json(silent=True) or {}
-    if not payload.get('minute') or payload.get('chunk_index') is None:
-        return jsonify({'success': False, 'message': 'minute and chunk_index are required'}), 400
-    success = device_manager.publish_capture_chunk(payload)
-    return jsonify({'success': success}), (202 if success else 503)
+    return jsonify({'success': False, 'message': 'Built-in chunk predictions have been removed'}), 410
 
 
 @app.route('/api/internal/home-assistant/publish', methods=['POST'])
 def api_internal_home_assistant_publish():
-    """Accept a live chunk from the local collector and return immediately."""
+    return jsonify({'success': False, 'message': 'Automatic occupancy publishing has been removed'}), 410
+    """Historical implementation retained below for compatibility reference."""
     if request.remote_addr not in {'127.0.0.1', '::1', None}:
         return jsonify({'success': False, 'message': 'Local requests only'}), 403
     payload = request.get_json(silent=True) or {}
@@ -2007,6 +2047,8 @@ def _capture_timeline_items(limit: Optional[int] = None) -> list[Dict[str, Any]]
             'minute': minute_dir.name,
             'modified': datetime.fromtimestamp(minute_dir.stat().st_mtime).isoformat(),
             'latest_chunk': summary,
+            'labels': (summary or {}).get('labels') or [],
+            'manifest_revision': (summary or {}).get('revision'),
         })
     for cache_key in set(_capture_manifest_cache) - active_cache_keys:
         _capture_manifest_cache.pop(cache_key, None)
@@ -2016,6 +2058,22 @@ def _capture_timeline_items(limit: Optional[int] = None) -> list[Dict[str, Any]]
 
 def _read_timeline_manifest_summary(path: Path) -> Optional[Dict[str, Any]]:
     """Read only the bounded manifest tail needed for one archive dot."""
+    try:
+        manifest = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        manifest = None
+    if isinstance(manifest, dict) and manifest.get('schema') == 'thoth-minute-manifest/v7':
+        latest_results = []
+        for model in manifest.get('model_predictions') or []:
+            if isinstance(model, dict) and isinstance(model.get('timeline'), list) and model['timeline']:
+                latest_results.append(model['timeline'][-1])
+        revision = f"{path.stat().st_mtime_ns}:{path.stat().st_size}"
+        return {
+            'state': 'captured',
+            'labels': manifest.get('labels') or [],
+            'model_results': latest_results,
+            'revision': revision,
+        }
     try:
         size = path.stat().st_size
         with path.open('rb') as handle:
@@ -2050,6 +2108,8 @@ def _read_timeline_manifest_summary(path: Path) -> Optional[Dict[str, Any]]:
         'state': state,
         'classification': 'green' if state == 'occupied' else 'red',
         'prediction': state,
+        'labels': manifest.get('labels') or [] if isinstance(manifest, dict) else [],
+        'revision': f"{path.stat().st_mtime_ns}:{path.stat().st_size}",
     }
 
 
@@ -2593,6 +2653,21 @@ def upload_capture_minute(minute):
     skipped = []
     import base64
 
+    def report_progress(state, **values):
+        if not device_id:
+            return
+        try:
+            requests.post(
+                f"{Config.BRAIN_SERVER_URL}/api/device/{device_id}/captures/{minute_dir.name}/upload-progress",
+                json={'state': state, **values},
+                headers={'Authorization': f'Bearer {auth_token}'},
+                timeout=10,
+            )
+        except requests.RequestException:
+            logger.warning('Unable to report %s upload progress for %s', state, minute_dir.name)
+
+    report_progress('preparing')
+
     has_container = (minute_dir / 'capture.npz').exists()
     all_files = sorted(
         path for path in minute_dir.iterdir()
@@ -2604,6 +2679,9 @@ def upload_capture_minute(minute):
             or (not has_container and path.name.startswith('camera_') and path.suffix.lower() in {'.jpg', '.jpeg'})
         )
     )
+    total_bytes = sum(path.stat().st_size for path in all_files)
+    bytes_uploaded = 0
+    report_progress('uploading', bytes_total=total_bytes, bytes_uploaded=0, files_total=len(all_files) + 1, files_uploaded=0)
 
     for path in all_files:
         if path.name == 'usb_camera.ffmpeg.log' and path.stat().st_size == 0:
@@ -2667,14 +2745,17 @@ def upload_capture_minute(minute):
                 response = requests.post(f"{Config.BRAIN_SERVER_URL}/file/upload", json=payload, headers=headers, timeout=120)
             if response.status_code in (200, 201):
                 uploaded.append({'name': path.name, 'bytes': path.stat().st_size})
+                bytes_uploaded += path.stat().st_size
             else:
                 detail = response.text[:300] if response.text else ''
                 errors.append(f"{path.name}: {response.status_code} {detail}".strip())
         except Exception as exc:
             errors.append(f"{path.name}: {exc}")
+        report_progress('uploading', bytes_total=total_bytes, bytes_uploaded=bytes_uploaded, files_total=len(all_files) + 1, files_uploaded=len(uploaded), error='; '.join(errors[-1:]) if errors else None)
 
     # The minute-named manifest completes an explicit full-upload request and
     # is the only operation that marks the minute as cloud uploaded.
+    report_progress('finalizing', bytes_total=total_bytes, bytes_uploaded=bytes_uploaded, files_total=len(all_files) + 1, files_uploaded=len(uploaded))
     try:
         raw = json.dumps(summary, default=str).encode('utf-8')
         response = requests.post(
@@ -2696,6 +2777,15 @@ def upload_capture_minute(minute):
             errors.append(f'{minute_dir.name}: {response.status_code} {response.text[:300]}')
     except Exception as exc:
         errors.append(f'{minute_dir.name}: {exc}')
+
+    report_progress(
+        'failed' if errors else 'completed',
+        bytes_total=total_bytes,
+        bytes_uploaded=bytes_uploaded if errors else total_bytes,
+        files_total=len(all_files) + 1,
+        files_uploaded=len(uploaded),
+        error='; '.join(errors) if errors else None,
+    )
 
     return jsonify({
         'status': 'success' if not errors else 'partial',

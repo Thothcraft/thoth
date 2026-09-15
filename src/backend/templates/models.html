@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Models - {{ super() }}{% endblock %}
+{% block content %}
+<div class="max-w-5xl mx-auto">
+  <header class="mb-8"><div class="text-xs font-semibold uppercase tracking-widest text-gray-500">User inference</div><h1 class="mt-2 text-4xl font-semibold">Models</h1><p class="mt-3 text-gray-600">Upload self-contained TorchScript classifiers. New and cloud-delivered models stay disabled until you enable them.</p></header>
+  <section class="card">
+    <form id="model-upload" class="space-y-4" enctype="multipart/form-data">
+      <label class="block"><span class="text-sm font-semibold">TorchScript artifact (.pt or .pth)</span><input class="form-input mt-2" name="model" type="file" accept=".pt,.pth" required></label>
+      <label class="block"><span class="text-sm font-semibold">thoth-model/v1 metadata</span><textarea class="form-input mt-2 font-mono text-xs" name="metadata" rows="12" required>{
+  "schema": "thoth-model/v1",
+  "name": "My classifier",
+  "version": "1.0.0",
+  "inputs": [{"sensor":"radar","representation":"raw_adc","frames":10,"shape":[1,10,128],"fit":"left_pad_latest","normalization":{"kind":"none"}}],
+  "output": {"kind":"logits","path":[]},
+  "class_names": ["class-a","class-b"]
+}</textarea></label>
+      <button class="btn btn-primary" type="submit">Validate and save disabled</button><span id="upload-result" class="ml-3 text-sm text-gray-600"></span>
+    </form>
+  </section>
+  <section><h2 class="mb-4 text-xl font-semibold">Installed models</h2><div id="model-list" class="space-y-3"><div class="text-sm text-gray-500">Loading…</div></div></section>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const list=document.getElementById('model-list'),result=document.getElementById('upload-result');
+const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+async function read(response){const body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.message||body.error||'Request failed');return body}
+async function load(){try{const body=await read(await fetch('/api/models',{cache:'no-store'})),models=body.models||[];list.innerHTML=models.length?models.map(model=>{const meta=model.metadata||{};return `<article class="card flex flex-wrap items-center justify-between gap-4"><div><h3 class="font-semibold">${esc(meta.name)} <span class="text-xs text-gray-500">${esc(meta.version)}</span></h3><p class="mt-1 text-xs text-gray-500">${esc((meta.inputs||[]).map(input=>input.sensor).join(' + '))} · SHA-256 ${esc(String(model.sha256||'').slice(0,12))}…</p>${model.last_error?`<p class="mt-2 text-sm text-red-700">${esc(model.last_error)}</p>`:''}</div><div class="flex gap-2"><button class="capture-action" data-toggle="${esc(model.id)}" data-enabled="${!model.enabled}">${model.enabled?'Disable':'Enable'}</button><button class="capture-action text-red-700" data-delete="${esc(model.id)}">Delete</button></div></article>`}).join(''):'<div class="card text-sm text-gray-500">No user models installed.</div>'}catch(error){list.textContent=error.message}}
+document.getElementById('model-upload').addEventListener('submit',async event=>{event.preventDefault();result.textContent='Validating dry run…';try{await read(await fetch('/api/models',{method:'POST',body:new FormData(event.currentTarget)}));result.textContent='Saved disabled.';await load()}catch(error){result.textContent=error.message}});
+list.addEventListener('click',async event=>{const toggle=event.target.closest('[data-toggle]'),remove=event.target.closest('[data-delete]');try{if(toggle)await read(await fetch(`/api/models/${encodeURIComponent(toggle.dataset.toggle)}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:toggle.dataset.enabled==='true'})}));if(remove&&confirm('Delete this model artifact?'))await read(await fetch(`/api/models/${encodeURIComponent(remove.dataset.delete)}`,{method:'DELETE'}));await load()}catch(error){showAlert(error.message,'error')}});load();
+</script>
+{% endblock %}

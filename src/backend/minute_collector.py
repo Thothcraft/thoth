@@ -27,6 +27,7 @@ if __package__ in (None, ""):
     from backend.config import Config  # type: ignore
     from backend.sensor_detection import likely_csi_serial_candidates, usable_usb_camera_devices  # type: ignore
     from backend.capture_container import build_capture_container  # type: ignore
+    from backend.model_runtime import ModelRegistry  # type: ignore
     from backend.radar_analysis import (  # type: ignore
         PersistentTargetIdentity,
         StreamingChunkAnalyzer,
@@ -35,10 +36,12 @@ if __package__ in (None, ""):
         load_room_config,
         occupancy_label,
     )
+    from backend.home_assistant import publish_model_occupancy  # type: ignore
 else:
     from .config import Config
     from .sensor_detection import likely_csi_serial_candidates, usable_usb_camera_devices
     from .capture_container import build_capture_container
+    from .model_runtime import ModelRegistry
     from .radar_analysis import (
         PersistentTargetIdentity,
         StreamingChunkAnalyzer,
@@ -47,6 +50,7 @@ else:
         load_room_config,
         occupancy_label,
     )
+    from .home_assistant import publish_model_occupancy
 
 THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / "WS" / "MMW-HAT" / "MMW-HAT-Release"
@@ -268,7 +272,12 @@ def write_json_atomic(path: Path, payload: object) -> None:
 
 
 def compact_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Create the concise on-disk v6 index for a synchronized container."""
+    """Create the deliberately small v7 minute index.
+
+    Sensor payloads and processing intermediates live in capture.npz.  The
+    manifest keeps only human-authored labels, sensor summaries, failures, and
+    user-model timelines.
+    """
     outputs = manifest.get("outputs") if isinstance(manifest.get("outputs"), dict) else {}
     compact_outputs: dict[str, Any] = {}
 
@@ -296,30 +305,13 @@ def compact_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
 
     radar = outputs.get("radar") if isinstance(outputs.get("radar"), dict) else None
     if radar is not None:
-        chunk_keys = (
-            "chunk_index", "started", "finished_capture", "chunk_seconds", "chunk_frames",
-            "status", "classification", "detected_frames", "evaluated_frames", "ratio",
-            "occupied", "location", "score", "people_count", "targets", "error", "performance",
-        )
-        chunks = []
-        for entry in radar.get("chunks") or []:
-            if not isinstance(entry, dict):
-                continue
-            chunk = {key: entry[key] for key in chunk_keys if key in entry and entry[key] is not None}
-            if entry.get("bin_path") and not manifest.get("container"):
-                chunk["bin_path"] = Path(str(entry["bin_path"])).name
-            if entry.get("camera_path") and not manifest.get("container"):
-                chunk["camera_path"] = Path(str(entry["camera_path"])).name
-            chunks.append(chunk)
         compact_outputs["radar"] = {
             "sample_count": int(radar.get("sample_count") or 0),
             "average_sampling_rate_hz": float(radar.get("average_sampling_rate_hz") or 0.0),
-            "chunks": chunks,
+            "chunk_count": len(radar.get("chunks") or []),
         }
         if not manifest.get("container"):
             compact_outputs["radar"]["files"] = [Path(str(value)).name for value in (radar.get("files") or [])]
-        if radar.get("xy_tracking"):
-            compact_outputs["radar"]["xy_tracking"] = Path(str(radar["xy_tracking"])).name
 
     for sensor in ("camera", "sense_hat"):
         output = outputs.get(sensor) if isinstance(outputs.get(sensor), dict) else None
@@ -332,20 +324,17 @@ def compact_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
                 if not manifest.get("container"):
                     compact_outputs[sensor]["files"] = [Path(str(value)).name for value in output["files"]]
 
-    summary = dict(manifest.get("minute_summary") or {})
-    summary.pop("labels", None)
     compact = {
         key: manifest[key] for key in (
             "folder_minute", "scheduled_start", "capture_started", "capture_finished",
             "duration_seconds", "chunk_seconds", "expected_chunks", "status", "host",
             "labels", "sensors_enabled", "warnings", "errors",
-            "device_id", "device_name", "capture_settings", "container", "assets",
+            "device_id", "device_name", "container", "model_predictions",
         ) if key in manifest
     }
     compact.update({
-        "schema": "thoth-minute-manifest/v6",
+        "schema": "thoth-minute-manifest/v7",
         "outputs": compact_outputs,
-        "minute_summary": summary,
     })
     return compact
 
@@ -353,11 +342,7 @@ def compact_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
 def load_processing_settings() -> dict[str, Any]:
     defaults: dict[str, Any] = {
         "labels": [],
-        "radar_detection_threshold_db": 8.0,
-        "auto_occupancy_label_enabled": True,
         "system_mode": "balanced",
-        "prediction_label_style": "occupancy",
-        "people_count_label_enabled": False,
         "sleep_study_enabled": False,
         "csi_device_ids": {},
         "revision": 0,
@@ -372,19 +357,8 @@ def load_processing_settings() -> dict[str, Any]:
         pass
     except Exception as exc:
         print(f"Unable to load processing settings: {exc}", file=sys.stderr)
-    if "radar_detection_threshold_db" not in loaded:
-        legacy_normalized = loaded.get("radar_detection_threshold_normalized")
-        if legacy_normalized is not None:
-            defaults["radar_detection_threshold_db"] = float(legacy_normalized) * 10.0
-    defaults["radar_detection_threshold_db"] = min(
-        30.0, max(0.0, float(defaults["radar_detection_threshold_db"]))
-    )
-    defaults["auto_occupancy_label_enabled"] = bool(defaults["auto_occupancy_label_enabled"])
     mode = str(defaults.get("system_mode") or "balanced").strip().lower()
     defaults["system_mode"] = mode if mode in {"responsive", "balanced", "precision"} else "balanced"
-    style = str(defaults.get("prediction_label_style") or "occupancy").strip().lower()
-    defaults["prediction_label_style"] = style if style in {"occupancy", "presence"} else "occupancy"
-    defaults["people_count_label_enabled"] = bool(defaults.get("people_count_label_enabled"))
     defaults["sleep_study_enabled"] = bool(defaults.get("sleep_study_enabled"))
     defaults["csi_device_ids"] = {
         str(port): str(device_id).strip()
@@ -749,14 +723,13 @@ def collect_csi(
             json.dump({"timestamp": iso_now(), "port": port, "baud": baud, "error": str(exc)}, fd, indent=2)
 
 
-def collect_sensehat(output_file: Path, stop_event: threading.Event, interval: float = 0.2) -> None:
+def collect_sensehat(output_file: Path, stop_event: threading.Event, errors: list[str], interval: float = 0.2) -> None:
     try:
         from sense_hat import SenseHat
     except Exception as exc:
-        output_file.with_suffix(".error.json").write_text(
-            json.dumps({"timestamp": iso_now(), "error": f"sense_hat import failed: {exc}"}, indent=2),
-            encoding="utf-8",
-        )
+        message = f"Sense HAT unavailable: {exc}"
+        errors.append(message)
+        logging.getLogger(__name__).error(message)
         return
 
     try:
@@ -777,10 +750,9 @@ def collect_sensehat(output_file: Path, stop_event: threading.Event, interval: f
                 fd.write(json.dumps(row, separators=(",", ":")) + "\n")
                 time.sleep(max(0.05, interval))
     except Exception as exc:
-        output_file.with_suffix(".error.json").write_text(
-            json.dumps({"timestamp": iso_now(), "error": str(exc)}, indent=2),
-            encoding="utf-8",
-        )
+        message = f"Sense HAT capture failed: {exc}"
+        errors.append(message)
+        logging.getLogger(__name__).error(message)
 
 
 def capture_camera_image(camera: str, output_file: Path) -> None:
@@ -930,7 +902,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=False)
 
     manifest: dict[str, Any] = {
-        "schema": "thoth-minute-manifest/v4",
+        "schema": "thoth-minute-manifest/v7",
         "collection_unit": "minute",
         "sample_unit": "one-second synchronized sensor window",
         "folder_minute": folder_name,
@@ -1001,7 +973,62 @@ def main() -> int:
     radar_first_frame_at: float | None = None
     radar_last_frame_at: float | None = None
     publish_lock = threading.Lock()
+    model_registry = ModelRegistry(THOTH_ROOT / "models" / "user")
+    model_queue: queue.Queue[Any] = queue.Queue()
+    model_thread: threading.Thread | None = None
+    radar_model_history: list[bytes] = []
     room_config = load_room_config()
+
+    def current_csi_samples() -> list[tuple[int, str]]:
+        samples: list[tuple[int, str]] = []
+        wifi = manifest.get("outputs", {}).get("wifi_csi", {})
+        receivers = wifi.get("receivers") if isinstance(wifi, dict) else None
+        if not isinstance(receivers, list):
+            receivers = [wifi] if isinstance(wifi, dict) else []
+        for receiver_index, receiver in enumerate(receivers):
+            try:
+                path = Path(str(receiver.get("path") or ""))
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    for line in handle:
+                        if "CSI_DATA" in line:
+                            samples.append((receiver_index, line.rstrip()))
+            except (AttributeError, OSError):
+                continue
+        return samples
+
+    def run_model_worker() -> None:
+        while True:
+            job = model_queue.get()
+            try:
+                if job is None:
+                    return
+                chunk_index, frames, timestamp = job
+                try:
+                    results = model_registry.run_enabled(frames, current_csi_samples(), chunk_index, timestamp)
+                except Exception as exc:
+                    logging.getLogger(__name__).error("User model runtime unavailable: %s", exc)
+                    results = []
+                if results:
+                    occupancy_results = [item for item in results if item.get("status") == "ok" and str(item.get("class", "")).lower() in {"occupied", "empty"}]
+                    if occupancy_results:
+                        selected = max(occupancy_results, key=lambda item: float(item.get("confidence") or 0.0))
+                        publish_model_occupancy(selected, folder_name, chunk_index=chunk_index)
+                    with publish_lock:
+                        timelines = manifest.setdefault("model_predictions", [])
+                        by_id = {str(item.get("model_id")): item for item in timelines if isinstance(item, dict)}
+                        for prediction in results:
+                            model_id = str(prediction.get("model_id"))
+                            timeline = by_id.setdefault(model_id, {
+                                "model_id": model_id,
+                                "model_name": prediction.get("model_name"),
+                                "model_version": prediction.get("model_version"),
+                                "timeline": [],
+                            })
+                            timeline["timeline"].append(prediction)
+                        manifest["model_predictions"] = list(by_id.values())
+                        write_live_manifest()
+            finally:
+                model_queue.task_done()
 
     def effective_preset_labels() -> list[str]:
         """Use the latest labels so additions and removals affect this minute."""
@@ -1449,8 +1476,6 @@ def main() -> int:
         nonlocal radar_frame_count, radar_first_frame_at, radar_last_frame_at
         frames: list[bytes] = []
         frame_times: list[float] = []
-        live_settings: dict[str, Any] = {}
-        last_live_enqueue = 0.0
         while time.monotonic() < stop_at:
             remaining = stop_at - time.monotonic()
             try:
@@ -1461,19 +1486,11 @@ def main() -> int:
             radar_frame_count += 1
             radar_first_frame_at = captured_at if radar_first_frame_at is None else radar_first_frame_at
             radar_last_frame_at = captured_at
-            if not frames:
-                live_settings = load_processing_settings()
-            if captured_at - last_live_enqueue >= LIVE_VISUALIZATION_INTERVAL_SECONDS:
-                enqueue_latest_chunk_frame(
-                    live_analysis_queue,
-                    live_queue_key,
-                    full_frame,
-                    captured_at,
-                    len(radar_chunk_results),
-                    live_settings,
-                )
-                last_live_enqueue = captured_at
             frames.append(full_frame)
+            radar_model_history.append(full_frame)
+            maximum_model_frames = max((int(spec.get("frames") or 0) for model in model_registry.list() if model.get("enabled") for spec in (model.get("metadata") or {}).get("inputs", []) if spec.get("sensor") == "radar"), default=RADAR_FRAMES_PER_CHUNK)
+            if len(radar_model_history) > maximum_model_frames:
+                del radar_model_history[:-maximum_model_frames]
             frame_times.append(captured_at)
             if len(frames) < RADAR_FRAMES_PER_CHUNK:
                 continue
@@ -1483,7 +1500,6 @@ def main() -> int:
             radar_path = output_dir / f"radar_{chunk_index:03d}_{timestamp}.bin"
             radar_path.write_bytes(b"".join(frames))
             duration = max(0.001, frame_times[-1] - frame_times[0])
-            settings_snapshot = load_processing_settings()
             chunk_entry: dict[str, Any] = {
                 "chunk_index": chunk_index,
                 "bin_path": str(radar_path),
@@ -1493,8 +1509,7 @@ def main() -> int:
                 "finished_capture": iso_now(),
                 "chunk_seconds": duration,
                 "chunk_frames": RADAR_FRAMES_PER_CHUNK,
-                "status": "loading",
-                "settings": settings_snapshot,
+                "status": "stored",
                 "frame_sequence_start": int.from_bytes(frames[0][4:8], "little"),
                 "frame_sequence_end": int.from_bytes(frames[-1][4:8], "little"),
                 "frame_monotonic_ns": [int(value * 1_000_000_000) for value in frame_times],
@@ -1505,20 +1520,7 @@ def main() -> int:
             with publish_lock:
                 write_live_manifest()
             upload_queue.put(chunk_index)
-            analysis_job = (
-                "chunk",
-                chunk_entry,
-                settings_snapshot,
-                tuple(frames),
-                frame_times[-1],
-            )
-            dropped_entries = enqueue_analysis_chunk(analysis_queue, analysis_job)
-            for dropped in dropped_entries:
-                dropped.update({
-                    "status": "captured",
-                    "data_quality": "analysis_deferred",
-                    "analysis_deferred_at": iso_now(),
-                })
+            model_queue.put((chunk_index, tuple(radar_model_history), iso_now()))
             frames = []
             frame_times = []
 
@@ -1529,6 +1531,8 @@ def main() -> int:
             )
 
     try:
+        model_thread = threading.Thread(target=run_model_worker, name="UserModelInference", daemon=True)
+        model_thread.start()
         if not args.no_sensehat:
             sense_file = output_dir / "sense_hat.jsonl"
             manifest["outputs"]["sense_hat"] = {
@@ -1539,7 +1543,7 @@ def main() -> int:
             }
             sense_thread = threading.Thread(
                 target=collect_sensehat,
-                args=(sense_file, csi_stop),
+                args=(sense_file, csi_stop, manifest["errors"]),
                 name="SenseHat",
                 daemon=True,
             )
@@ -1626,11 +1630,7 @@ def main() -> int:
             }
             with publish_lock:
                 write_live_manifest()
-            radar_analysis_thread = threading.Thread(target=run_analysis_worker, name="RadarAnalysis", daemon=True)
-            radar_live_thread = threading.Thread(target=run_live_analysis_worker, name="RadarLive", daemon=True)
             radar_upload_thread = threading.Thread(target=run_upload_worker, name="RadarUpload", daemon=True)
-            radar_analysis_thread.start()
-            radar_live_thread.start()
             radar_upload_thread.start()
             try:
                 radar_lock = acquire_radar_lock()
@@ -1687,98 +1687,17 @@ def main() -> int:
         if radar_upload_thread is not None:
             upload_queue.put(None)
             radar_upload_thread.join(timeout=15.0)
-        completed_chunks: list[dict[str, Any]] = []
-        for chunk in radar_chunk_results:
-            if not isinstance(chunk, dict):
-                continue
-            result = chunk.pop("result", None)
-            error = chunk.get("error")
-            if isinstance(result, dict):
-                completed_chunks.append(result)
-                chunk.update({
-                    "status": result.get("occupancy", {}).get("label", "empty"),
-                    "detected_frames": result.get("occupancy", {}).get("detected_frames", 0),
-                    "evaluated_frames": result.get("occupancy", {}).get("evaluated_frames", 0),
-                    "occupied": result.get("occupancy", {}).get("label") == "occupied",
-                    "location": result.get("location"),
-                    "score": result.get("score"),
-                    "targets": result.get("targets", []),
-                    "people_count": result.get("people_count", 0),
-                    "labels": result.get("labels", []),
-                    "activity_labels": result.get("activity_labels") or [],
-                    "activity": result.get("activity"),
-                    "join": result.get("join"),
-                    "analysis": {
-                        "occupancy": result.get("occupancy"),
-                        "location": result.get("location"),
-                        "score": result.get("score"),
-                        "people_count": result.get("people_count", 0),
-                        "targets": result.get("targets") or [],
-                        "xy_map": result.get("xy_map") or {},
-                    },
-                    "finished": iso_now(),
-                })
-                if not error:
-                    chunk.pop("error", None)
-            elif error:
-                chunk.update({
-                    "status": "empty",
-                    "classification": "red",
-                    "occupied": False,
-                    "data_quality": "analysis_error",
-                    "error": error,
-                    "finished": iso_now(),
-                })
-
-        if completed_chunks:
-            minute_settings = next((
-                chunk.get("settings") for chunk in radar_chunk_results
-                if isinstance(chunk.get("settings"), dict)
-            ), load_processing_settings())
-            current_labels = effective_preset_labels()
-            minute_summary = summarize_minute_results(completed_chunks, minute_settings, current_labels)
-            manifest["preset_labels"] = current_labels
-            manifest["labels"] = minute_summary["labels"]
-            manifest["primary_label"] = minute_summary["labels"][0]
-            manifest["minute_summary"] = minute_summary
-            manifest["chunk_metadata_schema_version"] = 3
-            xy_payload = compile_minute_xy_payload(completed_chunks)
-            xy_payload["live"] = False
-            write_json_atomic(output_dir / "xy-tracking.json", xy_payload)
-            manifest["outputs"].setdefault("radar", {})["xy_tracking"] = str(
-                output_dir / "xy-tracking.json"
-            )
-            minute_entry = {"finished": iso_now()}
-            enqueue_home_assistant(minute_entry, minute_summary["occupancy"], minute_summary, scope="minute")
-            manifest["home_assistant"] = minute_entry.get("home_assistant")
-        else:
-            current_labels = effective_preset_labels()
-            manifest["preset_labels"] = current_labels
-            radar_files_present = any(output_dir.glob("radar_*.bin"))
-            quality_label = "radar-analysis-failed" if radar_files_present else "radar-missing"
-            manifest["labels"] = list(dict.fromkeys([*current_labels, "empty", "absent", quality_label]))
-            manifest["primary_label"] = manifest["labels"][0]
-            manifest["minute_summary"] = {
-                "occupancy": {
-                    "label": "empty",
-                    "classification": "red",
-                    "occupied_chunks": 0,
-                    "evaluated_chunks": 0,
-                    "detected_frames": 0,
-                    "evaluated_frames": 0,
-                    "ratio": 0.0,
-                    "threshold_db": float(load_processing_settings().get("radar_detection_threshold_db") or 8.0),
-                },
-                "labels": manifest["labels"],
-                "activity_labels": ["absent", "empty", quality_label],
-                "data_quality": quality_label,
-                "people_count": 0,
-                "targets": [],
-                "location": None,
-                "score": None,
-            }
-            if not radar_files_present and not args.no_radar:
-                manifest["errors"].append("Radar produced no complete 10-frame chunks for this minute.")
+        if model_thread is not None:
+            model_queue.put(None)
+            model_thread.join(timeout=90.0)
+            if model_thread.is_alive():
+                manifest["errors"].append("User model inference exceeded its shutdown deadline.")
+        current_labels = effective_preset_labels()
+        manifest["preset_labels"] = current_labels
+        manifest["labels"] = current_labels
+        manifest["primary_label"] = current_labels[0] if current_labels else None
+        if not any(output_dir.glob("radar_*.bin")) and not args.no_radar:
+            manifest["errors"].append("Radar produced no complete 10-frame chunks for this minute.")
 
         radar_files = sorted(str(path) for path in output_dir.glob("radar_*.bin"))
         if radar_files:

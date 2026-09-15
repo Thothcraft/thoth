@@ -54,11 +54,18 @@ python3 -m venv --system-site-packages "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install -q \
     flask flask-socketio flask-cors requests python-dotenv eventlet netifaces \
     APScheduler psutil 'PyJWT>=2.8.0' numpy numba scipy pyfftw spidev \
-    gpiozero matplotlib pyserial pexpect
-"$VENV_DIR/bin/python" -c 'import flask, gpiozero, numba, pyfftw, scipy, serial, spidev'
+    gpiozero matplotlib pyserial pexpect \
+    torch --extra-index-url https://download.pytorch.org/whl/cpu
+"$VENV_DIR/bin/python" -c 'import flask, gpiozero, numba, pyfftw, scipy, serial, spidev, torch'
 
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$THOTH_ROOT/data" "$THOTH_ROOT/config" "$THOTH_ROOT/logs"
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$THOTH_ROOT/config/homeassistant"
+
+# Seed the two optional example classifiers when the checkout is next to Desktop/models.
+EXAMPLE_MODELS="$(dirname "$THOTH_ROOT")/models"
+if [[ -d "$EXAMPLE_MODELS" ]]; then
+  sudo -u "$SERVICE_USER" "$VENV_DIR/bin/python" "$THOTH_ROOT/setup/seed-models.py" "$EXAMPLE_MODELS" || echo "Example model import skipped; upload models from the dashboard." >&2
+fi
 
 log "Installing Home Assistant Container"
 systemctl enable --now docker

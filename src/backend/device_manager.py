@@ -15,6 +15,8 @@ import threading
 import base64
 import re
 import shutil
+import hashlib
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Any, Tuple, List
@@ -27,6 +29,7 @@ from .capture_manager import (
     list_minutes, list_minute_folders, capture_files, minute_summary,
     get_minute, update_minute_labels,
 )
+from .model_runtime import ModelRegistry, ModelValidationError
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -204,21 +207,6 @@ class DeviceManager:
         }
 
     def _coerce_setting_value(self, key: str, value: Any) -> Any:
-        if key == 'radar_detection_threshold_db':
-            try:
-                return min(30.0, max(0.0, float(value)))
-            except (TypeError, ValueError):
-                return 8.0
-        if key == 'radar_detection_threshold_normalized':
-            try:
-                return min(0.95, max(0.05, float(value)))
-            except (TypeError, ValueError):
-                return 0.45
-        if key in {'occupancy_threshold_percent', 'yellow_threshold_percent', 'green_threshold_percent'}:
-            try:
-                return min(100.0, max(0.0, float(value)))
-            except (TypeError, ValueError):
-                return 50.0
         if key == 'chunk_seconds':
             try:
                 return min(30.0, max(2.0, float(value)))
@@ -227,15 +215,7 @@ class DeviceManager:
         if key == 'system_mode':
             mode = str(value or 'balanced').strip().lower()
             return mode if mode in {'responsive', 'balanced', 'precision'} else 'balanced'
-        if key == 'occupancy_vote_chunks':
-            try:
-                return min(60, max(1, int(value)))
-            except (TypeError, ValueError):
-                return 1
-        if key == 'prediction_label_style':
-            style = str(value or 'occupancy').strip().lower()
-            return style if style in {'occupancy', 'presence'} else 'occupancy'
-        if key in {'people_count_label_enabled', 'sleep_study_enabled'}:
+        if key == 'sleep_study_enabled':
             if isinstance(value, str):
                 return value.strip().lower() in {'1', 'true', 'yes', 'on'}
             return bool(value)
@@ -295,17 +275,8 @@ class DeviceManager:
         processing_keys = {
             'labels',
             'sensors',
-            'radar_detection_threshold_normalized',
-            'radar_detection_threshold_db',
-            'occupancy_threshold_percent',
-            'yellow_threshold_percent',
-            'green_threshold_percent',
-            'auto_occupancy_label_enabled',
             'chunk_seconds',
             'system_mode',
-            'occupancy_vote_chunks',
-            'prediction_label_style',
-            'people_count_label_enabled',
             'sleep_study_enabled',
             'csi_device_ids',
         }
@@ -433,12 +404,8 @@ class DeviceManager:
                 'esp32_csi': True,
                 'sense_hat': True,
             },
-            'radar_detection_threshold_db': 8.0,
-            'auto_occupancy_label_enabled': True,
             'chunk_seconds': 10.0,
             'system_mode': 'balanced',
-            'prediction_label_style': 'occupancy',
-            'people_count_label_enabled': False,
             'sleep_study_enabled': False,
             'csi_device_ids': {},
             'calibrations': {},
@@ -468,33 +435,14 @@ class DeviceManager:
         except (TypeError, ValueError):
             revision = 0
         updated_at = source.get('updated_at')
-        threshold_db_source = source.get('radar_detection_threshold_db')
-        if threshold_db_source is None and 'radar_detection_threshold_normalized' in source:
-            try:
-                threshold_db_source = float(source['radar_detection_threshold_normalized']) * 10.0
-            except (TypeError, ValueError):
-                threshold_db_source = 8.0
         return {
             'labels': labels,
             'sensors': sensors,
-            'radar_detection_threshold_db': self._coerce_setting_value(
-                'radar_detection_threshold_db',
-                threshold_db_source if threshold_db_source is not None else 8.0,
-            ),
-            'auto_occupancy_label_enabled': self._coerce_setting_value(
-                'auto_occupancy_label_enabled', source.get('auto_occupancy_label_enabled', True)
-            ),
             'chunk_seconds': self._coerce_setting_value(
                 'chunk_seconds', source.get('chunk_seconds', 10.0)
             ),
             'system_mode': self._coerce_setting_value(
                 'system_mode', source.get('system_mode', 'balanced')
-            ),
-            'prediction_label_style': self._coerce_setting_value(
-                'prediction_label_style', source.get('prediction_label_style', 'occupancy')
-            ),
-            'people_count_label_enabled': self._coerce_setting_value(
-                'people_count_label_enabled', source.get('people_count_label_enabled', False)
             ),
             'sleep_study_enabled': self._coerce_setting_value(
                 'sleep_study_enabled', source.get('sleep_study_enabled', False)
@@ -516,9 +464,9 @@ class DeviceManager:
             source = path if path.exists() else legacy_path
             if source.exists():
                 loaded = json.loads(source.read_text(encoding='utf-8'))
-                # Migrate processing controls from the legacy device settings file.
+                # Migrate only collection controls from the legacy device settings file.
                 legacy_device_settings = self.load_device_settings()
-                for key in ('radar_detection_threshold_normalized', 'radar_detection_threshold_db', 'occupancy_threshold_percent', 'yellow_threshold_percent', 'green_threshold_percent', 'auto_occupancy_label_enabled', 'chunk_seconds', 'system_mode', 'occupancy_vote_chunks', 'prediction_label_style', 'people_count_label_enabled', 'sleep_study_enabled'):
+                for key in ('chunk_seconds', 'system_mode', 'sleep_study_enabled'):
                     if key not in loaded and key in legacy_device_settings:
                         loaded[key] = legacy_device_settings[key]
                 if source != path:
@@ -531,16 +479,6 @@ class DeviceManager:
     def save_capture_settings(self, settings: Dict[str, Any] | None, *, local_change: bool = True) -> Dict[str, Any]:
         current = self.load_capture_settings()
         updates = dict(settings or {})
-        if (
-            'radar_detection_threshold_db' not in updates
-            and 'radar_detection_threshold_normalized' in updates
-        ):
-            try:
-                updates['radar_detection_threshold_db'] = (
-                    float(updates['radar_detection_threshold_normalized']) * 10.0
-                )
-            except (TypeError, ValueError):
-                pass
         normalized = self.normalize_capture_settings({**current, **updates})
         if local_change:
             normalized['revision'] = max(int(current.get('revision') or 0), int(normalized.get('revision') or 0)) + 1
@@ -683,6 +621,15 @@ class DeviceManager:
                 success = True
                 message = f'Deleted {len(deleted)} capture minute(s)'
                 response = None
+            elif name in {'enable_model', 'disable_model'}:
+                model_id = str(payload.get('model_id') or '')
+                if not model_id:
+                    raise ValueError('model_id is required')
+                registry = ModelRegistry(self._models_root() / 'user')
+                registry.set_enabled(model_id, name == 'enable_model')
+                success = True
+                message = f"Model {'enabled' if name == 'enable_model' else 'disabled'}"
+                response = None
             else:
                 response = None
             if response is not None:
@@ -795,55 +742,41 @@ class DeviceManager:
         return []
 
     def install_deployment_model(self, deployment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Persist a Brain deployment payload as a local edge model."""
+        """Validate and persist a cloud model disabled in the user registry."""
         model_data = deployment.get('model_data')
         if not model_data:
             return None
 
         deployment_id = str(deployment.get('deployment_id') or uuid.uuid4())
-        model_name = str(deployment.get('model_name') or 'model')
-        data_type = self._deployment_data_type(deployment)
-        model_dir = self._models_root() / data_type
-        model_dir.mkdir(parents=True, exist_ok=True)
-
-        stem = self._safe_model_stem(f"{model_name}_{deployment_id[:8]}")
-        model_path = model_dir / f"{stem}.pth"
-        metadata_path = model_path.with_suffix('.json')
-
+        temporary_path: Path | None = None
         try:
             raw = base64.b64decode(str(model_data))
-            model_path.write_bytes(raw)
-            config = deployment.get('config') if isinstance(deployment.get('config'), dict) else {}
-            preprocessing = config.get('preprocessing') if isinstance(config.get('preprocessing'), dict) else {}
-            labels = self._deployment_labels(deployment)
-            if not labels:
-                raise ValueError("Deployment metadata must include a non-empty labels list")
-            metadata = {
-                'model_name': model_name,
-                'deployment_id': deployment_id,
-                'model_type': deployment.get('model_type') or config.get('model_type') or 'unknown',
-                'data_type': data_type,
-                'labels': labels,
-                'classes': labels,
-                'class_names': labels,
-                'input_shape': config.get('input_shape') or preprocessing.get('input_shape'),
-                'output_shape': config.get('output_shape') or preprocessing.get('output_shape'),
-                'preprocessing': preprocessing,
-                'deployed_at': config.get('deployed_at') or deployment.get('deployed_at'),
-                'installed_at': datetime.utcnow().isoformat(),
-                'runtime': 'local-thoth-edge',
-            }
-            metadata_path.write_text(json.dumps(metadata, indent=2), encoding='utf-8')
+            expected_hash = str(deployment.get('model_hash') or '').lower()
+            actual_hash = hashlib.sha256(raw).hexdigest()
+            if expected_hash and expected_hash != actual_hash:
+                raise ValueError('Downloaded model hash does not match deployment metadata')
+            metadata = deployment.get('metadata')
+            if not isinstance(metadata, dict):
+                config = deployment.get('config') if isinstance(deployment.get('config'), dict) else {}
+                metadata = config.get('metadata')
+            if not isinstance(metadata, dict):
+                raise ValueError('Deployment is missing thoth-model/v1 metadata')
+            with tempfile.NamedTemporaryFile(suffix='.pth', delete=False) as temporary:
+                temporary.write(raw)
+                temporary_path = Path(temporary.name)
+            installed = ModelRegistry(self._models_root() / 'user').add(temporary_path, metadata, source='cloud')
             return {
-                'model_path': str(model_path),
-                'metadata_path': str(metadata_path),
-                'data_type': data_type,
-                'labels': labels,
-                'classes': labels,
+                'model_id': installed['id'],
+                'model_path': str(self._models_root() / 'user' / 'artifacts' / installed['filename']),
+                'data_type': '+'.join(item['sensor'] for item in installed['metadata']['inputs']),
+                'labels': installed['metadata']['class_names'],
             }
-        except Exception as exc:
+        except (ValueError, ModelValidationError) as exc:
             logger.error('Failed to install deployment %s locally: %s', deployment_id, exc)
             return None
+        finally:
+            if temporary_path:
+                temporary_path.unlink(missing_ok=True)
 
     def _apply_pending_deployments(self, result: Dict[str, Any]) -> None:
         pending = result.get('pending_deployments') if isinstance(result, dict) else None
@@ -890,7 +823,13 @@ class DeviceManager:
                 return False
 
             url = f"{self.config.BRAIN_SERVER_URL}/api/device/{self.device_id}/deployment/{deployment_id}/ack"
-            response = self.session.post(url, params={'status': 'delivered' if accepted else 'declined'}, timeout=15)
+            response = self.session.post(
+                url,
+                params={'status': 'delivered' if accepted else 'declined'},
+                json={'runtime_model_id': (installed or {}).get('id')},
+                headers={"Authorization": f"Bearer {self.auth_token}"},
+                timeout=15,
+            )
             if response.status_code not in (200, 201):
                 logger.error("Failed to acknowledge deployment %s: %s", deployment_id, response.text)
                 return False
@@ -907,7 +846,7 @@ class DeviceManager:
                 'classes': (installed or {}).get('labels') or self._deployment_labels(deployment),
                 'device_id': self.device_id,
                 'device_name': deployment.get('device_name') or self.device_id,
-                'status': 'running' if accepted else 'declined',
+                'status': 'delivered' if accepted else 'declined',
                 'accepted_at': datetime.utcnow().isoformat() if accepted else None,
                 'timeline': [],
             })

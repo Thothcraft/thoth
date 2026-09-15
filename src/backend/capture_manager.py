@@ -602,7 +602,7 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
     labels = list(dict.fromkeys([*manifest_labels, *result_labels]))
     if not labels and folder_label:
         labels = [folder_label]
-    if not labels:
+    if not labels and (not isinstance(manifest, dict) or manifest.get("schema") != "thoth-minute-manifest/v7"):
         completed_chunks = [
             chunk for chunk in (progress.get("chunks") or [])
             if chunk.get("state") in {"occupied", "empty"}
@@ -634,8 +634,9 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
         "expected_chunks": progress.get("expected_chunks"),
         "progress": progress,
         "labels": labels,
-        "occupancy": ((manifest.get("minute_summary") or {}).get("occupancy") or manifest.get("auto_occupancy_label")) if isinstance(manifest, dict) else None,
-        "predictions": bool(files["predictions"] and files["predictions"].exists()),
+        "occupancy": None if isinstance(manifest, dict) and manifest.get("schema") == "thoth-minute-manifest/v7" else (((manifest.get("minute_summary") or {}).get("occupancy") or manifest.get("auto_occupancy_label")) if isinstance(manifest, dict) else None),
+        "model_predictions": manifest.get("model_predictions", []) if isinstance(manifest, dict) else [],
+        "predictions": bool((manifest or {}).get("model_predictions")) if isinstance(manifest, dict) and manifest.get("schema") == "thoth-minute-manifest/v7" else bool(files["predictions"] and files["predictions"].exists()),
         "files": {
             "container": bool(container_path and container_path.exists()),
             "video": bool((files["video"] and files["video"].exists()) or files.get("camera_images") or int(container_info.get("camera_frames") or 0)),

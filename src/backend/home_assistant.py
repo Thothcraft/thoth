@@ -130,6 +130,45 @@ def _occupancy_payload(
     }
 
 
+def publish_model_occupancy(model_result: Dict[str, Any], minute: str, *, chunk_index: Optional[int] = None) -> Dict[str, Any]:
+    """Publish an occupied/empty state only when an enabled user model says so."""
+    label = str(model_result.get("class") or "").strip().lower()
+    if label not in {"occupied", "empty"}:
+        return _record_status({"success": False, "status": "not_occupancy_class"})
+    config = load_home_assistant_config(include_token=True)
+    if not config.get("enabled"):
+        return _record_status({"success": False, "status": "disabled"})
+    if not config.get("token"):
+        return _record_status({"success": False, "status": "not_configured"})
+    body = {
+        "state": "on" if label == "occupied" else "off",
+        "attributes": {
+            "friendly_name": "Thoth Model Occupancy",
+            "device_class": "occupancy",
+            "label": label,
+            "confidence": model_result.get("confidence"),
+            "model_id": model_result.get("model_id"),
+            "model_name": model_result.get("model_name"),
+            "model_version": model_result.get("model_version"),
+            "capture_minute": minute,
+            "chunk_index": chunk_index,
+            "timestamp": model_result.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+        },
+    }
+    try:
+        response = requests.post(
+            f"{str(config['base_url']).rstrip('/')}/api/states/{config['entity_id']}",
+            headers={"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"},
+            json=body,
+            timeout=5,
+        )
+        response.raise_for_status()
+        return _record_status({"success": True, "status": "published", "label": label, "model_id": model_result.get("model_id")})
+    except Exception as exc:
+        logger.warning("Home Assistant model occupancy publish failed: %s", exc)
+        return _record_status({"success": False, "status": "publish_error", "error": str(exc)})
+
+
 def publish_occupancy(
     occupancy: Dict[str, Any],
     minute: str,

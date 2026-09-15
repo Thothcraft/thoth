@@ -33,7 +33,7 @@
   <header class="captures-header">
     <div>
       <h1>Captures</h1>
-      <p>Every retained minute, ordered by capture time. Select a minute to inspect its synchronized chunks, plots, sensor files, labels, and predictions.</p>
+      <p>Every retained minute, ordered by capture time. Select a minute to inspect synchronized sensor files, human labels, and user-model results.</p>
       <div id="capture-status" class="capture-status">{{ 'Collecting now' if system_status.collection_active else 'Collection paused' }}</div>
     </div>
     <div class="capture-actions">
@@ -52,8 +52,8 @@
       <div id="capture-timeline" class="timeline">
         {% for minute in minutes %}
         {% set active = minute.minute == active_minute %}
-        {% set state = minute.latest_chunk.state if minute.latest_chunk else 'missing-data' %}
-        {% set color = '#246bfd' if active else '#238653' if state == 'occupied' else '#d3463b' if state == 'empty' else '#9b978f' %}
+        {% set state = minute.latest_chunk.state if minute.latest_chunk else 'captured' %}
+        {% set color = '#246bfd' if active else '#6f5bd3' if minute.latest_chunk and minute.latest_chunk.model_results else '#9b978f' %}
         <a href="{{ url_for('capture_detail', minute=minute.minute) }}" class="capture-minute" title="{{ minute.minute }} · {{ 'collecting' if active else state }}" style="--dot:{{ color }}">
           <span class="capture-dot"></span>
           <span class="capture-time">{{ minute.minute[9:11] }}:{{ minute.minute[11:13] }}</span>
@@ -64,9 +64,8 @@
       </div>
     </div>
     <div class="legend">
-      <span><i style="background:#9b978f"></i>Missing radar data</span>
-      <span><i style="background:#d3463b"></i>Empty</span>
-      <span><i style="background:#238653"></i>Occupied</span>
+      <span><i style="background:#9b978f"></i>Captured</span>
+      <span><i style="background:#6f5bd3"></i>Model result available</span>
       <span><i style="background:#246bfd"></i>Current</span>
     </div>
   </section>
@@ -76,8 +75,8 @@ const timeline=document.getElementById('capture-timeline');
 const viewport=document.getElementById('timeline-viewport');
 const status=document.getElementById('capture-status');
 function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[character]))}
-function stateFor(minute,active){if(minute.minute===active)return'current';return minute.latest_chunk?.state==='occupied'?'occupied':minute.latest_chunk?.state==='empty'?'empty':'missing-data'}
-function colorFor(state){return state==='current'?'#246bfd':state==='occupied'?'#238653':state==='empty'?'#d3463b':'#9b978f'}
+function stateFor(minute,active){if(minute.minute===active)return'current';return minute.latest_chunk?.model_results?.length?'predicted':'captured'}
+function colorFor(state){return state==='current'?'#246bfd':state==='predicted'?'#6f5bd3':'#9b978f'}
 function render(minutes,active){timeline.innerHTML=minutes.length?minutes.map(minute=>{const state=stateFor(minute,active),name=String(minute.minute||'');return`<a href="/captures/${encodeURIComponent(name)}" class="capture-minute" title="${escapeHtml(name)} · ${state}" style="--dot:${colorFor(state)}"><span class="capture-dot"></span><span class="capture-time">${escapeHtml(name.slice(9,11))}:${escapeHtml(name.slice(11,13))}</span><span class="capture-date">${escapeHtml(name.slice(4,6))}/${escapeHtml(name.slice(6,8))}</span></a>`}).join(''):'<div class="timeline-empty">No captured minutes yet.</div>';document.getElementById('capture-count').textContent=minutes.length}
 async function readJson(response){const text=await response.text();try{return JSON.parse(text)}catch{return{message:`Unexpected response (${response.status})`}}}
 async function control(action){const button=document.getElementById(`${action}-capturing`);button.disabled=true;try{const response=await fetch(`/api/collection/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),body=await readJson(response);if(!response.ok)throw new Error(body.message||'Command failed');status.textContent=body.message;document.getElementById('start-capturing').classList.toggle('hidden',action==='start');document.getElementById('stop-capturing').classList.toggle('hidden',action==='stop');await refresh(true)}catch(error){status.textContent=error.message}finally{button.disabled=false}}

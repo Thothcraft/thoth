@@ -140,9 +140,7 @@
                     Home
                 </a>
                 {% if session.get('username') %}
-                <a href="{{ url_for('presence_view') }}" class="text-sm">
-                    Presence
-                </a>
+                <a href="{{ url_for('models_page') }}" class="text-sm">Models</a>
                 <details class="relative">
                     <summary class="cursor-pointer list-none text-sm">More ▾</summary>
                     <div class="site-menu absolute right-0 mt-3 w-52 p-2">
