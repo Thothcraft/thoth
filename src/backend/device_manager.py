@@ -1275,6 +1275,10 @@ class DeviceManager:
             if response.status_code == 200:
                 result = response.json()
                 self._apply_response_settings(result)
+                # Heartbeats carry newly queued model deployments. Apply them
+                # here as well as during initial registration so a device that
+                # is already online receives cloud models without re-pairing.
+                self._apply_pending_deployments(result)
                 logger.debug(f"Status update successful: {result}")
                 return True
             else:
