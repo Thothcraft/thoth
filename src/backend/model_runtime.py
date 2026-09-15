@@ -372,14 +372,14 @@ class ModelRegistry:
                 missing = []
                 for spec in metadata.get("inputs") or []:
                     if spec.get("sensor") == "radar":
-                        if len(radar_frames) < int(spec.get("frames") or 0):
-                            missing.append(f"radar requires {spec.get('frames')} frames; received {len(radar_frames)}")
+                        if not radar_frames:
+                            missing.append(f"radar requires {spec.get('frames')} frames; received 0")
                         array = radar_tensor(radar_frames, spec)
                     else:
                         receivers = set(spec.get("receivers") or [])
                         available = sum(1 for value in csi_samples if not receivers or (isinstance(value, tuple) and int(value[0]) in receivers) or (not isinstance(value, tuple) and 0 in receivers))
-                        if available < int(spec.get("samples") or 0):
-                            missing.append(f"csi requires {spec.get('samples')} selected samples; received {available}")
+                        if available == 0:
+                            missing.append(f"csi requires {spec.get('samples')} selected samples; received 0")
                         array = csi_tensor(csi_samples, spec)
                     tensors.append(torch.from_numpy(np.ascontiguousarray(array)).float())
                 if missing:

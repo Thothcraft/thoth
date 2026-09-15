@@ -94,7 +94,7 @@ def test_csi_only_representations_and_missing_samples(tmp_path, representation):
     registry = ModelRegistry(tmp_path / "models")
     saved = registry.add(artifact, metadata([csi_input(representation)]))
     registry.set_enabled(saved["id"], True)
-    assert registry.run_enabled([], [(0, "CSI_DATA [1,2,3,4]")], 0, "now")[0]["status"] == "skipped"
+    assert registry.run_enabled([], [], 0, "now")[0]["status"] == "skipped"
     result = registry.run_enabled([], [(0, "CSI_DATA [1,2,3,4]")] * 2, 1, "later")[0]
     assert result["status"] == "ok"
 
