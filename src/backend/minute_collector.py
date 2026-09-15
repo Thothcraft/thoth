@@ -1138,6 +1138,8 @@ def main() -> int:
         write_json_atomic(output_dir / "manifest.json", snapshot)
 
     def publish_radar_results() -> None:
+        # Built-in semantic chunk publishing is removed in manifest v7.
+        return
         with publish_lock:
             completed = [entry["result"] for entry in radar_chunk_results if isinstance(entry.get("result"), dict)]
             if not completed:
@@ -1171,6 +1173,9 @@ def main() -> int:
             write_live_manifest()
 
     def upload_live_chunk(index: int) -> None:
+        # Live chunk API carried heuristic occupancy fields; model timelines
+        # are persisted locally and uploaded with the completed manifest.
+        return
         entry = next((
             item for item in radar_chunk_results
             if int(item.get("chunk_index", -1)) == index
@@ -1208,6 +1213,8 @@ def main() -> int:
             print(f"Live timeline update {index} deferred: {exc}", file=sys.stderr)
 
     def enqueue_home_assistant(entry: dict[str, Any], occupancy: dict[str, Any], result: dict[str, Any], scope: str = "chunk") -> None:
+        # Home Assistant updates come only from publish_model_occupancy.
+        return
         payload = json.dumps({
             "minute": folder_name,
             "scope": scope,
