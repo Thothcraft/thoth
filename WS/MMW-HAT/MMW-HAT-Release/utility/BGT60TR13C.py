@@ -16,7 +16,7 @@ RET_VAL_ERR = -1
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class BGT60TR13C:
-    def __init__(self, spi_bus=0, spi_dev=0, spi_speed=10_000_000, rst_pin=12, irq_pin=25, version=0, save_to_file=None):
+    def __init__(self, spi_bus=0, spi_dev=0, spi_speed=10_000_000, rst_pin=12, irq_pin=25, version=0, save_to_file=None, strict_gpio=False):
         self.__spi = None
         self.__rst = None
         self.__irq = None
@@ -29,8 +29,14 @@ class BGT60TR13C:
             self.__spi.open(spi_bus, spi_dev)
             self.__spi.max_speed_hz = spi_speed
             self.__spi.mode = 0
-            self.__rst = self._claim_output_gpio(rst_pin, [17, 27, 22], "reset")
-            self.__irq = self._claim_input_gpio(irq_pin, [24, 23, 18], "irq")
+            if strict_gpio:
+                self.__rst = DigitalOutputDevice(rst_pin)
+                logging.info("Using reset GPIO %s for reset", rst_pin)
+                self.__irq = DigitalInputDevice(irq_pin, pull_up=False, bounce_time=0.001)
+                logging.info("Using irq GPIO %s for irq", irq_pin)
+            else:
+                self.__rst = self._claim_output_gpio(rst_pin, [17, 27, 22], "reset")
+                self.__irq = self._claim_input_gpio(irq_pin, [24, 23, 18], "irq")
             if self.__rst is not None:
                 self.hard_reset()
         except Exception:
@@ -104,8 +110,11 @@ class BGT60TR13C:
             if self.check_gsr_reg() != RET_VAL_OK:
                 logging.error("GSR Error Detected")
                 self.print_gsr_reg()
-            else:
-                fifo_data = rx_data[4:]
+                # A stale FIFO status bit must not permanently stop the
+                # collection loop. Keep the burst so subsequent complete
+                # frames remain available; the error is still logged for
+                # hardware diagnostics.
+            fifo_data = rx_data[4:]
         else:
             logging.error("Invalid num_samples.")
         return fifo_data
