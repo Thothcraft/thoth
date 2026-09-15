@@ -398,7 +398,8 @@ class ModelRegistry:
                     probabilities = probabilities / probabilities.sum().clamp_min(1e-12)
                 index = int(torch.argmax(probabilities).item())
                 names = metadata["class_names"]
-                results.append({**base, "status": "ok", "class": names[index], "confidence": float(probabilities[index].item()), "scores": {name: float(probabilities[i].item()) for i, name in enumerate(names)}})
+                confidence = float(probabilities[index].item())
+                results.append({**base, "status": "ok", "class": names[index], "confidence": confidence, "confidence_saturated": confidence >= 0.999, "scores": {name: float(probabilities[i].item()) for i, name in enumerate(names)}})
                 self._set_last_error(str(item.get("id")), None)
             except Exception as exc:
                 message = str(exc)
