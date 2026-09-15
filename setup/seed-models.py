@@ -10,6 +10,8 @@ if str(ROOT / "src") not in sys.path:
 from backend.model_runtime import ModelRegistry
 
 source = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else ROOT.parent / "models"
+if not source.exists():
+    source = ROOT / "models" / "examples"
 registry = ModelRegistry(ROOT / "models" / "user")
 existing = {item.get("sha256") for item in registry.list()}
 specs = {
