@@ -2367,10 +2367,17 @@ def api_capture_detail(minute):
     for chunk in (detail.get('progress') or {}).get('chunks', []):
         chunk.pop('xy_map', None)
     if request.args.get('compact') in {'1', 'true', 'yes'}:
+        outputs = (detail.get('manifest') or {}).get('outputs') if isinstance(detail.get('manifest'), dict) else None
+        if not isinstance(outputs, dict):
+            outputs = {}
         response = jsonify({'status': 'success', 'capture': {
             'minute': detail.get('minute'),
             'capture_finished': detail.get('capture_finished'),
             'progress': detail.get('progress') or {},
+            'labels': detail.get('labels') or [],
+            'model_predictions': detail.get('model_predictions') or [],
+            'outputs': outputs,
+            'files': detail.get('files') or {},
         }})
         response.headers['Cache-Control'] = 'no-store, max-age=0'
         return response

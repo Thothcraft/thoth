@@ -15,9 +15,11 @@ if not source.exists():
 registry = ModelRegistry(ROOT / "models" / "user")
 existing = {item.get("sha256") for item in registry.list()}
 specs = {
-    "radar_occupancy_e3_finetuned.pt": [{"sensor": "radar", "representation": "raw_adc", "frames": 10, "shape": [1, 10, 2, 1, 3], "fit": "left_pad_latest", "normalization": {"kind": "none"}}],
+    # Radar ADC values are signed int16 samples; scale them to the model's
+    # expected approximately [-1, 1] range before inference.
+    "radar_occupancy_e3_finetuned.pt": [{"sensor": "radar", "representation": "raw_adc", "frames": 10, "shape": [1, 10, 2, 1, 3], "fit": "left_pad_latest", "normalization": {"kind": "zscore", "mean": 0, "std": 32768}}],
     "fusion_occupancy_e2.pt": [
-        {"sensor": "radar", "representation": "raw_adc", "frames": 10, "shape": [1, 10, 2, 1, 3], "fit": "left_pad_latest", "normalization": {"kind": "none"}},
+        {"sensor": "radar", "representation": "raw_adc", "frames": 10, "shape": [1, 10, 2, 1, 3], "fit": "left_pad_latest", "normalization": {"kind": "zscore", "mean": 0, "std": 32768}},
         {"sensor": "csi", "representation": "iq", "samples": 256, "shape": [1, 256, 52], "fit": "left_pad_latest", "normalization": {"kind": "none"}},
     ],
 }
