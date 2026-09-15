@@ -1694,6 +1694,22 @@ def main() -> int:
         if radar_upload_thread is not None:
             upload_queue.put(None)
             radar_upload_thread.join(timeout=15.0)
+        if not radar_chunk_results and model_registry.list():
+            # Make sensor outages visible in every enabled model timeline.
+            try:
+                skipped = model_registry.run_enabled([], current_csi_samples(), 0, iso_now())
+                if skipped:
+                    with publish_lock:
+                        timelines = manifest.setdefault("model_predictions", [])
+                        by_id = {str(item.get("model_id")): item for item in timelines if isinstance(item, dict)}
+                        for prediction in skipped:
+                            model_id = str(prediction.get("model_id"))
+                            timeline = by_id.setdefault(model_id, {"model_id": model_id, "model_name": prediction.get("model_name"), "model_version": prediction.get("model_version"), "timeline": []})
+                            timeline["timeline"].append(prediction)
+                        manifest["model_predictions"] = list(by_id.values())
+                        write_live_manifest()
+            except Exception as exc:
+                manifest["errors"].append(f"Unable to record model sensor status: {exc}")
         if model_thread is not None:
             model_queue.put(None)
             model_thread.join(timeout=90.0)
