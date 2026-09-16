@@ -98,7 +98,7 @@ def normalize_metadata(metadata: object) -> dict[str, Any]:
             raise ModelValidationError("v1 inputs must contain radar and/or csi at most once")
         seen.add(sensor)
         representation = str(raw.get("representation") or "").strip().lower()
-        allowed = {"raw_adc", "fft_power"} if sensor == "radar" else {"iq", "magnitude_phase"}
+        allowed = {"raw_adc", "fft_power", "e2_maps"} if sensor == "radar" else {"iq", "magnitude_phase", "e2_grid"}
         if representation not in allowed:
             raise ModelValidationError(f"unsupported {sensor} representation: {representation}")
         shape = raw.get("shape") or raw.get("expected_shape")
@@ -144,6 +144,12 @@ def normalize_metadata(metadata: object) -> dict[str, Any]:
         path = []
     if not isinstance(path, list) or any(not isinstance(item, (str, int)) for item in path):
         raise ModelValidationError("output.path must be a list of dict keys and/or tuple indexes")
+    execution = str(metadata.get("execution") or "chunk").strip().lower()
+    if execution not in {"chunk", "minute"}:
+        raise ModelValidationError("execution must be chunk or minute")
+    aggregation = metadata.get("aggregation")
+    if aggregation is not None and not isinstance(aggregation, dict):
+        raise ModelValidationError("aggregation must be an object")
     return {
         "schema": MODEL_SCHEMA,
         "name": name,
@@ -151,6 +157,8 @@ def normalize_metadata(metadata: object) -> dict[str, Any]:
         "inputs": inputs,
         "output": {"kind": output_kind, "path": path},
         "class_names": _clean_names(metadata.get("class_names") or metadata.get("labels")),
+        "execution": execution,
+        "aggregation": dict(aggregation) if isinstance(aggregation, dict) else {},
     }
 
 
@@ -287,6 +295,180 @@ def csi_tensor(samples: Sequence[str | tuple[int, str]], spec: dict[str, Any]) -
     return _normalize(_fit(values, spec["shape"], spec["fit"]), spec["normalization"])
 
 
+# ---------------------------------------------------------------------------
+# E2 occupancy preprocessing ("e2_maps" / "e2_grid" representations)
+#
+# Ported from the radar repo's E2/preprocess.py so the exported occupancy
+# models receive exactly the tensors they were trained on:
+#   radar: uint12 payload -> Hann-windowed range FFT -> range-Doppler and
+#          range-azimuth maps -> log1p -> bilinear resize to 24x24 ->
+#          non-overlapping 50-frame windows -> per-channel z-score.
+#   csi:   CSI_DATA lines -> 52-subcarrier amplitude -> per-window linear
+#          interpolation onto a 128-step grid -> log1p -> per-subcarrier
+#          z-score; windows with <2 samples stay zeroed.
+# Normalization statistics come from the archive's embedded meta.json.
+# ---------------------------------------------------------------------------
+
+E2_WINDOW_FRAMES = 50
+E2_MAP_SIZE = 24
+E2_CSI_STEPS = 128
+E2_SUBCARRIERS = 52
+E2_RANGE_BINS = 64
+E2_AZ_BINS = 16
+E2_FRAME_PAYLOAD_BYTES = 64 * 128 * 3 * 12 // 8  # 36864
+_E2_HANN_R = np.hanning(128).astype(np.float32)
+_E2_HANN_D = np.hanning(64).astype(np.float32)
+_E2_CSI_MASK = np.array(
+    [False] * 6 + [True] * 26 + [False] + [True] * 26 + [False] * 5,
+    dtype=bool,
+)
+_E2_CSI_RE = re.compile(r"\[([^\]]+)\]")
+
+
+def _e2_read_uint12(blob: bytes) -> np.ndarray:
+    """Vectorized uint12 decode: packed bytes -> float32 samples."""
+    data = np.frombuffer(blob, dtype=np.uint8)
+    triplets = data.reshape(-1, 3).astype(np.uint16)
+    a, b, c = triplets[:, 0], triplets[:, 1], triplets[:, 2]
+    out = np.empty(a.shape[0] * 2, dtype=np.float32)
+    out[0::2] = (a << 4) + (b >> 4)
+    out[1::2] = ((b % 16) << 8) + c
+    return out
+
+
+def _e2_frames_to_maps(payloads: Sequence[bytes]) -> np.ndarray:
+    """(N) raw 36864-byte payloads -> (N, 2, 24, 24) log1p maps."""
+    from scipy import fft as sfft
+    from scipy.ndimage import zoom
+
+    n = len(payloads)
+    adc = _e2_read_uint12(b"".join(payloads)).reshape(n, 64, 128, 3)
+    adc *= _E2_HANN_R[None, None, :, None] * _E2_HANN_D[None, :, None, None]
+    R = sfft.fft(adc, axis=2, workers=-1)                            # range
+    RD = sfft.fftshift(sfft.fft(R, axis=1, workers=-1), axes=1)      # doppler
+    rd = np.abs(RD[:, :, :E2_RANGE_BINS, :]).mean(axis=3)            # (N,64,64)
+    RA = sfft.fft(R[:, :, :E2_RANGE_BINS, :], n=E2_AZ_BINS, axis=3, workers=-1)
+    ra = np.abs(RA).mean(axis=1).transpose(0, 2, 1)                  # (N,16,64)
+    s = E2_MAP_SIZE
+    rd = zoom(np.log1p(rd), (1, s / rd.shape[1], s / rd.shape[2]), order=1)
+    ra = zoom(np.log1p(ra), (1, s / ra.shape[1], s / ra.shape[2]), order=1)
+    return np.stack([rd, ra], axis=1).astype(np.float32)
+
+
+def e2_radar_windows(
+    frames: Sequence[bytes],
+    times: Sequence[float],
+    norm: dict[str, Any],
+) -> tuple[np.ndarray | None, np.ndarray, np.ndarray]:
+    """Raw wire packets -> normalized (nW, 50, 2, 24, 24) windows.
+
+    Returns (windows, win_t0, win_t1); windows is None when fewer than
+    E2_WINDOW_FRAMES valid frames exist. Malformed packets are dropped
+    before windowing so window boundaries stay aligned with `times`.
+    """
+    payloads: list[bytes] = []
+    kept_times: list[float] = []
+    for index, packet in enumerate(frames):
+        payload = bytes(packet[12:]) if len(packet) >= 12 else bytes(packet)
+        if len(payload) != E2_FRAME_PAYLOAD_BYTES:
+            continue
+        payloads.append(payload)
+        kept_times.append(float(times[index]) if index < len(times) else 0.0)
+    n_win = len(payloads) // E2_WINDOW_FRAMES
+    if n_win == 0:
+        return None, np.empty(0), np.empty(0)
+    maps = _e2_frames_to_maps(payloads[: n_win * E2_WINDOW_FRAMES])
+    windows = maps.reshape(n_win, E2_WINDOW_FRAMES, 2, E2_MAP_SIZE, E2_MAP_SIZE)
+    mean = np.asarray(norm.get("radar_mean") or [0.0, 0.0], dtype=np.float32)
+    std = np.asarray(norm.get("radar_std") or [1.0, 1.0], dtype=np.float32)
+    windows = (windows - mean.reshape(1, 1, 2, 1, 1)) / std.reshape(1, 1, 2, 1, 1)
+    kept = np.asarray(kept_times[: n_win * E2_WINDOW_FRAMES], dtype=np.float64)
+    win_t0 = kept.reshape(n_win, E2_WINDOW_FRAMES)[:, 0]
+    win_t1 = kept.reshape(n_win, E2_WINDOW_FRAMES)[:, -1]
+    return windows.astype(np.float32), win_t0, win_t1
+
+
+def _e2_parse_csi_amplitude(line: str) -> np.ndarray | None:
+    """One CSI_DATA line -> float32 amplitude vector of 52 subcarriers."""
+    match = _E2_CSI_RE.search(line)
+    if not match:
+        return None
+    tokens = [t for t in match.group(1).split(",") if t.strip()]
+    if len(tokens) != 128:
+        return None
+    try:
+        values = np.asarray(tokens, dtype=np.float64)
+    except ValueError:
+        return None
+    imag = values[0::2][_E2_CSI_MASK]
+    real = values[1::2][_E2_CSI_MASK]
+    return np.hypot(real, imag).astype(np.float32)
+
+
+def e2_csi_windows(
+    csi_samples: Sequence[tuple[int, float, str]],
+    win_t0: np.ndarray,
+    win_t1: np.ndarray,
+    norm: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    """(receiver, t, line) samples -> normalized (nW, 128, 52) grids.
+
+    The receiver with the most samples is used (E2 rule). Returns
+    (windows, valid); windows with <2 in-window samples stay zeroed.
+    """
+    n_win = len(win_t0)
+    out = np.zeros((n_win, E2_CSI_STEPS, E2_SUBCARRIERS), dtype=np.float32)
+    valid = np.zeros(n_win, dtype=bool)
+    by_receiver: dict[int, list[tuple[float, str]]] = {}
+    for receiver, t, line in csi_samples:
+        by_receiver.setdefault(int(receiver), []).append((float(t), line))
+    if by_receiver:
+        best = max(by_receiver, key=lambda r: len(by_receiver[r]))
+        parsed = [(t, _e2_parse_csi_amplitude(line)) for t, line in by_receiver[best]]
+        parsed = [(t, v) for t, v in parsed if v is not None]
+        if parsed:
+            ts = np.asarray([t for t, _ in parsed], dtype=np.float64)
+            amp = np.stack([v for _, v in parsed])
+            order = np.argsort(ts, kind="stable")
+            ts, amp = ts[order], amp[order]
+            for k in range(n_win):
+                if win_t1[k] <= win_t0[k]:
+                    continue
+                mask = (ts >= win_t0[k]) & (ts <= win_t1[k])
+                count = int(mask.sum())
+                if count == 0:
+                    continue
+                if count == 1:
+                    out[k] = np.repeat(amp[mask], E2_CSI_STEPS, axis=0)
+                else:
+                    grid = np.linspace(win_t0[k], win_t1[k], E2_CSI_STEPS)
+                    for j in range(E2_SUBCARRIERS):
+                        out[k, :, j] = np.interp(grid, ts[mask], amp[mask, j])
+                valid[k] = count >= 2
+    np.log1p(out, out=out)
+    mean = np.asarray(norm.get("csi_mean") or [0.0] * E2_SUBCARRIERS, dtype=np.float32)
+    std = np.asarray(norm.get("csi_std") or [1.0] * E2_SUBCARRIERS, dtype=np.float32)
+    out = (out - mean) / std
+    out[~valid] = 0.0
+    return out.astype(np.float32), valid
+
+
+def _load_with_meta(path: Path) -> tuple[Any, dict[str, Any]]:
+    torch = _torch()
+    extra = {"meta.json": ""}
+    try:
+        model = torch.jit.load(str(path), map_location="cpu", _extra_files=extra)
+    except TypeError:
+        model = torch.jit.load(str(path), map_location="cpu")
+        extra = {"meta.json": ""}
+    model.eval()
+    try:
+        meta = json.loads(extra["meta.json"]) if extra.get("meta.json") else {}
+    except Exception:
+        meta = {}
+    return model, meta if isinstance(meta, dict) else {}
+
+
 class ModelRegistry:
     def __init__(self, root: Path):
         self.root = Path(root)
@@ -366,6 +548,8 @@ class ModelRegistry:
             if not item.get("enabled"):
                 continue
             metadata = item.get("metadata") or {}
+            if str(metadata.get("execution") or "chunk") == "minute":
+                continue  # minute-level models run once via run_minute()
             base = {"model_id": item.get("id"), "model_name": metadata.get("name"), "model_version": metadata.get("version"), "chunk_index": int(chunk_index), "timestamp": timestamp}
             try:
                 tensors = []
@@ -400,6 +584,125 @@ class ModelRegistry:
                 names = metadata["class_names"]
                 confidence = float(probabilities[index].item())
                 results.append({**base, "status": "ok", "class": names[index], "confidence": confidence, "confidence_saturated": confidence >= 0.999, "scores": {name: float(probabilities[i].item()) for i, name in enumerate(names)}})
+                self._set_last_error(str(item.get("id")), None)
+            except Exception as exc:
+                message = str(exc)
+                results.append({**base, "status": "error", "error": message})
+                self._set_last_error(str(item.get("id")), message)
+        return results
+
+    def run_minute(
+        self,
+        radar_frames: Sequence[bytes],
+        radar_times: Sequence[float],
+        csi_samples: Sequence[tuple[int, float, str]],
+        timestamp: str,
+    ) -> list[dict[str, Any]]:
+        """Run every enabled minute-execution model once over the whole minute.
+
+        radar_frames are raw wire packets (12-byte header + uint12 payload),
+        radar_times their capture seconds on the same clock as the CSI sample
+        times in csi_samples ((receiver, t, line) tuples). Each model produces
+        a single timeline entry: per-window probabilities are aggregated with
+        the archive's minute_aggregation rule (default top-2 mean) and compared
+        against minute_threshold — matching the E2 evaluation protocol.
+        """
+        torch = _torch()
+        results: list[dict[str, Any]] = []
+        for item in self.list():
+            if not item.get("enabled"):
+                continue
+            metadata = item.get("metadata") or {}
+            if str(metadata.get("execution") or "chunk") != "minute":
+                continue
+            base = {
+                "model_id": item.get("id"),
+                "model_name": metadata.get("name"),
+                "model_version": metadata.get("version"),
+                "chunk_index": -1,
+                "scope": "minute",
+                "timestamp": timestamp,
+            }
+            try:
+                model, embedded = _load_with_meta(self.artifacts / str(item["filename"]))
+                norm = embedded.get("norm") if isinstance(embedded.get("norm"), dict) else {}
+                aggregation = embedded.get("minute_aggregation") or \
+                    (metadata.get("aggregation") or {}).get("kind") or "top2"
+                threshold = float(
+                    embedded.get("minute_threshold")
+                    or (metadata.get("aggregation") or {}).get("threshold")
+                    or embedded.get("threshold")
+                    or 0.5
+                )
+                tensors: list[Any] = []
+                missing: list[str] = []
+                win_t0 = win_t1 = None
+                csi_valid = np.zeros(0, dtype=bool)
+                for spec in metadata.get("inputs") or []:
+                    sensor = spec.get("sensor")
+                    representation = spec.get("representation")
+                    if sensor == "radar" and representation == "e2_maps":
+                        windows, win_t0, win_t1 = e2_radar_windows(radar_frames, radar_times, norm)
+                        if windows is None:
+                            missing.append(
+                                f"radar requires {E2_WINDOW_FRAMES} valid frames; "
+                                f"received {len(radar_frames)}"
+                            )
+                        else:
+                            tensors.append(torch.from_numpy(windows))
+                    elif sensor == "csi" and representation == "e2_grid":
+                        if win_t0 is None:
+                            missing.append("csi e2_grid requires radar e2_maps windows first")
+                            continue
+                        grid, csi_valid = e2_csi_windows(csi_samples, win_t0, win_t1, norm)
+                        if not bool(csi_valid.any()):
+                            missing.append("csi produced no window with >=2 samples this minute")
+                        tensors.append(torch.from_numpy(grid))
+                    elif sensor == "radar":
+                        if not radar_frames:
+                            missing.append(f"radar requires {spec.get('frames')} frames; received 0")
+                        tensors.append(torch.from_numpy(np.ascontiguousarray(radar_tensor(radar_frames, spec))).float())
+                    else:
+                        flat = [(rx, line) for rx, _t, line in csi_samples]
+                        tensors.append(torch.from_numpy(np.ascontiguousarray(csi_tensor(flat, spec))).float())
+                if missing:
+                    results.append({**base, "status": "skipped", "reason": "; ".join(missing)})
+                    continue
+                with torch.inference_mode():
+                    output = _select_output(model(*tensors), metadata.get("output", {}).get("path") or [])
+                    values = output.detach().cpu().float().reshape(-1)
+                names = metadata["class_names"]
+                if values.numel() == 1 or (metadata.get("binary_output") and len(names) == 2):
+                    # one score per window? binary models emit (nW,) or (nW,1)
+                    probs = torch.sigmoid(values) if metadata["output"]["kind"] == "logits" else values.clamp(0, 1)
+                else:
+                    probs = torch.softmax(values, dim=0) if metadata["output"]["kind"] == "logits" else values
+                probs_np = probs.numpy().reshape(-1)
+                if str(aggregation) == "top2" and probs_np.size >= 2:
+                    minute_prob = float(np.sort(probs_np)[-2:].mean())
+                else:
+                    minute_prob = float(probs_np.mean()) if probs_np.size else 0.0
+                if len(names) == 2:
+                    index = 1 if minute_prob >= threshold else 0
+                    scores = {names[0]: 1.0 - minute_prob, names[1]: minute_prob}
+                    confidence = minute_prob if index == 1 else 1.0 - minute_prob
+                else:
+                    index = int(np.argmax(probs_np)) if probs_np.size else 0
+                    scores = {name: float(probs_np[i]) for i, name in enumerate(names[: probs_np.size])}
+                    confidence = float(probs_np[index]) if probs_np.size else 0.0
+                results.append({
+                    **base,
+                    "status": "ok",
+                    "class": names[index],
+                    "confidence": confidence,
+                    "confidence_saturated": confidence >= 0.999,
+                    "scores": scores,
+                    "threshold": threshold,
+                    "aggregation": str(aggregation),
+                    "window_count": int(probs_np.size),
+                    "csi_windows_valid": int(csi_valid.sum()) if csi_valid.size else 0,
+                    "window_probabilities": [round(float(p), 4) for p in probs_np],
+                })
                 self._set_last_error(str(item.get("id")), None)
             except Exception as exc:
                 message = str(exc)

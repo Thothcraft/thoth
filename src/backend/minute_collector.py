@@ -40,7 +40,7 @@ if __package__ in (None, ""):
 else:
     from .config import Config
     from .sensor_detection import likely_csi_serial_candidates, usable_usb_camera_devices
-    from .capture_container import build_capture_container
+    from .capture_container import build_capture_container, _split_radar_packets
     from .model_runtime import ModelRegistry
     from .radar_analysis import (
         PersistentTargetIdentity,
@@ -665,6 +665,83 @@ def csi_capture_stats(path: Path) -> dict[str, float | int | None]:
         "average_sampling_rate_hz": round(rate, 3),
         "observed_span_seconds": round(span_seconds, 3),
     }
+
+
+def _iso_seconds(value: object) -> float:
+    """ISO timestamp -> unix seconds, 0.0 when unparseable."""
+    if not value:
+        return 0.0
+    try:
+        parsed = dt.datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.datetime.now().astimezone().tzinfo)
+        return parsed.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def _minute_radar_frames(output_dir: Path, manifest: dict[str, Any]) -> tuple[list[bytes], list[float]]:
+    """All radar wire packets of the minute plus per-frame timestamps (s).
+
+    Prefers the per-frame CLOCK_MONOTONIC stamps recorded in each chunk
+    (same clock as the CSI CSVs); falls back to uniform interpolation
+    between the chunk's started/finished_capture ISO timestamps.
+    """
+    frames: list[bytes] = []
+    times: list[float] = []
+    radar = manifest.get("outputs", {}).get("radar", {})
+    chunks = radar.get("chunks") if isinstance(radar.get("chunks"), list) else []
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        path = Path(str(chunk.get("bin_path") or ""))
+        if not path.is_absolute():
+            path = output_dir / path.name
+        try:
+            packets = list(_split_radar_packets(path.read_bytes()))
+        except OSError:
+            continue
+        mono = chunk.get("frame_monotonic_ns")
+        mono = [int(v) for v in mono] if isinstance(mono, list) else []
+        start = _iso_seconds(chunk.get("started"))
+        finish = _iso_seconds(chunk.get("finished_capture") or chunk.get("finished"))
+        for index, packet in enumerate(packets):
+            frames.append(packet)
+            if index < len(mono) and mono[index] > 0:
+                times.append(mono[index] / 1_000_000_000)
+            elif len(packets) > 1 and finish > start:
+                times.append(start + (finish - start) * index / (len(packets) - 1))
+            else:
+                times.append(start or (times[-1] + 0.1 if times else 0.0))
+    return frames, times
+
+
+def _minute_csi_samples(manifest: dict[str, Any]) -> list[tuple[int, float, str]]:
+    """(receiver_index, monotonic_seconds, raw CSI_DATA line) for the minute."""
+    samples: list[tuple[int, float, str]] = []
+    wifi = manifest.get("outputs", {}).get("wifi_csi", {})
+    receivers = wifi.get("receivers") if isinstance(wifi, dict) else None
+    if not isinstance(receivers, list):
+        receivers = [wifi] if isinstance(wifi, dict) else []
+    for receiver_index, receiver in enumerate(receivers):
+        if not isinstance(receiver, dict) or not receiver.get("path"):
+            continue
+        try:
+            with open(str(receiver["path"]), "r", encoding="utf-8", errors="replace", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    line = str(row.get("raw_csi_line") or row.get("data") or "")
+                    if "CSI_DATA" not in line:
+                        continue
+                    try:
+                        t = int(row.get("monotonic_ns") or 0) / 1_000_000_000
+                    except (TypeError, ValueError):
+                        t = 0.0
+                    if t <= 0:
+                        t = _iso_seconds(row.get("host_timestamp"))
+                    samples.append((receiver_index, t, line.strip()))
+        except OSError:
+            continue
+    return samples
 
 
 def collect_csi(
@@ -1495,7 +1572,7 @@ def main() -> int:
             radar_last_frame_at = captured_at
             frames.append(full_frame)
             radar_model_history.append(full_frame)
-            maximum_model_frames = max((int(spec.get("frames") or 0) for model in model_registry.list() if model.get("enabled") for spec in (model.get("metadata") or {}).get("inputs", []) if spec.get("sensor") == "radar"), default=RADAR_FRAMES_PER_CHUNK)
+            maximum_model_frames = max((int(spec.get("frames") or 0) for model in model_registry.list() if model.get("enabled") and str((model.get("metadata") or {}).get("execution") or "chunk") != "minute" for spec in (model.get("metadata") or {}).get("inputs", []) if spec.get("sensor") == "radar"), default=RADAR_FRAMES_PER_CHUNK)
             if len(radar_model_history) > maximum_model_frames:
                 del radar_model_history[:-maximum_model_frames]
             frame_times.append(captured_at)
@@ -1800,6 +1877,43 @@ def main() -> int:
         manifest["status"] = "success" if not manifest["errors"] else "partial" if manifest["warnings"] else "error"
         manifest_file = output_dir / "manifest.json"
         merge_home_assistant_status()
+
+        # Minute-level occupancy models (E2 exports): one verdict per minute.
+        # Runs while the radar_*.bin / wifi_csi_*.csv fragments are still on
+        # disk so results are also embedded in the container manifest.
+        try:
+            minute_frames, minute_frame_times = _minute_radar_frames(output_dir, manifest)
+            minute_results = model_registry.run_minute(
+                minute_frames,
+                minute_frame_times,
+                _minute_csi_samples(manifest),
+                iso_now(),
+            )
+        except Exception as exc:
+            minute_results = []
+            manifest["errors"].append(f"Minute-level model inference failed: {exc}")
+        if minute_results:
+            occupancy_results = [
+                item for item in minute_results
+                if item.get("status") == "ok" and str(item.get("class", "")).lower() in {"occupied", "empty"}
+            ]
+            if occupancy_results:
+                selected = max(occupancy_results, key=lambda item: float(item.get("confidence") or 0.0))
+                publish_model_occupancy(selected, folder_name, chunk_index=None)
+            with publish_lock:
+                timelines = manifest.setdefault("model_predictions", [])
+                by_id = {str(item.get("model_id")): item for item in timelines if isinstance(item, dict)}
+                for prediction in minute_results:
+                    model_id = str(prediction.get("model_id"))
+                    timeline = by_id.setdefault(model_id, {
+                        "model_id": model_id,
+                        "model_name": prediction.get("model_name"),
+                        "model_version": prediction.get("model_version"),
+                        "timeline": [],
+                    })
+                    timeline["timeline"].append(prediction)
+                manifest["model_predictions"] = list(by_id.values())
+
         try:
             manifest["container"] = build_capture_container(output_dir, manifest, remove_fragments=True)
             manifest["assets"] = [

@@ -67,3 +67,6 @@ dist/
 *.spec.bak
 *.iconset/
 thoth_win/icon.ico
+
+# User model library - per-device runtime state
+models/user/
