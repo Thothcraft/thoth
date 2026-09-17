@@ -703,7 +703,10 @@ class ModelRegistry:
                 else:
                     minute_prob = float(pool.mean()) if pool.size else 0.0
                 if len(names) == 2:
-                    index = 1 if minute_prob >= threshold else 0
+                    # predict the most probable class (argmax) so the reported
+                    # class always matches the higher score; `threshold` stays
+                    # as the confidence gate surfaced to consumers.
+                    index = 1 if minute_prob >= 0.5 else 0
                     scores = {names[0]: 1.0 - minute_prob, names[1]: minute_prob}
                     confidence = minute_prob if index == 1 else 1.0 - minute_prob
                 else:
