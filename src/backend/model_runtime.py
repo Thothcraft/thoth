@@ -359,12 +359,15 @@ def e2_radar_windows(
     frames: Sequence[bytes],
     times: Sequence[float],
     norm: dict[str, Any],
-) -> tuple[np.ndarray | None, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray | None, np.ndarray, np.ndarray, np.ndarray]:
     """Raw wire packets -> normalized (nW, 50, 2, 24, 24) windows.
 
-    Returns (windows, win_t0, win_t1); windows is None when fewer than
-    E2_WINDOW_FRAMES valid frames exist. Malformed packets are dropped
-    before windowing so window boundaries stay aligned with `times`.
+    Returns (windows, win_t0, win_t1, win_max_gap); windows is None when
+    fewer than E2_WINDOW_FRAMES valid frames exist. Malformed packets are
+    dropped before windowing so window boundaries stay aligned with
+    `times`. win_max_gap is the largest inter-frame timestamp gap inside
+    each window — large gaps mark FIFO-overflow holes whose Doppler
+    content is corrupted.
     """
     payloads: list[bytes] = []
     kept_times: list[float] = []
@@ -376,16 +379,18 @@ def e2_radar_windows(
         kept_times.append(float(times[index]) if index < len(times) else 0.0)
     n_win = len(payloads) // E2_WINDOW_FRAMES
     if n_win == 0:
-        return None, np.empty(0), np.empty(0)
+        return None, np.empty(0), np.empty(0), np.empty(0)
     maps = _e2_frames_to_maps(payloads[: n_win * E2_WINDOW_FRAMES])
     windows = maps.reshape(n_win, E2_WINDOW_FRAMES, 2, E2_MAP_SIZE, E2_MAP_SIZE)
     mean = np.asarray(norm.get("radar_mean") or [0.0, 0.0], dtype=np.float32)
     std = np.asarray(norm.get("radar_std") or [1.0, 1.0], dtype=np.float32)
     windows = (windows - mean.reshape(1, 1, 2, 1, 1)) / std.reshape(1, 1, 2, 1, 1)
     kept = np.asarray(kept_times[: n_win * E2_WINDOW_FRAMES], dtype=np.float64)
-    win_t0 = kept.reshape(n_win, E2_WINDOW_FRAMES)[:, 0]
-    win_t1 = kept.reshape(n_win, E2_WINDOW_FRAMES)[:, -1]
-    return windows.astype(np.float32), win_t0, win_t1
+    kept = kept.reshape(n_win, E2_WINDOW_FRAMES)
+    win_t0 = kept[:, 0]
+    win_t1 = kept[:, -1]
+    win_max_gap = np.diff(kept, axis=1).max(axis=1)
+    return windows.astype(np.float32), win_t0, win_t1, win_max_gap
 
 
 def _e2_parse_csi_amplitude(line: str) -> np.ndarray | None:
@@ -637,12 +642,13 @@ class ModelRegistry:
                 tensors: list[Any] = []
                 missing: list[str] = []
                 win_t0 = win_t1 = None
+                win_max_gap = np.zeros(0)
                 csi_valid = np.zeros(0, dtype=bool)
                 for spec in metadata.get("inputs") or []:
                     sensor = spec.get("sensor")
                     representation = spec.get("representation")
                     if sensor == "radar" and representation == "e2_maps":
-                        windows, win_t0, win_t1 = e2_radar_windows(radar_frames, radar_times, norm)
+                        windows, win_t0, win_t1, win_max_gap = e2_radar_windows(radar_frames, radar_times, norm)
                         if windows is None:
                             missing.append(
                                 f"radar requires {E2_WINDOW_FRAMES} valid frames; "
@@ -678,10 +684,24 @@ class ModelRegistry:
                 else:
                     probs = torch.softmax(values, dim=0) if metadata["output"]["kind"] == "logits" else values
                 probs_np = probs.numpy().reshape(-1)
-                if str(aggregation) == "top2" and probs_np.size >= 2:
-                    minute_prob = float(np.sort(probs_np)[-2:].mean())
+                # FIFO-overflow holes corrupt a window's Doppler content and
+                # spike its occupancy score. Vote only over windows whose
+                # frame timing is intact (<=2.5x the nominal 100 ms period);
+                # if too few survive, use the least-corrupted windows instead.
+                excluded = 0
+                pool = probs_np
+                if win_max_gap.size == probs_np.size and probs_np.size:
+                    clean = win_max_gap <= 0.25
+                    if int(clean.sum()) >= 2:
+                        pool = probs_np[clean]
+                        excluded = int((~clean).sum())
+                    elif probs_np.size >= 2:
+                        pool = probs_np[np.argsort(win_max_gap)[:2]]
+                        excluded = int(probs_np.size - 2)
+                if str(aggregation) == "top2" and pool.size >= 2:
+                    minute_prob = float(np.sort(pool)[-2:].mean())
                 else:
-                    minute_prob = float(probs_np.mean()) if probs_np.size else 0.0
+                    minute_prob = float(pool.mean()) if pool.size else 0.0
                 if len(names) == 2:
                     index = 1 if minute_prob >= threshold else 0
                     scores = {names[0]: 1.0 - minute_prob, names[1]: minute_prob}
@@ -700,8 +720,10 @@ class ModelRegistry:
                     "threshold": threshold,
                     "aggregation": str(aggregation),
                     "window_count": int(probs_np.size),
+                    "windows_excluded": excluded,
                     "csi_windows_valid": int(csi_valid.sum()) if csi_valid.size else 0,
                     "window_probabilities": [round(float(p), 4) for p in probs_np],
+                    "window_max_gaps": [round(float(g), 3) for g in win_max_gap],
                 })
                 self._set_last_error(str(item.get("id")), None)
             except Exception as exc:
