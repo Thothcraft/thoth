@@ -27,7 +27,7 @@ if __package__ in (None, ""):
     from backend.config import Config  # type: ignore
     from backend.sensor_detection import likely_csi_serial_candidates, usable_usb_camera_devices  # type: ignore
     from backend.capture_container import build_capture_container, _split_radar_packets  # type: ignore
-    from backend.model_runtime import ModelRegistry  # type: ignore
+    from backend.model_runtime import ModelRegistry, E2_WINDOW_FRAMES  # type: ignore
     from backend.radar_analysis import (  # type: ignore
         PersistentTargetIdentity,
         StreamingChunkAnalyzer,
@@ -41,7 +41,7 @@ else:
     from .config import Config
     from .sensor_detection import likely_csi_serial_candidates, usable_usb_camera_devices
     from .capture_container import build_capture_container, _split_radar_packets
-    from .model_runtime import ModelRegistry
+    from .model_runtime import ModelRegistry, E2_WINDOW_FRAMES
     from .radar_analysis import (
         PersistentTargetIdentity,
         StreamingChunkAnalyzer,
@@ -1057,6 +1057,7 @@ def main() -> int:
     publish_lock = threading.Lock()
     model_registry = ModelRegistry(THOTH_ROOT / "models" / "user")
     model_queue: queue.Queue[Any] = queue.Queue()
+    partial_minute_queue: queue.Queue[Any] = queue.Queue(maxsize=1)
     model_thread: threading.Thread | None = None
     radar_model_history: list[bytes] = []
     room_config = load_room_config()
@@ -1111,6 +1112,38 @@ def main() -> int:
                         write_live_manifest()
             finally:
                 model_queue.task_done()
+
+    def run_partial_minute_worker() -> None:
+        """Run the minute-level model on the windows collected so far.
+
+        The radar reader enqueues the accumulated frames each time a new
+        50-frame window completes, so occupancy is predicted as soon as enough
+        data exists rather than only at minute end. The final run_minute call
+        still produces the authoritative per-minute verdict.
+        """
+        while True:
+            job = partial_minute_queue.get()
+            try:
+                if job is None:
+                    return
+                pframes, ptimes, ptimestamp = job
+                try:
+                    presults = model_registry.run_minute(
+                        list(pframes), list(ptimes), current_csi_samples(), ptimestamp
+                    )
+                except Exception as exc:
+                    logging.getLogger(__name__).error("Partial minute inference failed: %s", exc)
+                    presults = []
+                pocc = [
+                    item for item in presults
+                    if item.get("status") == "ok" and str(item.get("class", "")).lower() in {"occupied", "empty"}
+                ]
+                if pocc:
+                    selected = dict(max(pocc, key=lambda item: float(item.get("confidence") or 0.0)))
+                    selected["scope"] = "partial_minute"
+                    publish_model_occupancy(selected, folder_name, chunk_index=None)
+            finally:
+                partial_minute_queue.task_done()
 
     def effective_preset_labels() -> list[str]:
         """Use the latest labels so additions and removals affect this minute."""
@@ -1611,6 +1644,9 @@ def main() -> int:
         nonlocal radar_frame_count, radar_first_frame_at, radar_last_frame_at
         frames: list[bytes] = []
         frame_times: list[float] = []
+        minute_frames: list[bytes] = []
+        minute_times: list[float] = []
+        last_window_count = 0
         while time.monotonic() < stop_at:
             remaining = stop_at - time.monotonic()
             try:
@@ -1622,6 +1658,25 @@ def main() -> int:
             radar_first_frame_at = captured_at if radar_first_frame_at is None else radar_first_frame_at
             radar_last_frame_at = captured_at
             frames.append(full_frame)
+            minute_frames.append(full_frame)
+            minute_times.append(captured_at)
+            # A minute-level model needs 50-frame windows; run it as soon as a
+            # new window completes instead of waiting for the whole minute.
+            if len(minute_frames) // E2_WINDOW_FRAMES > last_window_count:
+                last_window_count = len(minute_frames) // E2_WINDOW_FRAMES
+                # maxsize-1 queue: drop any stale partial so the newest job
+                # (with the most windows) is always the one that runs.
+                try:
+                    partial_minute_queue.get_nowait()
+                    partial_minute_queue.task_done()
+                except queue.Empty:
+                    pass
+                try:
+                    partial_minute_queue.put_nowait((
+                        tuple(minute_frames), tuple(minute_times), iso_now(),
+                    ))
+                except queue.Full:
+                    pass
             radar_model_history.append(full_frame)
             maximum_model_frames = max((int(spec.get("frames") or 0) for model in model_registry.list() if model.get("enabled") and str((model.get("metadata") or {}).get("execution") or "chunk") != "minute" for spec in (model.get("metadata") or {}).get("inputs", []) if spec.get("sensor") == "radar"), default=RADAR_FRAMES_PER_CHUNK)
             if len(radar_model_history) > maximum_model_frames:
@@ -1678,6 +1733,10 @@ def main() -> int:
             target=run_analysis_worker, name="RadarChunkAnalysis", daemon=True
         )
         radar_analysis_thread.start()
+        partial_minute_thread = threading.Thread(
+            target=run_partial_minute_worker, name="PartialMinuteInference", daemon=True
+        )
+        partial_minute_thread.start()
         if not args.no_sensehat:
             sense_file = output_dir / "sense_hat.jsonl"
             manifest["outputs"]["sense_hat"] = {
@@ -1853,6 +1912,15 @@ def main() -> int:
             model_thread.join(timeout=90.0)
             if model_thread.is_alive():
                 manifest["errors"].append("User model inference exceeded its shutdown deadline.")
+        try:
+            partial_minute_queue.get_nowait()
+            partial_minute_queue.task_done()
+        except queue.Empty:
+            pass
+        try:
+            partial_minute_queue.put_nowait(None)
+        except queue.Full:
+            pass
         current_labels = effective_preset_labels()
         manifest["preset_labels"] = current_labels
         manifest["labels"] = current_labels

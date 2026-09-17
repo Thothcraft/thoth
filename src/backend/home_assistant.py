@@ -24,6 +24,9 @@ DEFAULTS: Dict[str, Any] = {
     "base_url": "http://127.0.0.1:8123",
     "token": "",
     "entity_id": "binary_sensor.thoth_occupancy",
+    "probability_entity_id": "sensor.thoth_occupancy_probability",
+    "light_entity_id": "",
+    "light_control_enabled": False,
 }
 _status_lock = threading.Lock()
 _last_status: Dict[str, Any] = {"status": "unknown", "updated_at": None}
@@ -82,6 +85,14 @@ def save_home_assistant_config(updates: Dict[str, Any]) -> Dict[str, Any]:
         entity_id = str(updates.get("entity_id") or "").strip().lower()
         if entity_id:
             config["entity_id"] = entity_id if entity_id.startswith("binary_sensor.") else f"binary_sensor.{entity_id}"
+    if updates.get("probability_entity_id") is not None:
+        prob = str(updates.get("probability_entity_id") or "").strip().lower()
+        config["probability_entity_id"] = prob if prob.startswith("sensor.") else (f"sensor.{prob}" if prob else "")
+    if updates.get("light_entity_id") is not None:
+        light = str(updates.get("light_entity_id") or "").strip().lower()
+        config["light_entity_id"] = light if light.startswith("light.") else (f"light.{light}" if light else "")
+    if "light_control_enabled" in updates:
+        config["light_control_enabled"] = bool(updates["light_control_enabled"])
     # An empty browser field deliberately preserves the locally stored secret.
     if updates.get("token"):
         config["token"] = str(updates["token"]).strip()
@@ -155,18 +166,77 @@ def publish_model_occupancy(model_result: Dict[str, Any], minute: str, *, chunk_
             "timestamp": model_result.get("timestamp") or datetime.now(timezone.utc).isoformat(),
         },
     }
+    base = str(config['base_url']).rstrip('/')
+    headers = {"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"}
     try:
         response = requests.post(
-            f"{str(config['base_url']).rstrip('/')}/api/states/{config['entity_id']}",
-            headers={"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"},
+            f"{base}/api/states/{config['entity_id']}",
+            headers=headers,
             json=body,
             timeout=5,
         )
         response.raise_for_status()
-        return _record_status({"success": True, "status": "published", "label": label, "model_id": model_result.get("model_id")})
     except Exception as exc:
         logger.warning("Home Assistant model occupancy publish failed: %s", exc)
         return _record_status({"success": False, "status": "publish_error", "error": str(exc)})
+
+    # Numeric occupancy-probability sensor (0-100%) so automations can threshold
+    # or scale on the model's confidence rather than the binary on/off.
+    scores = model_result.get("scores") if isinstance(model_result.get("scores"), dict) else {}
+    probability = scores.get("occupied")
+    if probability is None:
+        probability = model_result.get("confidence") if label == "occupied" else (
+            1.0 - float(model_result.get("confidence") or 0.0)
+        )
+    try:
+        probability = max(0.0, min(1.0, float(probability)))
+    except (TypeError, ValueError):
+        probability = 1.0 if label == "occupied" else 0.0
+    prob_entity = str(config.get("probability_entity_id") or "").strip()
+    if prob_entity:
+        try:
+            requests.post(
+                f"{base}/api/states/{prob_entity}",
+                headers=headers,
+                json={
+                    "state": round(probability * 100.0, 1),
+                    "attributes": {
+                        "friendly_name": "Thoth Occupancy Probability",
+                        "unit_of_measurement": "%",
+                        "label": label,
+                        "model_id": model_result.get("model_id"),
+                        "capture_minute": minute,
+                        "timestamp": body["attributes"]["timestamp"],
+                    },
+                },
+                timeout=5,
+            )
+        except Exception as exc:
+            logger.warning("Home Assistant probability publish failed: %s", exc)
+
+    # Optional light brightness follows the occupancy probability: a confident
+    # occupied room drives the light toward full brightness, empty toward off.
+    light_entity = str(config.get("light_entity_id") or "").strip()
+    if config.get("light_control_enabled") and light_entity:
+        try:
+            if probability >= 0.5:
+                brightness = int(round(probability * 255))
+                service_payload = {"entity_id": light_entity, "brightness": max(1, brightness)}
+                service = "turn_on"
+            else:
+                service_payload = {"entity_id": light_entity}
+                service = "turn_off"
+            requests.post(
+                f"{base}/api/services/light/{service}",
+                headers=headers,
+                json=service_payload,
+                timeout=5,
+            )
+        except Exception as exc:
+            logger.warning("Home Assistant light control failed: %s", exc)
+
+    return _record_status({"success": True, "status": "published", "label": label,
+                           "probability": probability, "model_id": model_result.get("model_id")})
 
 
 def publish_occupancy(
