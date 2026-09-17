@@ -26,7 +26,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from backend.config import Config  # type: ignore
     from backend.sensor_detection import likely_csi_serial_candidates, usable_usb_camera_devices  # type: ignore
-    from backend.capture_container import build_capture_container  # type: ignore
+    from backend.capture_container import build_capture_container, _split_radar_packets  # type: ignore
     from backend.model_runtime import ModelRegistry  # type: ignore
     from backend.radar_analysis import (  # type: ignore
         PersistentTargetIdentity,
