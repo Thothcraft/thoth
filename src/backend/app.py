@@ -1895,11 +1895,15 @@ def api_model(model_id):
             model_registry.delete(model_id)
             return jsonify({'success': True})
         payload = request.get_json(silent=True) or {}
-        if 'enabled' not in payload:
-            return jsonify({'success': False, 'message': 'enabled is required'}), 400
-        return jsonify({'success': True, 'model': model_registry.set_enabled(model_id, bool(payload['enabled']))})
+        if 'enabled' in payload:
+            return jsonify({'success': True, 'model': model_registry.set_enabled(model_id, bool(payload['enabled']))})
+        if 'ha_link' in payload:
+            return jsonify({'success': True, 'model': model_registry.set_ha_link(model_id, payload.get('ha_link'))})
+        return jsonify({'success': False, 'message': 'enabled or ha_link is required'}), 400
     except KeyError:
         return jsonify({'success': False, 'message': 'Model not found'}), 404
+    except ModelValidationError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
 
 
 @app.route('/api/settings', methods=['GET', 'PATCH'])

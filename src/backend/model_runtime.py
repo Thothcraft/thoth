@@ -474,6 +474,30 @@ def _load_with_meta(path: Path) -> tuple[Any, dict[str, Any]]:
     return model, meta if isinstance(meta, dict) else {}
 
 
+# Loaded TorchScript modules are expensive to deserialize, so keep them in a
+# small cache keyed by path + mtime. A re-seeded or re-uploaded artifact gets a
+# new mtime and is reloaded automatically on the next call.
+_MODEL_CACHE: dict[str, tuple[float, Any, dict[str, Any]]] = {}
+_MODEL_CACHE_LOCK = threading.Lock()
+
+
+def _cached_load(path: Path) -> tuple[Any, dict[str, Any]]:
+    """Return the loaded (model, meta) for *path*, reloading only on change."""
+    key = str(path)
+    try:
+        mtime = os.path.getmtime(key)
+    except OSError:
+        mtime = -1.0
+    with _MODEL_CACHE_LOCK:
+        hit = _MODEL_CACHE.get(key)
+        if hit is not None and hit[0] == mtime:
+            return hit[1], hit[2]
+    model, meta = _load_with_meta(path)
+    with _MODEL_CACHE_LOCK:
+        _MODEL_CACHE[key] = (mtime, model, meta)
+    return model, meta
+
+
 class ModelRegistry:
     def __init__(self, root: Path):
         self.root = Path(root)
@@ -487,6 +511,10 @@ class ModelRegistry:
             except (FileNotFoundError, json.JSONDecodeError, OSError):
                 return []
             return [dict(item) for item in value.get("models", []) if isinstance(item, dict)]
+
+    def get(self, model_id: str) -> dict[str, Any] | None:
+        match = next((item for item in self.list() if item.get("id") == model_id), None)
+        return dict(match) if match is not None else None
 
     def _save(self, models: list[dict[str, Any]]) -> None:
         _atomic_json(self.path, {"schema": "thoth-model-registry/v1", "models": models})
@@ -510,6 +538,7 @@ class ModelRegistry:
             "enabled": False,
             "source": source,
             "metadata": normalized,
+            "ha_link": None,
             "last_error": None,
         }
         with _REGISTRY_LOCK:
@@ -526,6 +555,44 @@ class ModelRegistry:
                 raise KeyError(model_id)
             match["enabled"] = bool(enabled)
             match["last_error"] = None
+            self._save(models)
+            return dict(match)
+
+    def set_ha_link(self, model_id: str, ha_link: object) -> dict[str, Any]:
+        """Persist a per-model Home Assistant device link.
+
+        ha_link may be None/falsey to clear the link, or a dict with:
+          enabled   - whether this model drives the linked entity
+          entity_id - HA entity to control (light./switch./fan./input_number./number.)
+          scope     - 'chunk' or 'minute' (minute also covers partial-minute)
+          mode      - 'categorical' (on/off) or 'numeric' (proportional value)
+        """
+        with _REGISTRY_LOCK:
+            models = self.list()
+            match = next((item for item in models if item.get("id") == model_id), None)
+            if match is None:
+                raise KeyError(model_id)
+            if not ha_link:
+                match["ha_link"] = None
+                self._save(models)
+                return dict(match)
+            if not isinstance(ha_link, dict):
+                raise ModelValidationError("ha_link must be an object")
+            entity_id = str(ha_link.get("entity_id") or "").strip().lower()
+            scope = str(ha_link.get("scope") or "minute").strip().lower()
+            mode = str(ha_link.get("mode") or "categorical").strip().lower()
+            if scope not in {"chunk", "minute"}:
+                raise ModelValidationError("ha_link.scope must be 'chunk' or 'minute'")
+            if mode not in {"categorical", "numeric"}:
+                raise ModelValidationError("ha_link.mode must be 'categorical' or 'numeric'")
+            if "." not in entity_id:
+                raise ModelValidationError("ha_link.entity_id must look like 'domain.name'")
+            match["ha_link"] = {
+                "enabled": bool(ha_link.get("enabled")),
+                "entity_id": entity_id,
+                "scope": scope,
+                "mode": mode,
+            }
             self._save(models)
             return dict(match)
 
@@ -574,8 +641,7 @@ class ModelRegistry:
                 if missing:
                     results.append({**base, "status": "skipped", "reason": "; ".join(missing)})
                     continue
-                model = torch.jit.load(str(self.artifacts / str(item["filename"])), map_location="cpu")
-                model.eval()
+                model, _ = _cached_load(self.artifacts / str(item["filename"]))
                 with torch.inference_mode():
                     output = _select_output(model(*tensors), metadata.get("output", {}).get("path") or [])
                     values = output.detach().cpu().float().reshape(-1)
@@ -629,7 +695,7 @@ class ModelRegistry:
                 "timestamp": timestamp,
             }
             try:
-                model, embedded = _load_with_meta(self.artifacts / str(item["filename"]))
+                model, embedded = _cached_load(self.artifacts / str(item["filename"]))
                 norm = embedded.get("norm") if isinstance(embedded.get("norm"), dict) else {}
                 aggregation = embedded.get("minute_aggregation") or \
                     (metadata.get("aggregation") or {}).get("kind") or "top2"

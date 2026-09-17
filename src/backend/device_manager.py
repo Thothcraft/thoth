@@ -768,15 +768,24 @@ class DeviceManager:
             if expected_hash and expected_hash != actual_hash:
                 raise ValueError('Downloaded model hash does not match deployment metadata')
             metadata = deployment.get('metadata')
+            config = deployment.get('config') if isinstance(deployment.get('config'), dict) else {}
             if not isinstance(metadata, dict):
-                config = deployment.get('config') if isinstance(deployment.get('config'), dict) else {}
                 metadata = config.get('metadata')
             if not isinstance(metadata, dict):
                 raise ValueError('Deployment is missing thoth-model/v1 metadata')
             with tempfile.NamedTemporaryFile(suffix='.pth', delete=False) as temporary:
                 temporary.write(raw)
                 temporary_path = Path(temporary.name)
-            installed = ModelRegistry(self._models_root() / 'user').add(temporary_path, metadata, source='cloud')
+            registry = ModelRegistry(self._models_root() / 'user')
+            installed = registry.add(temporary_path, metadata, source='cloud')
+            # A deployment may carry a Home Assistant device link; apply it so a
+            # cloud-deployed model drives its linked entity without extra setup.
+            ha_link = config.get('ha_link') if isinstance(config.get('ha_link'), dict) else deployment.get('ha_link')
+            if isinstance(ha_link, dict) and ha_link:
+                try:
+                    registry.set_ha_link(installed['id'], ha_link)
+                except Exception as exc:
+                    logger.warning('Failed to apply deployment ha_link: %s', exc)
             return {
                 'model_id': installed['id'],
                 'model_path': str(self._models_root() / 'user' / 'artifacts' / installed['filename']),

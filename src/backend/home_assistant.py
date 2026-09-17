@@ -386,6 +386,88 @@ def publish_occupancy(
         return _record_status({"success": False, "status": "error", "error": str(exc)})
 
 
+def control_linked_device(
+    model_result: Dict[str, Any],
+    ha_link: Dict[str, Any],
+    minute: str,
+    *,
+    scope: str,
+    chunk_index: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Drive a per-model linked Home Assistant entity from one prediction.
+
+    ha_link = {enabled, entity_id, scope ('chunk'|'minute'), mode
+    ('categorical'|'numeric')}. 'minute' scope also matches partial-minute
+    predictions so the device reacts as soon as a window completes.
+    """
+    if not isinstance(ha_link, dict) or not ha_link.get("enabled"):
+        return _record_status({"success": False, "status": "link_disabled"})
+    entity_id = str(ha_link.get("entity_id") or "").strip().lower()
+    if "." not in entity_id:
+        return _record_status({"success": False, "status": "link_no_entity"})
+    want_scope = str(ha_link.get("scope") or "minute").strip().lower()
+    # 'minute' links react to both partial-minute and final-minute predictions.
+    actual_scope = "minute" if scope in {"minute", "partial_minute"} else "chunk"
+    if want_scope != actual_scope:
+        return _record_status({"success": False, "status": "scope_mismatch"})
+
+    config = load_home_assistant_config(include_token=True)
+    if not config.get("enabled"):
+        return _record_status({"success": False, "status": "disabled"})
+    if not config.get("token"):
+        return _record_status({"success": False, "status": "not_configured"})
+
+    label = str(model_result.get("class") or "").strip().lower()
+    scores = model_result.get("scores") if isinstance(model_result.get("scores"), dict) else {}
+    try:
+        probability = float(scores.get("occupied"))
+    except (TypeError, ValueError):
+        probability = (
+            float(model_result.get("confidence") or 0.0)
+            if label == "occupied"
+            else 1.0 - float(model_result.get("confidence") or 0.0)
+        )
+    probability = max(0.0, min(1.0, probability))
+
+    domain = entity_id.split(".", 1)[0]
+    mode = str(ha_link.get("mode") or "categorical").strip().lower()
+    if mode == "numeric":
+        pct = int(round(probability * 100))
+        if domain == "light":
+            service, payload = "light/turn_on", {"entity_id": entity_id, "brightness_pct": max(1, pct)}
+        elif domain in {"input_number", "number"}:
+            service, payload = f"{domain}/set_value", {"entity_id": entity_id, "value": float(pct)}
+        elif domain == "fan":
+            service, payload = "fan/set_percentage", {"entity_id": entity_id, "percentage": pct}
+        else:
+            # No proportional service for this domain; threshold to on/off.
+            service = f"homeassistant/{'turn_on' if probability >= 0.5 else 'turn_off'}"
+            payload = {"entity_id": entity_id}
+    else:  # categorical
+        service = f"homeassistant/{'turn_on' if label == 'occupied' else 'turn_off'}"
+        payload = {"entity_id": entity_id}
+
+    base = str(config["base_url"]).rstrip("/")
+    headers = {"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"}
+    try:
+        response = requests.post(f"{base}/api/services/{service}", headers=headers, json=payload, timeout=5)
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning("Home Assistant linked-device control failed: %s", exc)
+        return _record_status({"success": False, "status": "publish_error", "error": str(exc)})
+    return _record_status({
+        "success": True,
+        "status": "linked_device_controlled",
+        "entity_id": entity_id,
+        "service": service,
+        "mode": mode,
+        "scope": actual_scope,
+        "probability": probability,
+        "label": label,
+        "model_id": model_result.get("model_id"),
+    })
+
+
 def test_home_assistant_connection(timeout: float = 5.0) -> Dict[str, Any]:
     config = load_home_assistant_config(include_token=True)
     if not config.get("token"):

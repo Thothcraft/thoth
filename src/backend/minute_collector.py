@@ -36,7 +36,7 @@ if __package__ in (None, ""):
         load_room_config,
         occupancy_label,
     )
-    from backend.home_assistant import publish_model_occupancy  # type: ignore
+    from backend.home_assistant import publish_model_occupancy, control_linked_device  # type: ignore
 else:
     from .config import Config
     from .sensor_detection import likely_csi_serial_candidates, usable_usb_camera_devices
@@ -50,7 +50,7 @@ else:
         load_room_config,
         occupancy_label,
     )
-    from .home_assistant import publish_model_occupancy
+    from .home_assistant import publish_model_occupancy, control_linked_device
 
 THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / "WS" / "MMW-HAT" / "MMW-HAT-Release"
@@ -1079,6 +1079,37 @@ def main() -> int:
                 continue
         return samples
 
+    def fire_model_device_links(results: list[dict[str, Any]], scope: str) -> None:
+        """Drive each model's configured Home Assistant device link.
+
+        Every ok prediction is checked against that model's ha_link; when the
+        link is enabled and its scope matches, the linked entity is controlled
+        with the numeric or categorical prediction.
+        """
+        for prediction in results or []:
+            if not isinstance(prediction, dict) or prediction.get("status") != "ok":
+                continue
+            model_id = str(prediction.get("model_id") or "")
+            if not model_id:
+                continue
+            try:
+                item = model_registry.get(model_id)
+            except Exception:
+                item = None
+            ha_link = (item or {}).get("ha_link")
+            if not ha_link:
+                continue
+            try:
+                control_linked_device(
+                    prediction,
+                    ha_link,
+                    folder_name,
+                    scope=scope,
+                    chunk_index=prediction.get("chunk_index"),
+                )
+            except Exception as exc:
+                logging.getLogger(__name__).error("Linked device control failed: %s", exc)
+
     def run_model_worker() -> None:
         while True:
             job = model_queue.get()
@@ -1092,6 +1123,7 @@ def main() -> int:
                     logging.getLogger(__name__).error("User model runtime unavailable: %s", exc)
                     results = []
                 if results:
+                    fire_model_device_links(results, "chunk")
                     occupancy_results = [item for item in results if item.get("status") == "ok" and str(item.get("class", "")).lower() in {"occupied", "empty"}]
                     if occupancy_results:
                         selected = max(occupancy_results, key=lambda item: float(item.get("confidence") or 0.0))
@@ -1134,6 +1166,8 @@ def main() -> int:
                 except Exception as exc:
                     logging.getLogger(__name__).error("Partial minute inference failed: %s", exc)
                     presults = []
+                if presults:
+                    fire_model_device_links(presults, "partial_minute")
                 pocc = [
                     item for item in presults
                     if item.get("status") == "ok" and str(item.get("class", "")).lower() in {"occupied", "empty"}
@@ -2039,6 +2073,7 @@ def main() -> int:
             minute_results = []
             manifest["errors"].append(f"Minute-level model inference failed: {exc}")
         if minute_results:
+            fire_model_device_links(minute_results, "minute")
             occupancy_results = [
                 item for item in minute_results
                 if item.get("status") == "ok" and str(item.get("class", "")).lower() in {"occupied", "empty"}
