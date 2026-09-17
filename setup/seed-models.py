@@ -31,9 +31,8 @@ CSI_INPUT = {"sensor": "csi", "representation": "e2_grid", "samples": 128,
              "shape": [1, 128, 52], "fit": "left_pad_latest",
              "normalization": {"kind": "none"}}
 specs = {
-    "radar_occupancy_e2.pt": [dict(RADAR_INPUT)],
-    "fusion_occupancy_e2.pt": [dict(RADAR_INPUT), dict(CSI_INPUT)],
-    "radar_occupancy_e3_finetuned.pt": [dict(RADAR_INPUT)],
+    "radar_occupancy.pt": [dict(RADAR_INPUT)],
+    "fusion_occupancy.pt": [dict(RADAR_INPUT), dict(CSI_INPUT)],
 }
 
 
