@@ -34,6 +34,15 @@ from .model_runtime import ModelRegistry, ModelValidationError
 # Set up logging
 logger = logging.getLogger(__name__)
 
+
+def _clamp_fps(value: Any) -> float:
+    """Coerce a camera frame-rate setting into [0.2, 30] fps (default 1)."""
+    try:
+        return max(0.2, min(30.0, float(value)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
 class DeviceManager:
     """Manages device registration and status updates with the Brain server."""
 
@@ -279,6 +288,7 @@ class DeviceManager:
             'system_mode',
             'sleep_study_enabled',
             'csi_device_ids',
+            'camera_fps',
         }
         capture_updates = {key: value for key, value in updates.items() if key in processing_keys}
         device_updates = {key: value for key, value in updates.items() if key not in processing_keys}
@@ -408,6 +418,7 @@ class DeviceManager:
             'system_mode': 'balanced',
             'sleep_study_enabled': False,
             'csi_device_ids': {},
+            'camera_fps': 1.0,
             'calibrations': {},
             'revision': 0,
             'updated_at': None,
@@ -452,6 +463,7 @@ class DeviceManager:
                 for port, device_id in (source.get('csi_device_ids') or {}).items()
                 if str(port).strip() and str(device_id).strip()
             } if isinstance(source.get('csi_device_ids'), dict) else {},
+            'camera_fps': _clamp_fps(source.get('camera_fps')),
             'calibrations': source.get('calibrations') if isinstance(source.get('calibrations'), dict) else {},
             'revision': revision,
             'updated_at': str(updated_at) if updated_at else None,

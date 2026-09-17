@@ -345,6 +345,7 @@ def load_processing_settings() -> dict[str, Any]:
         "system_mode": "balanced",
         "sleep_study_enabled": False,
         "csi_device_ids": {},
+        "camera_fps": 1.0,
         "revision": 0,
         "updated_at": None,
     }
@@ -1035,6 +1036,10 @@ def main() -> int:
     camera: str | None = None
     camera_thread: threading.Thread | None = None
     camera_frames: list[dict[str, Any]] = []
+    try:
+        camera_fps = max(0.2, min(30.0, float(initial_settings.get("camera_fps") or 1.0)))
+    except (TypeError, ValueError):
+        camera_fps = 1.0
     radar_reader_thread: threading.Thread | None = None
     radar: Any | None = None
     radar_lock: Any | None = None
@@ -1160,6 +1165,10 @@ def main() -> int:
                     "evaluated_frames": occupancy.get("evaluated_frames"),
                     "ratio": occupancy.get("ratio"),
                     "people_count": result.get("people_count", entry.get("people_count", 0)),
+                    "location": result.get("location"),
+                    "location_score": result.get("score"),
+                    "targets": result.get("targets") or [],
+                    "xy_map": result.get("xy_map") or {},
                 },
             }
             radar_name = Path(str(entry.get("bin_path") or "")).name
@@ -1330,44 +1339,86 @@ def main() -> int:
                 upload_queue.task_done()
 
     def run_camera_worker() -> None:
-        """Capture one usable image for each real-clock second, independently of radar."""
+        """Stream camera frames at the configured rate (camera_fps per second).
+
+        A single persistent ffmpeg image2 sequence is far cheaper than one
+        subprocess per frame, so the rate is customizable from ~1 frame per
+        chunk up to the camera's maximum. Each frame is mapped to its chunk by
+        index/fps and registered in the manifest + per-chunk camera_path.
+        """
         if not camera:
             return
-        second_index = 0
-        while second_index < expected_chunks:
-            target = capture_started_monotonic + second_index
-            remaining = target - time.monotonic()
-            if remaining > 0:
-                time.sleep(min(remaining, 1.0))
-                continue
-            if time.monotonic() >= stop_at:
-                return
-            captured_at = iso_now()
-            monotonic_ns = time.monotonic_ns()
-            stamp = captured_at.replace("-", "").replace(":", "").replace("T", "_")
-            stamp = stamp.replace("+", "_").replace(".", "_")[:19]
-            image_path = output_dir / f"camera_{second_index:03d}_{stamp}.jpg"
-            frame = {
-                "second_index": second_index,
-                "captured_at": captured_at,
-                "monotonic_ns": monotonic_ns,
-                "path": str(image_path),
-            }
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            manifest["warnings"].append("ffmpeg was not found in PATH; camera capture disabled.")
+            return
+        seq_pattern = output_dir / "camera_%05d.jpg"
+        cmd = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "v4l2",
+            "-i", camera,
+            "-vf", f"fps={camera_fps}",
+            "-q:v", "2",
+            str(seq_pattern),
+        ]
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            manifest["warnings"].append(f"Camera stream failed to start: {exc}")
+            return
+        seen = 0
+        last_manifest_write = 0.0
+        try:
+            while time.monotonic() < stop_at:
+                files = sorted(output_dir.glob("camera_*.jpg"))
+                # skip the file ffmpeg may still be writing
+                complete = files[:-1] if len(files) > 1 else []
+                for idx in range(seen, len(complete)):
+                    image_path = complete[idx]
+                    second_index = min(expected_chunks - 1, int(idx / camera_fps))
+                    frame = {
+                        "second_index": second_index,
+                        "frame_index": idx,
+                        "captured_at": iso_now(),
+                        "monotonic_ns": time.monotonic_ns(),
+                        "path": str(image_path),
+                    }
+                    with publish_lock:
+                        camera_frames.append(frame)
+                        if second_index < len(radar_chunk_results):
+                            radar_chunk_results[second_index].update({
+                                "camera_path": str(image_path),
+                                "camera_captured_at": frame["captured_at"],
+                                "camera_monotonic_ns": frame["monotonic_ns"],
+                            })
+                    seen = idx + 1
+                now = time.monotonic()
+                if seen and now - last_manifest_write >= 1.0:
+                    with publish_lock:
+                        manifest["outputs"].setdefault("camera", {})["frames"] = camera_frames
+                        write_live_manifest()
+                    last_manifest_write = now
+                time.sleep(0.4)
+        finally:
+            proc.terminate()
             try:
-                capture_camera_image(camera, image_path)
-                with publish_lock:
-                    camera_frames.append(frame)
-                    manifest["outputs"].setdefault("camera", {})["frames"] = camera_frames
-                    if second_index < len(radar_chunk_results):
-                        radar_chunk_results[second_index].update({
-                            "camera_path": str(image_path),
-                            "camera_captured_at": captured_at,
-                            "camera_monotonic_ns": monotonic_ns,
-                        })
-                    write_live_manifest()
-            except Exception as exc:
-                manifest["warnings"].append(f"Camera second {second_index} failed: {exc}")
-            second_index += 1
+                proc.wait(timeout=5.0)
+            except Exception:
+                proc.kill()
+            # register any frames written just before shutdown
+            files = sorted(output_dir.glob("camera_*.jpg"))
+            for idx in range(seen, len(files)):
+                image_path = files[idx]
+                second_index = min(expected_chunks - 1, int(idx / camera_fps))
+                camera_frames.append({
+                    "second_index": second_index,
+                    "frame_index": idx,
+                    "captured_at": iso_now(),
+                    "monotonic_ns": time.monotonic_ns(),
+                    "path": str(image_path),
+                })
+            if camera_frames:
+                manifest["outputs"].setdefault("camera", {})["frames"] = camera_frames
 
     def run_analysis_worker() -> None:
         try:
