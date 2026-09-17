@@ -1142,6 +1142,23 @@ def main() -> int:
                     selected = dict(max(pocc, key=lambda item: float(item.get("confidence") or 0.0)))
                     selected["scope"] = "partial_minute"
                     publish_model_occupancy(selected, folder_name, chunk_index=None)
+                if presults:
+                    with publish_lock:
+                        timelines = manifest.setdefault("model_predictions", [])
+                        by_id = {str(item.get("model_id")): item for item in timelines if isinstance(item, dict)}
+                        for prediction in presults:
+                            prediction = dict(prediction)
+                            prediction["scope"] = "partial_minute"
+                            model_id = str(prediction.get("model_id"))
+                            timeline = by_id.setdefault(model_id, {
+                                "model_id": model_id,
+                                "model_name": prediction.get("model_name"),
+                                "model_version": prediction.get("model_version"),
+                                "timeline": [],
+                            })
+                            timeline["timeline"].append(prediction)
+                        manifest["model_predictions"] = list(by_id.values())
+                        write_live_manifest()
             finally:
                 partial_minute_queue.task_done()
 
