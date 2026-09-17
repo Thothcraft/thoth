@@ -1656,6 +1656,12 @@ def main() -> int:
                 write_live_manifest()
             upload_queue.put(chunk_index)
             model_queue.put((chunk_index, tuple(radar_model_history), iso_now()))
+            # Queue the chunk for XY localization / occupancy analysis so the
+            # per-chunk location, targets and xy_map land in the collected data.
+            enqueue_analysis_chunk(
+                analysis_queue,
+                ("chunk", chunk_entry, dict(initial_settings), tuple(frames), captured_at),
+            )
             frames = []
             frame_times = []
 
@@ -1668,6 +1674,10 @@ def main() -> int:
     try:
         model_thread = threading.Thread(target=run_model_worker, name="UserModelInference", daemon=True)
         model_thread.start()
+        radar_analysis_thread = threading.Thread(
+            target=run_analysis_worker, name="RadarChunkAnalysis", daemon=True
+        )
+        radar_analysis_thread.start()
         if not args.no_sensehat:
             sense_file = output_dir / "sense_hat.jsonl"
             manifest["outputs"]["sense_hat"] = {
