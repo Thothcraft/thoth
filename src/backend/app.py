@@ -514,7 +514,10 @@ def _best_live_minute_for_kind(kind: str) -> tuple[Optional[Path], Dict[str, Opt
         if _has_kind(current_files):
             return current, current_files
 
-    for minute in list_minutes():
+    # Only scan the newest few minutes: capture_files + container metadata are
+    # per-minute disk reads, so an unbounded scan hangs when the sensor is
+    # absent everywhere (e.g. no Sense HAT on this device).
+    for minute in list_minutes()[:5]:
         minute_dir = get_minute(minute.get('minute', ''))
         if not minute_dir:
             continue
