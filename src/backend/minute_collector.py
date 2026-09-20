@@ -1161,7 +1161,7 @@ def main() -> int:
                 pframes, ptimes, ptimestamp = job
                 try:
                     presults = model_registry.run_minute(
-                        list(pframes), list(ptimes), current_csi_samples(), ptimestamp
+                        list(pframes), list(ptimes), _minute_csi_samples(manifest), ptimestamp
                     )
                 except Exception as exc:
                     logging.getLogger(__name__).error("Partial minute inference failed: %s", exc)
