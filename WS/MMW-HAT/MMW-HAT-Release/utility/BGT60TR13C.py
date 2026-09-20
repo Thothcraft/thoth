@@ -16,7 +16,7 @@ RET_VAL_ERR = -1
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class BGT60TR13C:
-    def __init__(self, spi_bus=0, spi_dev=0, spi_speed=10_000_000, rst_pin=12, irq_pin=25, version=0, save_to_file=None):
+    def __init__(self, spi_bus=0, spi_dev=0, spi_speed=10_000_000, rst_pin=12, irq_pin=25, version=0, save_to_file=None, strict_gpio=False):
         self.__spi = None
         self.__rst = None
         self.__irq = None
@@ -31,6 +31,8 @@ class BGT60TR13C:
             self.__spi.mode = 0
             self.__rst = self._claim_output_gpio(rst_pin, [17, 27, 22], "reset")
             self.__irq = self._claim_input_gpio(irq_pin, [24, 23, 18], "irq")
+            if strict_gpio and (self.__rst is None or self.__irq is None):
+                raise RuntimeError("GPIO busy: radar reset/irq pins could not be claimed")
             if self.__rst is not None:
                 self.hard_reset()
         except Exception:
