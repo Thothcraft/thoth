@@ -343,57 +343,76 @@ def _map_u8(grid: np.ndarray, x_axis: Any, y_axis: Any) -> Dict[str, Any]:
     }
 
 
-def _live_map_payloads(processor: Any, frame: Optional[np.ndarray]) -> Dict[str, Any]:
+def _norm_db(grid: np.ndarray) -> np.ndarray:
+    """Robust dB normalization to [0, 1] for map display."""
+    db = 20.0 * np.log10(np.maximum(np.asarray(grid, dtype=float), np.finfo(float).tiny))
+    finite = db[np.isfinite(db)]
+    if not finite.size:
+        return np.zeros_like(db, dtype=float)
+    floor = float(np.percentile(finite, 55.0))
+    ceiling = float(np.percentile(finite, 99.5))
+    return np.clip((db - floor) / max(1.0, ceiling - floor), 0.0, 1.0)
+
+
+def _live_map_payloads(processor: Any, radar_config: Dict[str, Any]) -> Dict[str, Any]:
     """Range-Doppler / range-azimuth / range-elevation maps for the live lab.
 
-    When ``frame`` is given the full ``range_angle_products`` pipeline runs
-    (refreshing the MTI state and ``_rd_spectrum``).  When it is None the
-    spectrum left behind by ``processor.update()`` is reused and only the DBF
-    step is re-run — calling ``range_angle_products`` twice per frame would
-    double-apply the MTI filter.
+    Reuses the intermediates the native Example-2 update already computed this
+    frame (``_last_rd_spectrum`` / ``_last_beam_range_energy``) so the maps cost
+    one extra elevation DBF pass instead of a second full pipeline.  Falls back
+    to the advanced processor's ``_rd_spectrum`` when no native wrapper exists.
     """
     try:
-        if frame is not None:
-            azimuth_energy, _az_cube, elevation_cube, _se, _sac, _sec = (
-                processor.range_angle_products(frame)
-            )
+        exact = _example2_processor(processor)
+        rd_spectrum = getattr(exact, "_last_rd_spectrum", None) if exact is not None else None
+        beam_range = getattr(exact, "_last_beam_range_energy", None) if exact is not None else None
+        if not isinstance(rd_spectrum, np.ndarray) or rd_spectrum.ndim != 3:
             rd_spectrum = getattr(processor, "_rd_spectrum", None)
-        else:
-            rd_spectrum = getattr(processor, "_rd_spectrum", None)
-            if not isinstance(rd_spectrum, np.ndarray) or rd_spectrum.ndim != 3:
-                return {}
-            azimuth_cube = processor.azimuth_dbf.run(rd_spectrum[:, :, [0, 2]])
-            elevation_cube = processor.elevation_dbf.run(rd_spectrum[:, :, [1, 2]])
-            azimuth_energy = np.linalg.norm(azimuth_cube, axis=1) / math.sqrt(
-                processor.num_azimuth_beams
-            )
         if not isinstance(rd_spectrum, np.ndarray) or rd_spectrum.ndim != 3:
             return {}
-        elevation_energy = np.linalg.norm(elevation_cube, axis=1) / math.sqrt(
-            processor.num_elevation_beams
+
+        velocity_bin = getattr(processor, "_thoth_velocity_bin", None)
+        if velocity_bin is None:
+            chirps = int(radar_config.get("num_chirps_per_frame") or 0)
+            chirp_rate = float(radar_config.get("chirp_rate") or 0.0)
+            if chirps <= 0 or chirp_rate <= 0:
+                return {}
+            doppler_frequency_bin = np.fft.fftshift(
+                np.fft.fftfreq(2 * chirps, d=1.0 / chirp_rate)
+            )
+            velocity_bin = doppler_frequency_bin * (3e8 / 59e9) / 2.0
+            processor._thoth_velocity_bin = velocity_bin
+
+        range_bin = np.asarray(
+            getattr(exact, "range_bin", None) if exact is not None else getattr(processor, "range_bin", None),
+            dtype=float,
         )
-        doppler_power = np.mean(np.abs(rd_spectrum) ** 2, axis=2)
-        doppler_db = 20.0 * np.log10(np.maximum(doppler_power, np.finfo(float).tiny))
-        finite = doppler_db[np.isfinite(doppler_db)]
-        if finite.size:
-            floor = float(np.percentile(finite, 55.0))
-            ceiling = float(np.percentile(finite, 99.5))
-            doppler_norm = np.clip((doppler_db - floor) / max(1.0, ceiling - floor), 0.0, 1.0)
-        else:
-            doppler_norm = np.zeros_like(doppler_db, dtype=float)
-        return {
-            "range_doppler": _map_u8(doppler_norm, processor.velocity_bin, processor.range_bin),
-            "range_azimuth": _map_u8(
-                processor._display_intensity(azimuth_energy),
-                processor.azimuth_bin,
-                processor.range_bin,
-            ),
-            "range_elevation": _map_u8(
-                processor._display_intensity(elevation_energy),
-                processor.elevation_bin,
-                processor.range_bin,
+        maps: Dict[str, Any] = {
+            "range_doppler": _map_u8(
+                _norm_db(np.mean(np.abs(rd_spectrum) ** 2, axis=2)),
+                velocity_bin,
+                range_bin,
             ),
         }
+        if isinstance(beam_range, np.ndarray) and beam_range.ndim == 2:
+            maps["range_azimuth"] = _map_u8(
+                _norm_db(beam_range),
+                np.asarray(exact.angle_bin, dtype=float),
+                range_bin,
+            )
+        # Elevation: one DBF pass over the elevation antenna pair (RX2/RX3).
+        elevation_dbf = getattr(processor, "elevation_dbf", None)
+        if elevation_dbf is not None and rd_spectrum.shape[2] >= 3:
+            elevation_cube = elevation_dbf.run(rd_spectrum[:, :, [1, 2]])
+            elevation_energy = np.linalg.norm(elevation_cube, axis=1) / math.sqrt(
+                getattr(processor, "num_elevation_beams", elevation_cube.shape[1])
+            )
+            maps["range_elevation"] = _map_u8(
+                _norm_db(elevation_energy),
+                np.asarray(processor.elevation_bin, dtype=float),
+                range_bin,
+            )
+        return maps
     except Exception:
         return {}
 
@@ -711,11 +730,10 @@ class StreamingChunkAnalyzer:
             targets = []
             advanced_detection = {}
         if self.live_example2_only:
-            # The live lab needs the range-Doppler/azimuth/elevation maps even
-            # when the native Example 2 path owns detection.  Reuse the fresh
-            # spectrum when update() already ran the pipeline this frame.
+            # Maps reuse the intermediates the native Example-2 update already
+            # computed this frame — no second pipeline run.
             self.last_maps = _live_map_payloads(
-                self.processor, None if update_advanced else frame
+                self.processor, self.radar_config
             ) or self.last_maps
         native_detection = native_plot.get("detection") if isinstance(native_plot.get("detection"), dict) else {}
         detection = dict(native_detection or advanced_detection)

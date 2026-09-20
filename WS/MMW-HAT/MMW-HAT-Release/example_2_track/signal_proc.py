@@ -135,6 +135,10 @@ class SigProc:
         # Compute Range-Angle map
         rd_beam_formed = self.dbf.run(rd_spectrum)
         beam_range_energy = np.linalg.norm(rd_beam_formed, axis=1) / np.sqrt(self.num_beams)
+        # Exposed read-only for the live lab's range-Doppler / range-azimuth
+        # views; the detection path below is unchanged.
+        self._last_rd_spectrum = rd_spectrum
+        self._last_beam_range_energy = beam_range_energy
         return beam_range_energy
 
     def target_validation(self, beam_range_energy, range_idx, angle_idx):
