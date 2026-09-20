@@ -287,11 +287,28 @@ class BGT60TR13C:
         else:
             return RET_VAL_OK
 
+    def __fifo_fill_level(self):
+        """Current FIFO fill in samples, or -1 when the read fails."""
+        try:
+            fstat = self.__get_reg(BGT60TRXX_REG_FSTAT_TR13C)
+        except Exception:
+            return -1
+        return int(fstat & BGT60TRXX_REG_FSTAT_FILL_STATUS_MSK)
+
     def __data_collection(self):
         logging.debug("Data collection thread started.")
         while not self.__data_collection_stop_event.is_set():
-            time.sleep(0.001)
-            while self.__irq is not None and self.__irq.value == 1:
+            # Drain on FIFO fill level rather than the IRQ pin alone: GPIO edge
+            # notification can stall under process load, which lets the FIFO
+            # overflow and wedge capture for the rest of the minute.
+            fill = self.__fifo_fill_level()
+            if fill <= 0:
+                time.sleep(0.001)
+                continue
+            while not self.__data_collection_stop_event.is_set():
+                fill = self.__fifo_fill_level()
+                if fill < self.__num_sampler_per_burst:
+                    break
                 fifo_data = self.__get_fifo_data(self.__num_sampler_per_burst)
                 if fifo_data is None:
                     # A latched FIFO overflow wedges every further burst read;
