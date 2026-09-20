@@ -138,12 +138,13 @@
     <a href="#main-content" class="skip-link">Skip to content</a>
     <header class="site-header sticky top-0 z-20">
         <div class="site-header-inner max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8 flex justify-between items-center">
-            <a href="{{ url_for('status') }}" class="site-title"><span class="site-mark">T</span><span>Thoth</span></a>
+            <a href="{{ url_for('status') }}" class="site-title"><span class="site-mark">T</span><span>Thoth</span>{% if session.get('username') %}<span id="health-dot" title="device health" style="width:9px;height:9px;border-radius:50%;background:#6d6961;margin-left:2px"></span>{% endif %}</a>
             <nav class="site-nav flex items-center space-x-4" aria-label="Primary navigation">
                 <a href="{{ url_for('status') }}" class="text-sm">
                     Home
                 </a>
                 {% if session.get('username') %}
+                <a href="{{ url_for('live_lab') }}" class="text-sm">Live</a>
                 <a href="{{ url_for('models_page') }}" class="text-sm">Models</a>
                 <details class="relative">
                     <summary class="cursor-pointer list-none text-sm">More ▾</summary>
@@ -210,6 +211,30 @@
             const message = error.response?.data?.message || error.message || 'An error occurred';
             showAlert(message, 'error');
         }
+
+        // Header health dot: green = healthy, amber = degraded captures in the
+        // last hour, red = health endpoint unreachable.
+        (function () {
+            const dot = document.getElementById('health-dot');
+            if (!dot) return;
+            async function poll() {
+                try {
+                    const r = await fetch('/api/health', { cache: 'no-store' });
+                    if (!r.ok) throw new Error('http ' + r.status);
+                    const h = await r.json();
+                    const degraded = (h.degraded_minutes_last_hour || 0) > 0;
+                    dot.style.background = degraded ? '#f2a93b' : '#238653';
+                    dot.title = degraded
+                        ? `${h.degraded_minutes_last_hour} degraded minute(s) in the last hour`
+                        : `healthy · ${h.revision || 'unknown rev'} · ${h.disk?.percent_used ?? '?'}% disk`;
+                } catch (e) {
+                    dot.style.background = '#a63730';
+                    dot.title = 'health endpoint unreachable';
+                }
+            }
+            poll();
+            setInterval(poll, 30000);
+        })();
     </script>
 
     {% block scripts %}{% endblock %}

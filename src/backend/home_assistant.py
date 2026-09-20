@@ -168,20 +168,28 @@ def publish_model_occupancy(model_result: Dict[str, Any], minute: str, *, chunk_
         return _record_status({"success": False, "status": "disabled"})
     if not config.get("token"):
         return _record_status({"success": False, "status": "not_configured"})
+    attributes = {
+        "friendly_name": "Thoth Model Occupancy",
+        "device_class": "occupancy",
+        "label": label,
+        "confidence": model_result.get("confidence"),
+        "model_id": model_result.get("model_id"),
+        "model_name": model_result.get("model_name"),
+        "model_version": model_result.get("model_version"),
+        "capture_minute": minute,
+        "chunk_index": chunk_index,
+        "timestamp": model_result.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+    }
+    votes = model_result.get("window_votes")
+    if isinstance(votes, dict) and votes.get("total"):
+        # Let HA automations threshold on vote agreement, e.g. "occupied only
+        # when >=75% of the minute's windows agree".
+        attributes["window_votes_positive"] = votes.get("positive")
+        attributes["window_votes_total"] = votes.get("total")
+        attributes["vote_fraction"] = round(float(votes.get("positive") or 0) / float(votes["total"]), 3)
     body = {
         "state": "on" if occupied else "off",
-        "attributes": {
-            "friendly_name": "Thoth Model Occupancy",
-            "device_class": "occupancy",
-            "label": label,
-            "confidence": model_result.get("confidence"),
-            "model_id": model_result.get("model_id"),
-            "model_name": model_result.get("model_name"),
-            "model_version": model_result.get("model_version"),
-            "capture_minute": minute,
-            "chunk_index": chunk_index,
-            "timestamp": model_result.get("timestamp") or datetime.now(timezone.utc).isoformat(),
-        },
+        "attributes": attributes,
     }
     base = str(config['base_url']).rstrip('/')
     headers = {"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"}

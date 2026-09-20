@@ -504,6 +504,8 @@ def _best_live_minute_for_kind(kind: str) -> tuple[Optional[Path], Dict[str, Opt
             )
         if kind == 'radar':
             return bool((files.get('radar') and files['radar'].exists()) or container_info.get('radar'))
+        if kind == 'sensehat':
+            return bool(files.get('sense_hat') and files['sense_hat'].exists())
         return False
 
     current = current_minute()
@@ -2079,6 +2081,7 @@ def _read_timeline_manifest_summary(path: Path) -> Optional[Dict[str, Any]]:
             'expected_chunks': manifest.get('expected_chunks'),
             'chunk_seconds': manifest.get('chunk_seconds'),
             'capture_finished': manifest.get('capture_finished'),
+            'degraded': bool(manifest.get('degraded')),
             'revision': revision,
         }
     try:
@@ -2926,6 +2929,170 @@ def api_live_capture_csi_plot():
     points = _parse_csi_average_series(path)
     svg = _build_csi_svg(points)
     return Response(svg, mimetype='image/svg+xml', headers={'Cache-Control': 'no-cache'})
+
+
+@app.route('/live')
+def live_lab():
+    """Unified live sensor lab: every available sensor at its native rate."""
+    return render_template('live.html', username=session.get('username'))
+
+
+@app.route('/api/health')
+def api_health():
+    """On-device health summary: sensor yield, verdicts, disk, revision."""
+    try:
+        revision = subprocess.run(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            cwd=str(THOTH_ROOT), capture_output=True, text=True, timeout=3,
+        ).stdout.strip() or None
+    except Exception:
+        revision = None
+
+    usage = shutil.disk_usage(Config.CAPTURE_DATA_DIR)
+    disk = {
+        'total_gb': round(usage.total / 1e9, 1),
+        'free_gb': round(usage.free / 1e9, 1),
+        'percent_used': round(usage.used / usage.total * 100.0, 1) if usage.total else None,
+    }
+
+    sensors: Dict[str, Any] = {}
+    verdicts: list[Dict[str, Any]] = []
+    degraded_minutes = 0
+    latest_minute = None
+    minutes = list_minutes()[:70]  # trailing ~hour
+    for index, item in enumerate(minutes):
+        minute_dir = get_minute(item.get('minute', ''))
+        if not minute_dir:
+            continue
+        manifest_path = minute_dir / 'manifest.json'
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        if manifest.get('degraded'):
+            degraded_minutes += 1
+        if index == 0 or latest_minute is None:
+            latest_minute = minute_dir.name
+            outputs = manifest.get('outputs') or {}
+            radar = outputs.get('radar') or {}
+            wifi = outputs.get('wifi_csi') or {}
+            sensors = {
+                'radar': {
+                    'sample_count': radar.get('sample_count'),
+                    'rate_hz': radar.get('average_sampling_rate_hz'),
+                    'expected_hz': 10.0,
+                    'degraded': bool(manifest.get('degraded')),
+                },
+                'wifi_csi': {
+                    'sample_count': wifi.get('sample_count'),
+                    'rate_hz': wifi.get('average_sampling_rate_hz'),
+                },
+                'camera': {'present': bool(outputs.get('camera'))},
+                'sense_hat': {'present': bool(outputs.get('sense_hat'))},
+            }
+            for prediction in manifest.get('model_predictions') or []:
+                timeline = prediction.get('timeline') if isinstance(prediction, dict) else None
+                if not timeline:
+                    continue
+                last = timeline[-1]
+                verdicts.append({
+                    'model': prediction.get('model_name'),
+                    'class': last.get('class'),
+                    'decision': last.get('decision'),
+                    'window_votes': last.get('window_votes'),
+                    'status': last.get('status'),
+                })
+
+    return jsonify({
+        'status': 'ok',
+        'uptime_seconds': round(time.time() - psutil.Process().create_time(), 1),
+        'revision': revision,
+        'disk': disk,
+        'latest_minute': latest_minute,
+        'degraded_minutes_last_hour': degraded_minutes,
+        'sensors': sensors,
+        'verdicts': verdicts,
+    })
+
+
+@app.route('/api/captures/live/sensehat')
+def api_live_capture_sensehat():
+    """Latest Sense HAT readings plus a short trailing series for sparklines."""
+    minute_dir, files = _best_live_minute_for_kind('sensehat')
+    path = files.get('sense_hat') if files else None
+    if not minute_dir or not path or not path.exists():
+        return jsonify({'status': 'empty', 'minute': minute_dir.name if minute_dir else None,
+                        'latest': None, 'series': []})
+
+    rows: list[Dict[str, Any]] = []
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as handle:
+            tail = deque(handle, maxlen=240)
+        for raw in tail:
+            try:
+                row = json.loads(raw)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    except OSError as exc:
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
+
+    latest = rows[-1] if rows else None
+    series = [
+        {
+            't': row.get('monotonic_ns'),
+            'temperature_c': row.get('temperature_c'),
+            'humidity_percent': row.get('humidity_percent'),
+            'pressure_mbar': row.get('pressure_mbar'),
+        }
+        for row in rows[-120:]
+    ]
+    return jsonify({
+        'status': 'success',
+        'minute': minute_dir.name,
+        'latest': latest,
+        'series': series,
+        'sample_count': len(rows),
+    })
+
+
+@app.route('/api/captures/live/verdict')
+def api_live_capture_verdict():
+    """Latest minute-level model verdict for the live page header strip."""
+    minute_dir = current_minute() or (get_minute(list_minutes()[0]['minute']) if list_minutes() else None)
+    if not minute_dir:
+        return jsonify({'status': 'empty'})
+    manifest: Dict[str, Any] = {}
+    manifest_path = minute_dir / 'manifest.json'
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            manifest = {}
+    verdicts = []
+    for prediction in manifest.get('model_predictions') or []:
+        timeline = prediction.get('timeline') if isinstance(prediction, dict) else None
+        if not timeline:
+            continue
+        last = timeline[-1]
+        verdicts.append({
+            'model': prediction.get('model_name'),
+            'class': last.get('class'),
+            'confidence': last.get('confidence'),
+            'decision': last.get('decision'),
+            'window_votes': last.get('window_votes'),
+            'scope': last.get('scope'),
+            'status': last.get('status'),
+        })
+    return jsonify({
+        'status': 'success',
+        'minute': minute_dir.name,
+        'verdicts': verdicts,
+        'updated': datetime.utcnow().isoformat(),
+    })
 
 
 @app.route('/api/captures/live/radar/data/<plot>')

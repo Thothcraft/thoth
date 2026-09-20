@@ -2063,6 +2063,16 @@ def main() -> int:
         }
         manifest["expected_chunks"] = len(radar_chunk_results)
 
+        # Surface silent capture loss: a healthy radar minute yields ~10 fps,
+        # so anything under 2 fps means most frames were dropped (e.g. FIFO
+        # starvation) even though no hard error was raised.
+        if not args.no_radar and radar_rate < 2.0:
+            manifest["degraded"] = True
+            manifest["warnings"].append(
+                f"Radar yield degraded: {radar_frame_count} frames at {radar_rate:.2f} fps "
+                "(expected ~10 fps); check FIFO/GSR errors in the collector log."
+            )
+
         manifest["capture_started"] = capture_started
         manifest["capture_finished"] = iso_now()
         manifest["host"] = os.uname().nodename

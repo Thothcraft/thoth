@@ -16,7 +16,7 @@ import threading
 import zipfile
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -993,18 +993,43 @@ def collect_prediction_timelines() -> Dict[str, List[Dict[str, object]]]:
 def cleanup_old_minutes(
     keep: Optional[int] = None,
     max_disk_percent: Optional[float] = None,
+    max_age_days: Optional[float] = None,
 ) -> Dict[str, object]:
-    """Delete the oldest captures only after storage reaches its disk limit."""
+    """Delete captures past the age limit or once storage reaches its disk limit."""
     del keep  # Retained for compatibility with older callers; no count cap.
     threshold = min(99.0, max(1.0, float(
         max_disk_percent if max_disk_percent is not None else Config.CAPTURE_MAX_DISK_PERCENT
     )))
+    age_days = float(
+        max_age_days
+        if max_age_days is not None
+        else os.environ.get("THOTH_CAPTURE_MAX_AGE_DAYS", "14")
+    )
     root = _capture_root()
     folders = list_minute_folders()
     removed: List[str] = []
     # The newest folder may still be recording. Reclaim completed history
     # oldest-first while always preserving that active candidate.
     candidates = list(reversed(folders[1:])) if len(folders) > 1 else []
+
+    # Age bound: folder names are YYYYMMDD_HHMM, so a stale minute is removable
+    # regardless of disk pressure.
+    if age_days > 0:
+        cutoff = datetime.now() - timedelta(days=age_days)
+        still_fresh: List[Path] = []
+        for minute_dir in candidates:
+            try:
+                stamp = datetime.strptime(minute_dir.name[:13], "%Y%m%d_%H%M")
+            except (ValueError, TypeError):
+                still_fresh.append(minute_dir)
+                continue
+            if stamp < cutoff:
+                shutil.rmtree(minute_dir, ignore_errors=True)
+                removed.append(minute_dir.name)
+            else:
+                still_fresh.append(minute_dir)
+        candidates = still_fresh
+
     usage = shutil.disk_usage(root)
     percent_used = (usage.used / usage.total * 100.0) if usage.total else 0.0
     while percent_used >= threshold and candidates:
@@ -1018,5 +1043,6 @@ def cleanup_old_minutes(
         "kept": max(0, len(folders) - len(removed)),
         "removed": removed,
         "max_disk_percent": threshold,
+        "max_age_days": age_days,
         "disk_percent": round(percent_used, 2),
     }
