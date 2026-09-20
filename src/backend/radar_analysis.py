@@ -836,7 +836,9 @@ class StreamingChunkAnalyzer:
         if self.live_state_path is None:
             return
         now = time.monotonic()
-        publish_interval = max(0.03, 0.75 / max(1.0, self.configured_frame_rate_hz))
+        # ~5 Hz is plenty for the live lab; each publish serializes ~70KB of
+        # maps, so publishing every processed frame just burns collector CPU.
+        publish_interval = max(0.2, 0.75 / max(1.0, self.configured_frame_rate_hz))
         if now - self.last_live_publish < publish_interval:
             return
         self.last_live_publish = now
@@ -888,6 +890,8 @@ class StreamingChunkAnalyzer:
                 "frame_index": self.evaluated_frames - 1,
                 "sensor_hz": round(measured_hz, 2),
                 "configured_hz": self.configured_frame_rate_hz,
+                "processing_ms": round(self.max_processing_seconds * 1000.0, 1),
+                "queue_lag_ms": round(self.max_queue_lag_ms, 1),
                 "intensity": live_intensity,
                 "maps": self.last_maps,
             }, separators=(",", ":")), encoding="utf-8")
