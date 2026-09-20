@@ -64,7 +64,7 @@ RADAR_FRAMES_PER_CHUNK = 10
 # worker now owns freshness, so archival jobs can be buffered for the whole
 # minute instead of discarding a valid saved chunk during a transient CPU spike.
 MAX_PENDING_ANALYSIS_CHUNKS = 64
-LIVE_VISUALIZATION_INTERVAL_SECONDS = 0.16
+LIVE_VISUALIZATION_INTERVAL_SECONDS = 0.05
 RADAR_LOCK_PATH = Path("/tmp/thoth-radar-hardware.lock")
 RADAR_GPIO_RETRY_SECONDS = 12.0
 RADAR_GPIO_SETTLE_SECONDS = 0.5
