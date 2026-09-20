@@ -7,6 +7,11 @@ aggregation rule. They are registered as execution="minute" models so the
 collector runs them once per finished capture minute (see
 backend/model_runtime.py::ModelRegistry.run_minute) and are enabled by
 default so occupancy is scored after every collected minute.
+
+The minute verdict is a majority vote over per-window predictions; the
+aggregation rule only shapes the reported confidence. Presence labels are
+generic — archives exported as absent/present work the same as
+empty/occupied.
 """
 from pathlib import Path
 import hashlib

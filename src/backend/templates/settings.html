@@ -6,9 +6,9 @@
   <form id="settings-form" class="card space-y-4">
     <label class="flex justify-between gap-4"><span><strong class="block">Portal uploads</strong><small class="text-gray-600">Allow thothHUB to request capture uploads.</small></span><input type="checkbox" name="portal_upload_allowed" {% if device_settings.portal_upload_allowed %}checked{% endif %}></label>
     <label class="flex justify-between gap-4"><span><strong class="block">Cloud sync</strong><small class="text-gray-600">Allow capture data to be uploaded to your account.</small></span><input type="checkbox" name="cloud_sync_allowed" {% if device_settings.cloud_sync_allowed %}checked{% endif %}></label>
-    <fieldset class="border-t pt-4"><legend class="font-semibold">Human labels</legend><input class="form-input mt-2" name="labels" value="{{ device_settings.labels|join(', ') if device_settings.labels else '' }}" placeholder="bedroom, participant-01"></fieldset>
+    <fieldset class="border-t pt-4"><legend class="font-semibold">Human labels</legend><input class="form-input mt-2" name="labels" autocomplete="off" value="{{ device_settings.labels|join(', ') if device_settings.labels else '' }}" placeholder="bedroom, participant-01"></fieldset>
     {% if csi_devices %}<fieldset class="border-t pt-4"><legend class="font-semibold">CSI receiver IDs</legend><div class="mt-2 grid gap-3 md:grid-cols-2">{% for port in csi_devices %}<label class="text-sm"><span class="font-mono text-xs">{{ port }}</span><input class="form-input mt-1" data-csi-port="{{ port }}" value="{{ device_settings.csi_device_ids.get(port, 'csi-' ~ loop.index) if device_settings.csi_device_ids else 'csi-' ~ loop.index }}"></label>{% endfor %}</div></fieldset>{% endif %}
-    <div class="flex items-center gap-3"><button class="btn btn-primary" type="submit">Save settings</button><a class="btn btn-secondary" href="{{ url_for('models_page') }}">Manage models</a><span id="save-status" class="text-sm text-gray-600"></span></div>
+    <div class="flex items-center gap-3"><button class="btn btn-primary" type="submit">Save settings</button><a class="btn btn-secondary" href="{{ url_for('models_page') }}">Manage models</a><span id="save-status" class="text-sm text-gray-600" aria-live="polite"></span></div>
   </form>
 </div>
 {% endblock %}

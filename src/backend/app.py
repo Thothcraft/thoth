@@ -2076,6 +2076,9 @@ def _read_timeline_manifest_summary(path: Path) -> Optional[Dict[str, Any]]:
             'state': 'captured',
             'labels': manifest.get('labels') or [],
             'model_results': latest_results,
+            'expected_chunks': manifest.get('expected_chunks'),
+            'chunk_seconds': manifest.get('chunk_seconds'),
+            'capture_finished': manifest.get('capture_finished'),
             'revision': revision,
         }
     try:

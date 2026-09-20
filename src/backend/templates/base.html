@@ -2,6 +2,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#11110f">
     <title>{% block title %}{{ config.get('app_name', 'Thoth Device') }}{% endblock %}</title>
     <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
@@ -124,6 +125,8 @@
         .auth-card h1 { margin:8px 0 0; font-size:38px; letter-spacing:-.055em; }
         .auth-card p { margin:8px 0 0; color:var(--portal-muted); font-size:13px; line-height:1.55; }
         .auth-card label { display:block; margin:0 0 7px; color:#4e4b45; font-size:11px; font-weight:700; }
+        .skip-link { position:absolute; left:-9999px; top:0; z-index:100; background:var(--portal-ink); color:var(--portal-paper); padding:10px 16px; border-radius:0 0 10px 0; font-size:13px; font-weight:700; text-decoration:none; }
+        .skip-link:focus { left:0; }
         @media (max-width: 767px) {
             .site-nav { width: 100%; overflow-x: auto; padding-top: .75rem; }
             .site-header-inner { flex-wrap: wrap; }
@@ -132,6 +135,7 @@
     {% block extra_head %}{% endblock %}
 </head>
 <body class="min-h-screen text-slate-950">
+    <a href="#main-content" class="skip-link">Skip to content</a>
     <header class="site-header sticky top-0 z-20">
         <div class="site-header-inner max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8 flex justify-between items-center">
             <a href="{{ url_for('status') }}" class="site-title"><span class="site-mark">T</span><span>Thoth</span></a>
@@ -160,11 +164,11 @@
         </div>
     </header>
 
-    <main class="site-main max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
+    <main id="main-content" class="site-main max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 {% for category, message in messages %}
-                    <div class="mb-4 p-4 rounded-md {% if category == 'error' %}bg-red-100 text-red-700{% else %}bg-green-100 text-green-700{% endif %}">
+                    <div role="alert" class="mb-4 p-4 rounded-md {% if category == 'error' %}bg-red-100 text-red-700{% else %}bg-green-100 text-green-700{% endif %}">
                         {{ message }}
                     </div>
                 {% endfor %}

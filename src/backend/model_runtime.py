@@ -15,6 +15,7 @@ import os
 import re
 import threading
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -25,6 +26,69 @@ MANIFEST_SCHEMA = "thoth-minute-manifest/v7"
 SUPPORTED_EXTENSIONS = {".pt", ".pth"}
 SUPPORTED_SENSORS = {"radar", "csi"}
 _REGISTRY_LOCK = threading.RLock()
+
+# Occupancy vocabulary. The positive (presence) class is resolved from each
+# model's own class_names instead of being hard-coded to "occupied", so
+# archives exported with absent/present or any synonym below work end to end.
+POSITIVE_CLASS_LABELS = frozenset({
+    "occupied", "present", "presence", "person", "human", "motion", "activity",
+})
+NEGATIVE_CLASS_LABELS = frozenset({
+    "empty", "absent", "vacant", "unoccupied", "clear", "none", "background", "still",
+})
+
+
+def positive_class_name(class_names: Sequence[str] | None) -> str | None:
+    """Return the model's own positive (presence) class label, if any."""
+    names = [str(name).strip().lower() for name in (class_names or []) if str(name).strip()]
+    for name in names:
+        if name in POSITIVE_CLASS_LABELS:
+            return name
+    # Binary classifiers conventionally put the positive class last.
+    return names[1] if len(names) == 2 else None
+
+
+def is_occupancy_result(result: dict[str, Any]) -> bool:
+    """True when a prediction resolves to a known presence/absence verdict."""
+    label = str(result.get("class") or "").strip().lower()
+    if label in POSITIVE_CLASS_LABELS or label in NEGATIVE_CLASS_LABELS:
+        return True
+    scores = result.get("scores")
+    if isinstance(scores, dict):
+        keys = {str(key).strip().lower() for key in scores}
+        if keys & POSITIVE_CLASS_LABELS or keys & NEGATIVE_CLASS_LABELS:
+            return True
+    return False
+
+
+def occupancy_probability(result: dict[str, Any]) -> float:
+    """Probability of the positive (presence) class in [0, 1]."""
+    scores = result.get("scores")
+    if isinstance(scores, dict):
+        lowered = {str(key).strip().lower(): value for key, value in scores.items()}
+        for key in POSITIVE_CLASS_LABELS:
+            if key in lowered:
+                try:
+                    return max(0.0, min(1.0, float(lowered[key])))
+                except (TypeError, ValueError):
+                    pass
+        if len(lowered) == 2:
+            positive = positive_class_name(list(lowered))
+            if positive is not None:
+                try:
+                    return max(0.0, min(1.0, float(lowered[positive])))
+                except (TypeError, ValueError):
+                    pass
+    label = str(result.get("class") or "").strip().lower()
+    try:
+        confidence = float(result.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if label in POSITIVE_CLASS_LABELS:
+        return max(0.0, min(1.0, confidence))
+    if label in NEGATIVE_CLASS_LABELS:
+        return max(0.0, min(1.0, 1.0 - confidence))
+    return max(0.0, min(1.0, confidence))
 
 
 class ModelValidationError(ValueError):
@@ -336,7 +400,7 @@ def _e2_read_uint12(blob: bytes) -> np.ndarray:
     return out
 
 
-def _e2_frames_to_maps(payloads: Sequence[bytes]) -> np.ndarray:
+def _e2_maps_batch(payloads: Sequence[bytes]) -> np.ndarray:
     """(N) raw 36864-byte payloads -> (N, 2, 24, 24) log1p maps."""
     from scipy import fft as sfft
     from scipy.ndimage import zoom
@@ -353,6 +417,42 @@ def _e2_frames_to_maps(payloads: Sequence[bytes]) -> np.ndarray:
     rd = zoom(np.log1p(rd), (1, s / rd.shape[1], s / rd.shape[2]), order=1)
     ra = zoom(np.log1p(ra), (1, s / ra.shape[1], s / ra.shape[2]), order=1)
     return np.stack([rd, ra], axis=1).astype(np.float32)
+
+
+# Per-frame map memoization. Partial-minute inference re-runs every time a new
+# 50-frame window completes, so without a cache the FFT/zoom preprocessing is
+# quadratic over the minute. A frame's map depends only on its payload bytes,
+# which makes the entries safe to reuse across partial and final runs.
+_E2_MAP_CACHE: "OrderedDict[bytes, np.ndarray]" = OrderedDict()
+_E2_MAP_CACHE_LIMIT = 4096
+_E2_MAP_CACHE_LOCK = threading.Lock()
+
+
+def _e2_frames_to_maps(payloads: Sequence[bytes]) -> np.ndarray:
+    """(N) raw 36864-byte payloads -> (N, 2, 24, 24) log1p maps (cached)."""
+    results: list[np.ndarray | None] = [None] * len(payloads)
+    missing: list[bytes] = []
+    missing_index: list[int] = []
+    with _E2_MAP_CACHE_LOCK:
+        for index, payload in enumerate(payloads):
+            cached = _E2_MAP_CACHE.get(payload)
+            if cached is not None:
+                _E2_MAP_CACHE.move_to_end(payload)
+                results[index] = cached
+            else:
+                missing.append(payload)
+                missing_index.append(index)
+    if missing:
+        computed = _e2_maps_batch(missing)
+        with _E2_MAP_CACHE_LOCK:
+            for position, (payload, index) in enumerate(zip(missing, missing_index)):
+                maps = computed[position]
+                _E2_MAP_CACHE[payload] = maps
+                _E2_MAP_CACHE.move_to_end(payload)
+                results[index] = maps
+            while len(_E2_MAP_CACHE) > _E2_MAP_CACHE_LIMIT:
+                _E2_MAP_CACHE.popitem(last=False)
+    return np.stack(results, axis=0)
 
 
 def e2_radar_windows(
@@ -393,7 +493,13 @@ def e2_radar_windows(
     return windows.astype(np.float32), win_t0, win_t1, win_max_gap
 
 
-def _e2_parse_csi_amplitude(line: str) -> np.ndarray | None:
+# CSI lines are re-parsed on every partial-minute run; memoize per line so the
+# serial log is only tokenized once per minute instead of once per window.
+_E2_CSI_CACHE: "OrderedDict[str, np.ndarray | None]" = OrderedDict()
+_E2_CSI_CACHE_LIMIT = 8192
+
+
+def _e2_parse_csi_amplitude_uncached(line: str) -> np.ndarray | None:
     """One CSI_DATA line -> float32 amplitude vector of 52 subcarriers."""
     match = _E2_CSI_RE.search(line)
     if not match:
@@ -408,6 +514,21 @@ def _e2_parse_csi_amplitude(line: str) -> np.ndarray | None:
     imag = values[0::2][_E2_CSI_MASK]
     real = values[1::2][_E2_CSI_MASK]
     return np.hypot(real, imag).astype(np.float32)
+
+
+def _e2_parse_csi_amplitude(line: str) -> np.ndarray | None:
+    with _E2_MAP_CACHE_LOCK:
+        if line in _E2_CSI_CACHE:
+            cached = _E2_CSI_CACHE[line]
+            _E2_CSI_CACHE.move_to_end(line)
+            return cached
+    parsed = _e2_parse_csi_amplitude_uncached(line)
+    with _E2_MAP_CACHE_LOCK:
+        _E2_CSI_CACHE[line] = parsed
+        _E2_CSI_CACHE.move_to_end(line)
+        while len(_E2_CSI_CACHE) > _E2_CSI_CACHE_LIMIT:
+            _E2_CSI_CACHE.popitem(last=False)
+    return parsed
 
 
 def e2_csi_windows(
@@ -769,16 +890,33 @@ class ModelRegistry:
                 else:
                     minute_prob = float(pool.mean()) if pool.size else 0.0
                 if len(names) == 2:
-                    # predict the most probable class (argmax) so the reported
-                    # class always matches the higher score; `threshold` stays
-                    # as the confidence gate surfaced to consumers.
-                    index = 1 if minute_prob >= 0.5 else 0
-                    scores = {names[0]: 1.0 - minute_prob, names[1]: minute_prob}
-                    confidence = minute_prob if index == 1 else 1.0 - minute_prob
+                    # Minute verdict = majority vote over per-window (chunk)
+                    # predictions: each window votes for its own argmax class
+                    # and the minute takes the winning side. This is more
+                    # robust than one averaged score when a person is present
+                    # but mostly still, and it is what the Home Assistant
+                    # minute-level link consumes. Ties fall back to the
+                    # aggregated score; `threshold` stays the confidence gate
+                    # surfaced to consumers.
+                    lowered_names = [str(name).strip().lower() for name in names]
+                    positive_name = positive_class_name(lowered_names) or lowered_names[1]
+                    positive_index = lowered_names.index(positive_name)
+                    positive_windows = int((pool >= 0.5).sum())
+                    majority_positive = (
+                        positive_windows * 2 > pool.size
+                        or (positive_windows * 2 == pool.size and minute_prob >= 0.5)
+                    )
+                    index = positive_index if majority_positive else 1 - positive_index
+                    scores = {
+                        names[positive_index]: minute_prob,
+                        names[1 - positive_index]: 1.0 - minute_prob,
+                    }
+                    confidence = minute_prob if index == positive_index else 1.0 - minute_prob
                 else:
                     index = int(np.argmax(probs_np)) if probs_np.size else 0
                     scores = {name: float(probs_np[i]) for i, name in enumerate(names[: probs_np.size])}
                     confidence = float(probs_np[index]) if probs_np.size else 0.0
+                    positive_windows = 0
                 results.append({
                     **base,
                     "status": "ok",
@@ -788,6 +926,11 @@ class ModelRegistry:
                     "scores": scores,
                     "threshold": threshold,
                     "aggregation": str(aggregation),
+                    "decision": "majority" if len(names) == 2 else "argmax",
+                    "window_votes": {
+                        "positive": positive_windows,
+                        "total": int(pool.size),
+                    },
                     "window_count": int(probs_np.size),
                     "windows_excluded": excluded,
                     "csi_windows_valid": int(csi_valid.sum()) if csi_valid.size else 0,

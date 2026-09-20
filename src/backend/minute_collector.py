@@ -27,7 +27,7 @@ if __package__ in (None, ""):
     from backend.config import Config  # type: ignore
     from backend.sensor_detection import likely_csi_serial_candidates, usable_usb_camera_devices  # type: ignore
     from backend.capture_container import build_capture_container, _split_radar_packets  # type: ignore
-    from backend.model_runtime import ModelRegistry, E2_WINDOW_FRAMES  # type: ignore
+    from backend.model_runtime import ModelRegistry, E2_WINDOW_FRAMES, is_occupancy_result  # type: ignore
     from backend.radar_analysis import (  # type: ignore
         PersistentTargetIdentity,
         StreamingChunkAnalyzer,
@@ -41,7 +41,7 @@ else:
     from .config import Config
     from .sensor_detection import likely_csi_serial_candidates, usable_usb_camera_devices
     from .capture_container import build_capture_container, _split_radar_packets
-    from .model_runtime import ModelRegistry, E2_WINDOW_FRAMES
+    from .model_runtime import ModelRegistry, E2_WINDOW_FRAMES, is_occupancy_result
     from .radar_analysis import (
         PersistentTargetIdentity,
         StreamingChunkAnalyzer,
@@ -1124,7 +1124,7 @@ def main() -> int:
                     results = []
                 if results:
                     fire_model_device_links(results, "chunk")
-                    occupancy_results = [item for item in results if item.get("status") == "ok" and str(item.get("class", "")).lower() in {"occupied", "empty"}]
+                    occupancy_results = [item for item in results if item.get("status") == "ok" and is_occupancy_result(item)]
                     if occupancy_results:
                         selected = max(occupancy_results, key=lambda item: float(item.get("confidence") or 0.0))
                         publish_model_occupancy(selected, folder_name, chunk_index=chunk_index)
@@ -1170,7 +1170,7 @@ def main() -> int:
                     fire_model_device_links(presults, "partial_minute")
                 pocc = [
                     item for item in presults
-                    if item.get("status") == "ok" and str(item.get("class", "")).lower() in {"occupied", "empty"}
+                    if item.get("status") == "ok" and is_occupancy_result(item)
                 ]
                 if pocc:
                     selected = dict(max(pocc, key=lambda item: float(item.get("confidence") or 0.0)))
@@ -2076,7 +2076,7 @@ def main() -> int:
             fire_model_device_links(minute_results, "minute")
             occupancy_results = [
                 item for item in minute_results
-                if item.get("status") == "ok" and str(item.get("class", "")).lower() in {"occupied", "empty"}
+                if item.get("status") == "ok" and is_occupancy_result(item)
             ]
             if occupancy_results:
                 selected = max(occupancy_results, key=lambda item: float(item.get("confidence") or 0.0))

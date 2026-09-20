@@ -85,3 +85,5 @@ The Pi can advertise `thoth.local`, but it cannot force every client network sta
 2. In Home Assistant, open your profile, create a long-lived access token, then paste it into Thoth **Settings → Home Assistant occupancy**.
 3. Home Assistant normally discovers a Hue Bridge automatically. Go to **Settings → Devices & services**, choose the discovered Hue integration, press the bridge button when prompted, and submit. If it is not discovered, choose **Add integration → Philips Hue** and enter the bridge IP.
 4. After each evaluated 10-second radar chunk, Thoth updates `binary_sensor.thoth_occupancy`. Use that entity as the trigger in Home Assistant automations for Hue lights or other devices.
+5. The optional linked light (`light_entity_id`) follows the **minute-level verdict** — the majority of the minute's per-window model predictions — so it does not flicker on individual chunk predictions. Per-model device links can still opt into `chunk` scope.
+6. Presence labels are generic: models exported as `absent`/`present` (or `empty`/`occupied`) are both understood, and the dashboard reports `present`/`absent` accordingly.

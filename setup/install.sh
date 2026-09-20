@@ -15,6 +15,12 @@ if [[ -z "$INVOKING_HOME" || "$INVOKING_HOME" == "/" ]]; then
   exit 1
 fi
 
+if ! command -v git >/dev/null 2>&1; then
+  echo "Installing git..."
+  apt-get update -qq
+  apt-get install -y -qq git
+fi
+
 if [[ -d "$INSTALL_ROOT/.git" ]]; then
   sudo -u "$INVOKING_USER" git -C "$INSTALL_ROOT" fetch origin main
   sudo -u "$INVOKING_USER" git -C "$INSTALL_ROOT" checkout main
@@ -23,7 +29,7 @@ elif [[ -e "$INSTALL_ROOT" ]]; then
   echo "$INSTALL_ROOT exists but is not a Thoth git checkout; move it aside and rerun." >&2
   exit 1
 else
-  sudo -u "$INVOKING_USER" git clone --branch main --single-branch "$REPOSITORY_URL" "$INSTALL_ROOT"
+  sudo -u "$INVOKING_USER" git clone --branch main --single-branch --depth 1 "$REPOSITORY_URL" "$INSTALL_ROOT"
 fi
 
 exec bash "$INSTALL_ROOT/setup/first-boot.sh"

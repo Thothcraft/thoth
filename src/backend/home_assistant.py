@@ -15,6 +15,12 @@ from typing import Any, Callable, Dict, Optional
 import requests
 
 from .config import Config
+from .model_runtime import (
+    NEGATIVE_CLASS_LABELS,
+    POSITIVE_CLASS_LABELS,
+    is_occupancy_result,
+    occupancy_probability,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -142,17 +148,28 @@ def _occupancy_payload(
 
 
 def publish_model_occupancy(model_result: Dict[str, Any], minute: str, *, chunk_index: Optional[int] = None) -> Dict[str, Any]:
-    """Publish an occupied/empty state only when an enabled user model says so."""
+    """Publish a presence/absence state only when an enabled user model says so.
+
+    The positive class is resolved from the model's own labels (occupied,
+    present, person, ...) rather than hard-coded, and ``chunk_index=None``
+    marks a minute-level (majority of window votes) verdict.
+    """
     label = str(model_result.get("class") or "").strip().lower()
-    if label not in {"occupied", "empty"}:
+    if not is_occupancy_result(model_result):
         return _record_status({"success": False, "status": "not_occupancy_class"})
+    if label in POSITIVE_CLASS_LABELS:
+        occupied = True
+    elif label in NEGATIVE_CLASS_LABELS:
+        occupied = False
+    else:
+        occupied = occupancy_probability(model_result) >= 0.5
     config = load_home_assistant_config(include_token=True)
     if not config.get("enabled"):
         return _record_status({"success": False, "status": "disabled"})
     if not config.get("token"):
         return _record_status({"success": False, "status": "not_configured"})
     body = {
-        "state": "on" if label == "occupied" else "off",
+        "state": "on" if occupied else "off",
         "attributes": {
             "friendly_name": "Thoth Model Occupancy",
             "device_class": "occupancy",
@@ -182,16 +199,7 @@ def publish_model_occupancy(model_result: Dict[str, Any], minute: str, *, chunk_
 
     # Numeric occupancy-probability sensor (0-100%) so automations can threshold
     # or scale on the model's confidence rather than the binary on/off.
-    scores = model_result.get("scores") if isinstance(model_result.get("scores"), dict) else {}
-    probability = scores.get("occupied")
-    if probability is None:
-        probability = model_result.get("confidence") if label == "occupied" else (
-            1.0 - float(model_result.get("confidence") or 0.0)
-        )
-    try:
-        probability = max(0.0, min(1.0, float(probability)))
-    except (TypeError, ValueError):
-        probability = 1.0 if label == "occupied" else 0.0
+    probability = occupancy_probability(model_result)
     prob_entity = str(config.get("probability_entity_id") or "").strip()
     if prob_entity:
         try:
@@ -216,8 +224,11 @@ def publish_model_occupancy(model_result: Dict[str, Any], minute: str, *, chunk_
 
     # Optional light brightness follows the occupancy probability: a confident
     # occupied room drives the light toward full brightness, empty toward off.
+    # The light is driven by the minute-level verdict only (chunk_index=None,
+    # i.e. the majority of the minute's window/chunk predictions) so it does
+    # not flicker on individual chunk predictions.
     light_entity = str(config.get("light_entity_id") or "").strip()
-    if config.get("light_control_enabled") and light_entity:
+    if chunk_index is None and config.get("light_control_enabled") and light_entity:
         try:
             if probability >= 0.5:
                 brightness = int(round(probability * 255))
@@ -418,16 +429,13 @@ def control_linked_device(
         return _record_status({"success": False, "status": "not_configured"})
 
     label = str(model_result.get("class") or "").strip().lower()
-    scores = model_result.get("scores") if isinstance(model_result.get("scores"), dict) else {}
-    try:
-        probability = float(scores.get("occupied"))
-    except (TypeError, ValueError):
-        probability = (
-            float(model_result.get("confidence") or 0.0)
-            if label == "occupied"
-            else 1.0 - float(model_result.get("confidence") or 0.0)
-        )
-    probability = max(0.0, min(1.0, probability))
+    probability = occupancy_probability(model_result)
+    if label in POSITIVE_CLASS_LABELS:
+        occupied = True
+    elif label in NEGATIVE_CLASS_LABELS:
+        occupied = False
+    else:
+        occupied = probability >= 0.5
 
     domain = entity_id.split(".", 1)[0]
     mode = str(ha_link.get("mode") or "categorical").strip().lower()
@@ -444,7 +452,7 @@ def control_linked_device(
             service = f"homeassistant/{'turn_on' if probability >= 0.5 else 'turn_off'}"
             payload = {"entity_id": entity_id}
     else:  # categorical
-        service = f"homeassistant/{'turn_on' if label == 'occupied' else 'turn_off'}"
+        service = f"homeassistant/{'turn_on' if occupied else 'turn_off'}"
         payload = {"entity_id": entity_id}
 
     base = str(config["base_url"]).rstrip("/")
