@@ -59,7 +59,7 @@ from backend.auth_manager import AuthManager
 from backend.radar_analysis import create_example2_processor, serialize_example2_plot
 from backend.terminal_manager import SSHTerminalManager
 from backend.sensor_detection import detect_sensor_inventory
-from backend.home_assistant import get_home_assistant_publisher, load_home_assistant_config, save_home_assistant_config, test_home_assistant_connection
+from backend.home_assistant import get_home_assistant_publisher, load_home_assistant_config, load_last_links, load_last_publish, save_home_assistant_config, test_home_assistant_connection
 from backend.capture_manager import (
     list_minutes,
     list_minute_folders,
@@ -1884,7 +1884,15 @@ def api_models():
     if 'username' not in session:
         return jsonify({'success': False, 'message': 'Authentication required'}), 401
     if request.method == 'GET':
-        return jsonify({'success': True, 'models': model_registry.list()})
+        return jsonify({
+            'success': True,
+            'models': model_registry.list(),
+            'home_assistant': {
+                'configured': bool(load_home_assistant_config().get('configured')),
+                'last_publish': load_last_publish(),
+                'last_links': load_last_links(),
+            },
+        })
     uploaded = request.files.get('model')
     if uploaded is None or not uploaded.filename:
         return jsonify({'success': False, 'message': 'A .pt or .pth model is required'}), 400

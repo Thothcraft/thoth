@@ -25,6 +25,8 @@ from .model_runtime import (
 logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(Config.CONFIG_DIR) / "home_assistant.json"
+LAST_PUBLISH_PATH = Path(Config.CONFIG_DIR) / "ha_last_publish.json"
+LAST_LINKS_PATH = Path(Config.CONFIG_DIR) / "ha_last_links.json"
 DEFAULTS: Dict[str, Any] = {
     "enabled": True,
     "base_url": "http://127.0.0.1:8123",
@@ -60,6 +62,30 @@ def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def load_last_publish() -> Dict[str, Any]:
+    """Which model last published occupancy to HA (written by the collector)."""
+    try:
+        if LAST_PUBLISH_PATH.exists():
+            payload = json.loads(LAST_PUBLISH_PATH.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+    except Exception:
+        pass
+    return {}
+
+
+def load_last_links() -> Dict[str, Any]:
+    """Per-model last linked-device control, keyed by model_id."""
+    try:
+        if LAST_LINKS_PATH.exists():
+            payload = json.loads(LAST_LINKS_PATH.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+    except Exception:
+        pass
+    return {}
 
 
 def load_home_assistant_config(include_token: bool = False) -> Dict[str, Any]:
@@ -253,6 +279,23 @@ def publish_model_occupancy(model_result: Dict[str, Any], minute: str, *, chunk_
             )
         except Exception as exc:
             logger.warning("Home Assistant light control failed: %s", exc)
+
+    try:
+        _write_json_atomic(LAST_PUBLISH_PATH, {
+            "model_id": model_result.get("model_id"),
+            "model_name": model_result.get("model_name"),
+            "model_version": model_result.get("model_version"),
+            "entity_id": config["entity_id"],
+            "probability_entity_id": prob_entity,
+            "light_entity_id": light_entity if config.get("light_control_enabled") else "",
+            "label": label,
+            "probability": probability,
+            "minute": minute,
+            "scope": "minute" if chunk_index is None else "chunk",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        pass
 
     return _record_status({"success": True, "status": "published", "label": label,
                            "probability": probability, "model_id": model_result.get("model_id")})
@@ -471,6 +514,19 @@ def control_linked_device(
     except Exception as exc:
         logger.warning("Home Assistant linked-device control failed: %s", exc)
         return _record_status({"success": False, "status": "publish_error", "error": str(exc)})
+    try:
+        links = load_last_links()
+        links[str(model_result.get("model_id") or "")] = {
+            "entity_id": entity_id,
+            "service": service,
+            "mode": mode,
+            "scope": actual_scope,
+            "label": label,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        _write_json_atomic(LAST_LINKS_PATH, links)
+    except Exception:
+        pass
     return _record_status({
         "success": True,
         "status": "linked_device_controlled",
