@@ -1648,6 +1648,9 @@ def main() -> int:
 
         analyzer: StreamingChunkAnalyzer | None = None
         analyzer_chunk_index: int | None = None
+        # Shared across per-chunk analyzer recreations so the published
+        # sensor_hz measures the continuous live rate, not a per-chunk reset.
+        live_frame_times: deque[float] = deque(maxlen=60)
         try:
             while True:
                 job = live_analysis_queue.get()
@@ -1678,6 +1681,7 @@ def main() -> int:
                             ),
                             live_example2_only=True,
                         )
+                        analyzer.frame_times = live_frame_times
                         analyzer_chunk_index = chunk_index
                     analyzer.max_queue_lag_ms = max(
                         0.0, (time.monotonic() - float(captured_at)) * 1000
