@@ -100,6 +100,13 @@ def _torch():
         import torch
     except ImportError as exc:  # pragma: no cover - depends on installation profile
         raise ModelValidationError("CPU PyTorch is required to validate or run TorchScript models") from exc
+    # Keep inference from saturating every core: the radar driver drains the
+    # hardware FIFO from a Python thread and overflows within ~30 ms when all
+    # cores are busy. Two threads leave headroom for capture on a quad-core Pi.
+    try:
+        torch.set_num_threads(max(1, int(os.environ.get("THOTH_TORCH_THREADS", "2"))))
+    except Exception:
+        pass
     return torch
 
 

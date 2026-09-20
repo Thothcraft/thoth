@@ -1698,6 +1698,19 @@ def main() -> int:
         minute_frames: list[bytes] = []
         minute_times: list[float] = []
         last_window_count = 0
+        # Resolved once per minute: registry.list() hits disk and must not run
+        # per frame inside the hot reader loop.
+        maximum_model_frames = max(
+            (
+                int(spec.get("frames") or 0)
+                for model in model_registry.list()
+                if model.get("enabled")
+                and str((model.get("metadata") or {}).get("execution") or "chunk") != "minute"
+                for spec in (model.get("metadata") or {}).get("inputs", [])
+                if spec.get("sensor") == "radar"
+            ),
+            default=RADAR_FRAMES_PER_CHUNK,
+        )
         while time.monotonic() < stop_at:
             remaining = stop_at - time.monotonic()
             try:
@@ -1729,7 +1742,6 @@ def main() -> int:
                 except queue.Full:
                     pass
             radar_model_history.append(full_frame)
-            maximum_model_frames = max((int(spec.get("frames") or 0) for model in model_registry.list() if model.get("enabled") and str((model.get("metadata") or {}).get("execution") or "chunk") != "minute" for spec in (model.get("metadata") or {}).get("inputs", []) if spec.get("sensor") == "radar"), default=RADAR_FRAMES_PER_CHUNK)
             if len(radar_model_history) > maximum_model_frames:
                 del radar_model_history[:-maximum_model_frames]
             frame_times.append(captured_at)
