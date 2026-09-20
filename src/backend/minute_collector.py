@@ -1698,6 +1698,8 @@ def main() -> int:
         minute_frames: list[bytes] = []
         minute_times: list[float] = []
         last_window_count = 0
+        last_live_enqueue = 0.0
+        live_settings = initial_settings
         # Resolved once per minute: registry.list() hits disk and must not run
         # per frame inside the hot reader loop.
         maximum_model_frames = max(
@@ -1718,6 +1720,21 @@ def main() -> int:
             except queue.Empty:
                 continue
             captured_at = time.monotonic()
+            if not frames:
+                live_settings = load_processing_settings()
+            if captured_at - last_live_enqueue >= LIVE_VISUALIZATION_INTERVAL_SECONDS:
+                try:
+                    enqueue_latest_chunk_frame(
+                        live_analysis_queue,
+                        live_queue_key,
+                        full_frame,
+                        captured_at,
+                        len(radar_chunk_results),
+                        live_settings,
+                    )
+                    last_live_enqueue = captured_at
+                except queue.Full:
+                    pass
             radar_frame_count += 1
             radar_first_frame_at = captured_at if radar_first_frame_at is None else radar_first_frame_at
             radar_last_frame_at = captured_at
@@ -1796,6 +1813,10 @@ def main() -> int:
             target=run_analysis_worker, name="RadarChunkAnalysis", daemon=True
         )
         radar_analysis_thread.start()
+        radar_live_thread = threading.Thread(
+            target=run_live_analysis_worker, name="RadarLive", daemon=True
+        )
+        radar_live_thread.start()
         partial_minute_thread = threading.Thread(
             target=run_partial_minute_worker, name="PartialMinuteInference", daemon=True
         )
