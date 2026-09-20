@@ -360,6 +360,18 @@ def _parse_csi_payload(raw: str) -> List[float]:
     return values
 
 
+def _csi_mean_amplitude(raw: str) -> Optional[float]:
+    """Mean subcarrier magnitude of one raw CSI_DATA line."""
+    values = _parse_csi_payload(raw)
+    if len(values) < 2:
+        return None
+    mags = [
+        math.sqrt(values[idx] * values[idx] + values[idx + 1] * values[idx + 1])
+        for idx in range(0, len(values) - 1, 2)
+    ]
+    return sum(mags) / len(mags) if mags else None
+
+
 def _parse_csi_average_series(path: Path, limit: int = 2400) -> List[float]:
     if not path.exists():
         return []
@@ -1665,7 +1677,10 @@ def presence_view():
 @app.route('/api/radar/occupancy', methods=['GET'])
 def api_radar_occupancy():
     return jsonify({'error': 'Built-in occupancy prediction has been removed; use an uploaded model'}), 410
-    # Historical implementation retained below only to keep old capture readers compatible.
+
+
+def _live_radar_state() -> Dict[str, Any]:
+    """Read the collector's live radar state file and annotate staleness."""
     state = _read_json_file(RADAR_OCCUPANCY_STATE, {
         'updated_at': 0,
         'occupied': False,
@@ -1700,9 +1715,8 @@ def api_radar_occupancy():
 
     # Native Example 2 processing can briefly lag capture on a busy Pi, and
     # the minute collector intentionally rotates workers at wall-clock minute
-    # boundaries. Three seconds was short enough to mark a healthy stream as
-    # stale during either event. Allow at least twelve seconds, or thirty
-    # expected frame periods for deliberately low-rate radar configurations.
+    # boundaries. Allow at least twelve seconds, or thirty expected frame
+    # periods for deliberately low-rate radar configurations.
     stale_after = max(
         RADAR_LIVE_STALE_SECONDS,
         30.0 / configured_hz if configured_hz > 0 else 0.0,
@@ -1719,7 +1733,14 @@ def api_radar_occupancy():
         else 'frame_timeout' if state['stale']
         else None
     )
-    response = jsonify(state)
+    return state
+
+
+@app.route('/api/radar/live', methods=['GET'])
+def api_radar_live():
+    """Serve the collector's live radar state: targets, XY map, and the
+    range-Doppler/azimuth/elevation maps for the Sensor Lab."""
+    response = jsonify(_live_radar_state())
     response.headers['Cache-Control'] = 'no-store, max-age=0'
     return response
 
@@ -2913,6 +2934,86 @@ def api_live_capture_csi_data():
     data = _csi_plot_payload(path)
     data['metadata'] = minute_metrics(minute_dir)
     return jsonify({'status': 'success', 'minute': minute_dir.name, 'data': data})
+
+
+@app.route('/api/captures/live/csi/tail')
+def api_live_capture_csi_tail():
+    """Incremental CSI feed for the live lab.
+
+    The client passes back the opaque ``cursor`` it received last poll
+    (``<minute>|<file>:<byte-offset>,...``); the response carries only the
+    samples appended since then, so a ~10 Hz poll delivers the true ~100 Hz
+    capture stream in batches.  Samples are ``[monotonic_ns, rx, amplitude]``.
+    """
+    minute_dir, files = _best_live_minute_for_kind('csi')
+    if not minute_dir:
+        abort(404, description='No live capture minute available')
+
+    paths = [p for p in (files.get('csi_csvs') or []) if p and p.exists()]
+    if not paths:
+        single = files.get('csi_csv') or files.get('csi_timestamped')
+        if single and single.exists():
+            paths = [single]
+    if not paths:
+        return jsonify({'status': 'empty', 'minute': minute_dir.name, 'cursor': '', 'samples': []})
+
+    raw_cursor = str(request.args.get('cursor') or '')
+    offsets: Dict[str, int] = {}
+    cursor_minute, _, rest = raw_cursor.partition('|')
+    if cursor_minute == minute_dir.name:
+        for part in rest.split(','):
+            name, _, off = part.partition(':')
+            try:
+                offsets[name] = max(0, int(off))
+            except ValueError:
+                continue
+
+    samples: List[List[Any]] = []
+    new_offsets: Dict[str, int] = {}
+    max_bytes = 262144
+    for rx_index, path in enumerate(paths):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        offset = offsets.get(path.name, 0)
+        if offset > size:  # file rotated or truncated
+            offset = 0
+        try:
+            with path.open('rb') as handle:
+                handle.seek(offset)
+                chunk = handle.read(max_bytes)
+        except OSError:
+            continue
+        last_nl = chunk.rfind(b'\n')
+        consumed = offset + (last_nl + 1 if last_nl >= 0 else 0)
+        new_offsets[path.name] = consumed
+        for line in chunk[:last_nl + 1 if last_nl >= 0 else 0].decode('utf-8', errors='replace').splitlines():
+            if 'CSI_DATA' not in line:
+                continue
+            cells = _split_csv_line(line)
+            if len(cells) < 4:
+                continue
+            try:
+                t_ns = int(cells[1])
+            except (TypeError, ValueError):
+                t_ns = 0
+            amp = _csi_mean_amplitude(cells[3])
+            if amp is not None:
+                samples.append([t_ns, rx_index, round(amp, 3)])
+
+    samples.sort(key=lambda item: item[0])
+    truncated = len(samples) > 4000
+    if truncated:
+        samples = samples[-4000:]
+    cursor = minute_dir.name + '|' + ','.join(f'{name}:{off}' for name, off in new_offsets.items())
+    return jsonify({
+        'status': 'success',
+        'minute': minute_dir.name,
+        'cursor': cursor,
+        'samples': samples,
+        'truncated': truncated,
+    })
 
 
 @app.route('/api/captures/live/csi/plot')

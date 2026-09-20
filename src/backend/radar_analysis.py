@@ -331,6 +331,73 @@ def _example2_playback_frame(payload: Dict[str, Any]) -> Dict[str, Any]:
     return dict(playback) if isinstance(playback, dict) else {}
 
 
+def _map_u8(grid: np.ndarray, x_axis: Any, y_axis: Any) -> Dict[str, Any]:
+    """Serialize a normalized 2-D map as a dense uint8 grid with axes."""
+    rows, columns = grid.shape
+    return {
+        "rows": int(rows),
+        "columns": int(columns),
+        "values": np.rint(np.clip(grid, 0.0, 1.0) * 255.0).astype(np.uint8).ravel().tolist(),
+        "x": np.asarray(x_axis, dtype=float).round(3).tolist(),
+        "y": np.asarray(y_axis, dtype=float).round(3).tolist(),
+    }
+
+
+def _live_map_payloads(processor: Any, frame: Optional[np.ndarray]) -> Dict[str, Any]:
+    """Range-Doppler / range-azimuth / range-elevation maps for the live lab.
+
+    When ``frame`` is given the full ``range_angle_products`` pipeline runs
+    (refreshing the MTI state and ``_rd_spectrum``).  When it is None the
+    spectrum left behind by ``processor.update()`` is reused and only the DBF
+    step is re-run — calling ``range_angle_products`` twice per frame would
+    double-apply the MTI filter.
+    """
+    try:
+        if frame is not None:
+            azimuth_energy, _az_cube, elevation_cube, _se, _sac, _sec = (
+                processor.range_angle_products(frame)
+            )
+            rd_spectrum = getattr(processor, "_rd_spectrum", None)
+        else:
+            rd_spectrum = getattr(processor, "_rd_spectrum", None)
+            if not isinstance(rd_spectrum, np.ndarray) or rd_spectrum.ndim != 3:
+                return {}
+            azimuth_cube = processor.azimuth_dbf.run(rd_spectrum[:, :, [0, 2]])
+            elevation_cube = processor.elevation_dbf.run(rd_spectrum[:, :, [1, 2]])
+            azimuth_energy = np.linalg.norm(azimuth_cube, axis=1) / math.sqrt(
+                processor.num_azimuth_beams
+            )
+        if not isinstance(rd_spectrum, np.ndarray) or rd_spectrum.ndim != 3:
+            return {}
+        elevation_energy = np.linalg.norm(elevation_cube, axis=1) / math.sqrt(
+            processor.num_elevation_beams
+        )
+        doppler_power = np.mean(np.abs(rd_spectrum) ** 2, axis=2)
+        doppler_db = 20.0 * np.log10(np.maximum(doppler_power, np.finfo(float).tiny))
+        finite = doppler_db[np.isfinite(doppler_db)]
+        if finite.size:
+            floor = float(np.percentile(finite, 55.0))
+            ceiling = float(np.percentile(finite, 99.5))
+            doppler_norm = np.clip((doppler_db - floor) / max(1.0, ceiling - floor), 0.0, 1.0)
+        else:
+            doppler_norm = np.zeros_like(doppler_db, dtype=float)
+        return {
+            "range_doppler": _map_u8(doppler_norm, processor.velocity_bin, processor.range_bin),
+            "range_azimuth": _map_u8(
+                processor._display_intensity(azimuth_energy),
+                processor.azimuth_bin,
+                processor.range_bin,
+            ),
+            "range_elevation": _map_u8(
+                processor._display_intensity(elevation_energy),
+                processor.elevation_bin,
+                processor.range_bin,
+            ),
+        }
+    except Exception:
+        return {}
+
+
 def _live_intensity_payload(processor: Any, room: Dict[str, Any]) -> Dict[str, Any]:
     """Project MMW-HAT azimuth/elevation responses into browser-ready XY/YZ maps."""
     views = getattr(processor, "last_intensity_views", None)
@@ -591,6 +658,7 @@ class StreamingChunkAnalyzer:
         self.invalid_frames = 0
         self.live_state_path = live_state_path
         self.live_example2_only = bool(live_example2_only)
+        self.last_maps: Dict[str, Any] = {}
         self.last_live_publish = 0.0
         self.frame_times: deque[float] = deque(maxlen=60)
         self.configured_frame_rate_hz = float(self.radar_config.get("frame_rate") or 0.0)
@@ -642,6 +710,13 @@ class StreamingChunkAnalyzer:
         else:
             targets = []
             advanced_detection = {}
+        if self.live_example2_only:
+            # The live lab needs the range-Doppler/azimuth/elevation maps even
+            # when the native Example 2 path owns detection.  Reuse the fresh
+            # spectrum when update() already ran the pipeline this frame.
+            self.last_maps = _live_map_payloads(
+                self.processor, None if update_advanced else frame
+            ) or self.last_maps
         native_detection = native_plot.get("detection") if isinstance(native_plot.get("detection"), dict) else {}
         detection = dict(native_detection or advanced_detection)
         shadow = dict(self.processor.last_motion_shadow or {}) if update_advanced else {}
@@ -796,6 +871,7 @@ class StreamingChunkAnalyzer:
                 "sensor_hz": round(measured_hz, 2),
                 "configured_hz": self.configured_frame_rate_hz,
                 "intensity": live_intensity,
+                "maps": self.last_maps,
             }, separators=(",", ":")), encoding="utf-8")
             os.replace(temporary, self.live_state_path)
         except OSError:

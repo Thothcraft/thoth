@@ -23,6 +23,13 @@
     .sense-tile .u { font-size: 12px; color: #7d979c; font-weight: 500; }
     .imu-bar { height: 6px; border-radius: 3px; background: #1b2a30; overflow: hidden; }
     .imu-bar > div { height: 100%; border-radius: 3px; background: #4fd5cd; transition: width .3s ease; }
+    .sensor-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+    .sensor-tab { border: 1px solid #22333a; background: #122024; color: #8fa8ad; border-radius: 999px; padding: 7px 16px; font: 700 11px ui-monospace, monospace; letter-spacing: .12em; text-transform: uppercase; cursor: pointer; }
+    .sensor-tab.active { background: #4fd5cd; border-color: #4fd5cd; color: #071012; }
+    .view-tabs { display: flex; gap: 4px; padding: 8px 16px; border-bottom: 1px solid #1b2a30; flex-wrap: wrap; }
+    .view-tab { border: 0; background: transparent; color: #5c6f74; border-radius: 7px; padding: 5px 12px; font: 600 11px ui-monospace, monospace; cursor: pointer; }
+    .view-tab.active { background: #1b2a30; color: #eef6f7; }
+    .stage-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; border-top: 1px solid #1b2a30; color: #7d979c; font-size: 12px; flex-wrap: wrap; }
 </style>
 {% endblock %}
 
@@ -41,54 +48,16 @@
         </div>
     </section>
 
-    <div class="grid gap-5 lg:grid-cols-2">
-        <section class="lab-panel">
-            <div class="lab-panel-head">
-                <span class="lab-title">Radar · X/Y targets</span>
-                <span class="lab-rate stale" id="radar-rate">— Hz</span>
-            </div>
-            <div class="lab-body">
-                <canvas id="radar-canvas" class="lab-canvas" height="380"></canvas>
-                <div class="lab-empty" id="radar-empty">Waiting for radar frames</div>
-            </div>
-            <div class="flex items-center justify-between px-4 py-2.5 text-xs" style="color:#7d979c;border-top:1px solid #1b2a30">
-                <span id="radar-occ">occupancy —</span>
-                <span id="radar-snr">snr —</span>
-            </div>
-        </section>
-
-        <section class="lab-panel">
-            <div class="lab-panel-head">
-                <span class="lab-title">WiFi CSI · mean amplitude</span>
-                <span class="lab-rate stale" id="csi-rate">— Hz</span>
-            </div>
-            <div class="lab-body">
-                <canvas id="csi-canvas" class="lab-canvas" height="380"></canvas>
-                <div class="lab-empty" id="csi-empty">Waiting for CSI packets</div>
-            </div>
-            <div class="flex items-center justify-between px-4 py-2.5 text-xs" style="color:#7d979c;border-top:1px solid #1b2a30">
-                <span id="csi-count">0 packets</span>
-                <span id="csi-amp">amp —</span>
-            </div>
-        </section>
-
-        <section class="lab-panel">
-            <div class="lab-panel-head">
-                <span class="lab-title">Camera</span>
-                <span class="lab-rate stale" id="cam-rate">— Hz</span>
-            </div>
-            <div class="lab-body" style="min-height:240px">
-                <img id="cam-img" class="lab-canvas" alt="Live camera frame" style="object-fit:contain;max-height:380px;background:#000">
-                <div class="lab-empty" id="cam-empty">No camera this minute</div>
-            </div>
-        </section>
-
-        <section class="lab-panel">
-            <div class="lab-panel-head">
-                <span class="lab-title">Sense HAT · environment + IMU</span>
-                <span class="lab-rate stale" id="sense-rate">— Hz</span>
-            </div>
-            <div class="lab-body p-4 space-y-4">
+    <section class="lab-panel">
+        <div class="lab-panel-head" style="gap:14px;flex-wrap:wrap">
+            <div class="sensor-tabs" id="sensor-tabs" role="tablist" aria-label="Sensor"></div>
+            <span class="lab-rate stale" id="stage-rate">— Hz</span>
+        </div>
+        <div class="view-tabs" id="view-tabs" role="tablist" aria-label="View"></div>
+        <div class="lab-body" style="min-height:420px">
+            <canvas id="stage-canvas" class="lab-canvas" height="440"></canvas>
+            <img id="stage-img" class="lab-canvas" alt="Live camera frame" style="display:none;object-fit:contain;max-height:440px;background:#000">
+            <div id="stage-tiles" class="p-4 space-y-4" style="display:none">
                 <div class="grid grid-cols-3 gap-3">
                     <div class="sense-tile"><div class="k">Temp</div><div class="v"><span id="sense-temp">—</span><span class="u"> °C</span></div></div>
                     <div class="sense-tile"><div class="k">Humidity</div><div class="v"><span id="sense-hum">—</span><span class="u"> %</span></div></div>
@@ -109,10 +78,14 @@
                     </div>
                 </div>
                 <canvas id="sense-spark" class="lab-canvas" height="72" style="height:72px"></canvas>
-                <div class="lab-empty" id="sense-empty" style="position:static;padding:8px 0;display:none">Sense HAT not present this minute</div>
             </div>
-        </section>
-    </div>
+            <div class="lab-empty" id="stage-empty">Waiting for data</div>
+        </div>
+        <div class="stage-foot">
+            <span id="stage-left">—</span>
+            <span id="stage-right">—</span>
+        </div>
+    </section>
 </div>
 {% endblock %}
 
@@ -121,8 +94,8 @@
 (function () {
   const $ = (id) => document.getElementById(id);
   const URLS = {
-    radar: '/api/captures/live/radar/data/xy-tracking',
-    csi: '/api/captures/live/csi/data',
+    radar: '/api/radar/live',
+    csiTail: '/api/captures/live/csi/tail',
     sense: '/api/captures/live/sensehat',
     verdict: '/api/captures/live/verdict',
     cam: '/api/captures/live/video/frame',
@@ -140,167 +113,308 @@
     return { ctx, w: r.width, h: r.height };
   }
 
-  function rateMeter(el) {
-    let ticks = [];
-    return {
-      tick() {
-        const now = performance.now();
-        ticks.push(now);
-        ticks = ticks.filter(t => now - t < 4000);
-        const hz = ticks.length > 1 ? (ticks.length - 1) / ((ticks[ticks.length - 1] - ticks[0]) / 1000) : 0;
-        el.textContent = hz > 0 ? hz.toFixed(1) + ' Hz' : '— Hz';
-        el.classList.toggle('stale', hz === 0);
-      },
-      stale() { el.textContent = '— Hz'; el.classList.add('stale'); },
-    };
-  }
-
   async function getJson(url) {
-    const r = await fetch(url + '?t=' + Date.now(), { cache: 'no-store' });
+    const r = await fetch(url, { cache: 'no-store' });
     if (!r.ok) throw new Error('http ' + r.status);
     return r.json();
   }
 
-  function loop(fn, ms) {
-    let stopped = false;
-    const step = async () => {
-      try { await fn(); } catch (e) { /* panel shows stale state */ }
-      if (!stopped) setTimeout(step, document.hidden ? ms * 4 : ms);
-    };
-    window.addEventListener('pagehide', () => { stopped = true; }, { once: true });
-    step();
+  function viridis(v) {
+    const s = [[68,1,84],[72,40,120],[62,73,137],[49,104,142],[38,130,142],[31,158,137],[53,183,121],[110,206,88],[181,222,43],[253,231,37]];
+    const p = Math.max(0, Math.min(1, v)) * (s.length - 1), i = Math.min(s.length - 2, Math.floor(p)), t = p - i;
+    return s[i].map((c, k) => Math.round(c + (s[i + 1][k] - c) * t));
   }
 
-  // ---- verdict strip ------------------------------------------------------
-  const verdictStrip = $('verdict-strip');
-  const POS = new Set(['occupied', 'present', 'presence', 'motion', 'person', 'human', 'occupied_room']);
-  loop(async () => {
-    const body = await getJson(URLS.verdict);
-    if (body.minute) $('lab-minute').textContent = body.minute;
-    const verdicts = body.verdicts || [];
-    if (!verdicts.length) return;
-    verdictStrip.innerHTML = verdicts.map(v => {
-      const cls = String(v.class || '').toLowerCase();
-      const pos = POS.has(cls);
-      const votes = v.window_votes ? ` · ${v.window_votes.positive}/${v.window_votes.total}` : '';
-      const conf = v.confidence != null ? ` · ${(v.confidence * 100).toFixed(0)}%` : '';
-      const label = v.status === 'ok' ? (v.class || '?') : (v.status || 'idle');
-      return `<span class="verdict-chip"><span class="verdict-dot ${v.status === 'ok' ? (pos ? 'pos' : 'neg') : 'idle'}"></span>${v.model || 'model'}: <b>${label}</b>${votes}${conf}</span>`;
-    }).join('');
-  }, 2000);
+  const heatCache = new Map();
+  function heatImage(key, rows, cols, fill) {
+    let c = heatCache.get(key);
+    if (!c || c.off.width !== cols || c.off.height !== rows) {
+      const off = document.createElement('canvas');
+      off.width = cols; off.height = rows;
+      c = { off, ctx: off.getContext('2d'), image: off.getContext('2d').createImageData(cols, rows) };
+      heatCache.set(key, c);
+    }
+    fill(c.image.data);
+    c.ctx.putImageData(c.image, 0, 0);
+    return c.off;
+  }
 
-  // ---- radar XY -----------------------------------------------------------
-  const radarCanvas = $('radar-canvas'), radarEmpty = $('radar-empty');
-  const radarRate = rateMeter($('radar-rate'));
-  loop(async () => {
-    const body = await getJson(URLS.radar);
-    const data = body.data || {};
-    const frames = data.frames || [];
-    const latest = frames.length ? frames[frames.length - 1] : null;
-    const targets = (latest && latest.targets && latest.targets.length ? latest.targets : data.targets) || [];
-    const occ = data.occupancy || {};
-    $('radar-occ').textContent = `occupancy ${occ.label || '—'} · ${occ.detected_frames || 0}/${occ.evaluated_frames || 0} frames`;
-    $('radar-snr').textContent = `snr ${Number(data.snr_db || 0).toFixed(1)} dB · peak ${Number(data.peak_power_db || 0).toFixed(1)} dB`;
-    if (!frames.length && !targets.length) { radarRate.stale(); return; }
-    radarEmpty.style.display = 'none';
-    radarRate.tick();
-
-    const { ctx, w, h } = fitCanvas(radarCanvas);
-    ctx.clearRect(0, 0, w, h);
-    // bounds from payload axes or auto from targets
-    const xs = [], ys = [];
-    for (const t of targets) { const p = t.position || t; if (Array.isArray(p)) { xs.push(+p[0]); ys.push(+p[1]); } }
-    if (Array.isArray(data.location)) { xs.push(+data.location[0]); ys.push(+data.location[1]); }
-    let xMin = Math.min(0, ...xs), xMax = Math.max(5, ...xs);
-    let yMin = Math.min(-3, ...ys), yMax = Math.max(3, ...ys);
-    const pad = 34;
-    const sx = (v) => pad + (v - xMin) / (xMax - xMin || 1) * (w - pad * 2);
-    const sy = (v) => h - pad - (v - yMin) / (yMax - yMin || 1) * (h - pad * 2);
-    // grid
-    ctx.strokeStyle = '#1b2a30'; ctx.lineWidth = 1;
+  function drawAxes(ctx, w, h, pad, xAxis, yAxis, xLabel, yLabel) {
+    ctx.strokeStyle = 'rgba(221,232,234,.8)'; ctx.lineWidth = 1.2;
+    ctx.strokeRect(pad, pad, w - pad * 2, h - pad * 2);
+    ctx.fillStyle = '#aebdc1'; ctx.font = '11px ui-monospace,monospace'; ctx.textAlign = 'center';
+    const x0 = xAxis[0], x1 = xAxis[xAxis.length - 1];
+    const y0 = yAxis[0], y1 = yAxis[yAxis.length - 1];
     for (let i = 0; i <= 5; i++) {
-      const gx = pad + (w - pad * 2) * i / 5, gy = pad + (h - pad * 2) * i / 5;
-      ctx.beginPath(); ctx.moveTo(gx, pad); ctx.lineTo(gx, h - pad); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(pad, gy); ctx.lineTo(w - pad, gy); ctx.stroke();
+      const x = pad + (w - pad * 2) * i / 5;
+      ctx.beginPath(); ctx.moveTo(x, h - pad); ctx.lineTo(x, h - pad + 5); ctx.stroke();
+      ctx.fillText((x0 + (x1 - x0) * i / 5).toFixed(1), x, h - pad + 18);
     }
-    ctx.fillStyle = '#5c6f74'; ctx.font = '10px ui-monospace,monospace'; ctx.textAlign = 'center';
-    for (let i = 0; i <= 5; i++) ctx.fillText((xMin + (xMax - xMin) * i / 5).toFixed(1) + 'm', pad + (w - pad * 2) * i / 5, h - pad + 14);
-    ctx.save(); ctx.translate(12, h / 2); ctx.rotate(-Math.PI / 2); ctx.fillText('lateral (m)', 0, 0); ctx.restore();
-    ctx.fillText('forward (m)', w / 2, h - 6);
-    // sensor origin
-    ctx.beginPath(); ctx.arc(sx(0), sy(0), 5, 0, Math.PI * 2); ctx.fillStyle = '#edf8f8'; ctx.fill();
-    // targets
-    for (const t of targets) {
-      const p = t.position || t;
-      if (!Array.isArray(p)) continue;
-      const isStatic = t.presence_mode === 'static';
-      ctx.beginPath(); ctx.arc(sx(+p[0]), sy(+p[1]), 7, 0, Math.PI * 2);
-      ctx.fillStyle = isStatic ? 'rgba(255,190,92,.9)' : 'rgba(91,224,207,.92)'; ctx.fill();
-      ctx.strokeStyle = '#071012'; ctx.stroke();
-      if (t.id != null) { ctx.fillStyle = '#e8f2f3'; ctx.font = '10px ui-monospace,monospace'; ctx.fillText('T' + t.id, sx(+p[0]) + 12, sy(+p[1]) - 8); }
+    ctx.textAlign = 'right';
+    for (let i = 0; i <= 4; i++) {
+      const y = h - pad - (h - pad * 2) * i / 4;
+      ctx.beginPath(); ctx.moveTo(pad - 5, y); ctx.lineTo(pad, y); ctx.stroke();
+      ctx.fillText((y0 + (y1 - y0) * i / 4).toFixed(1), pad - 9, y + 4);
     }
-  }, 250);
+    ctx.textAlign = 'center';
+    ctx.fillText(xLabel, w / 2, h - 8);
+    ctx.save(); ctx.translate(16, h / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(yLabel, 0, 0); ctx.restore();
+  }
 
-  // ---- CSI amplitude ------------------------------------------------------
-  const csiCanvas = $('csi-canvas'), csiEmpty = $('csi-empty');
-  const csiRate = rateMeter($('csi-rate'));
-  loop(async () => {
-    const body = await getJson(URLS.csi);
-    const data = body.data || {};
-    const pts = (data.points || []).map(Number);
-    $('csi-count').textContent = `${data.sample_count || pts.length} packets`;
-    if (!pts.length) { csiRate.stale(); return; }
-    csiEmpty.style.display = 'none';
-    csiRate.tick();
-    $('csi-amp').textContent = 'amp ' + pts[pts.length - 1].toFixed(1);
-
-    const { ctx, w, h } = fitCanvas(csiCanvas);
+  // Dense uint8 map {rows, columns, values, x, y} — row 0 = smallest y (bottom).
+  function drawDenseMap(canvas, map, xLabel, yLabel) {
+    const { ctx, w, h } = fitCanvas(canvas);
     ctx.clearRect(0, 0, w, h);
-    const pad = 34;
-    const vMin = Math.min(...pts), vMax = Math.max(...pts);
+    const pad = 44;
+    ctx.fillStyle = '#440154'; ctx.fillRect(pad, pad, w - pad * 2, h - pad * 2);
+    if (map && map.values && map.values.length === map.rows * map.columns) {
+      const img = heatImage('d' + map.columns + 'x' + map.rows, map.rows, map.columns, (data) => {
+        for (let i = 0; i < map.values.length; i++) {
+          const v = map.values[i] / 255, [r, g, b] = viridis(v);
+          const row = Math.floor(i / map.columns), col = i % map.columns;
+          const p = ((map.rows - 1 - row) * map.columns + col) * 4;
+          data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = 255;
+        }
+      });
+      ctx.save(); ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, pad, pad, w - pad * 2, h - pad * 2); ctx.restore();
+      drawAxes(ctx, w, h, pad, map.x, map.y, xLabel, yLabel);
+      return true;
+    }
+    return false;
+  }
+
+  // Native Example 2 sparse map {rows, columns, values_sparse, x_axis, y_axis}.
+  function drawExample2(canvas, map) {
+    const { ctx, w, h } = fitCanvas(canvas);
+    ctx.clearRect(0, 0, w, h);
+    const pad = 44;
+    ctx.fillStyle = '#440154'; ctx.fillRect(pad, pad, w - pad * 2, h - pad * 2);
+    if (map && map.rows && map.columns) {
+      const img = heatImage('e2' + map.columns + 'x' + map.rows, map.rows, map.columns, (data) => {
+        for (let i = 0; i < data.length; i += 4) { data[i] = 68; data[i + 1] = 1; data[i + 2] = 84; data[i + 3] = 255; }
+        for (const cell of map.values_sparse || []) {
+          const src = +cell[0], v = +cell[1] / 255;
+          const fwd = Math.floor(src / map.columns), lat = src % map.columns;
+          const x = map.columns - 1 - lat, y = map.rows - 1 - fwd;
+          if (x < 0 || x >= map.columns || y < 0 || y >= map.rows) continue;
+          const [r, g, b] = viridis(v), p = (y * map.columns + x) * 4;
+          data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = 255;
+        }
+      });
+      ctx.save(); ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, pad, pad, w - pad * 2, h - pad * 2); ctx.restore();
+      drawAxes(ctx, w, h, pad, map.y_axis || [-5, 5], map.x_axis || [0, 5], 'Y / lateral (m)', 'X / forward (m)');
+      return true;
+    }
+    return false;
+  }
+
+  // ---- sensor / view switching -------------------------------------------
+  const SENSORS = [
+    { id: 'radar', label: 'Radar', views: [
+      { id: 'xy', label: 'X-Y Map' },
+      { id: 'rd', label: 'Range–Doppler' },
+      { id: 'ra', label: 'Range–Azimuth' },
+      { id: 're', label: 'Range–Elevation' },
+    ]},
+    { id: 'csi', label: 'WiFi CSI', views: [
+      { id: 'amp', label: 'Amplitude' },
+      { id: 'var', label: 'Rolling variance' },
+    ]},
+    { id: 'camera', label: 'Camera', views: [{ id: 'frame', label: 'Live frame' }] },
+    { id: 'sensehat', label: 'Sense HAT', views: [{ id: 'env', label: 'Environment + IMU' }] },
+  ];
+  let sensor = 'radar', view = 'xy';
+  let pollTimer = null;
+
+  const stageCanvas = $('stage-canvas'), stageImg = $('stage-img'), stageTiles = $('stage-tiles'), stageEmpty = $('stage-empty');
+  const rateEl = $('stage-rate');
+
+  function setRate(text, stale) {
+    rateEl.textContent = text;
+    rateEl.classList.toggle('stale', !!stale);
+  }
+  function setFoot(left, right) {
+    $('stage-left').textContent = left;
+    $('stage-right').textContent = right;
+  }
+  function showEmpty(text) {
+    stageEmpty.textContent = text;
+    stageEmpty.style.display = 'flex';
+  }
+
+  function renderTabs() {
+    $('sensor-tabs').innerHTML = SENSORS.map(s =>
+      `<button class="sensor-tab ${s.id === sensor ? 'active' : ''}" data-sensor="${s.id}" role="tab" aria-selected="${s.id === sensor}">${s.label}</button>`).join('');
+    const def = SENSORS.find(s => s.id === sensor);
+    $('view-tabs').innerHTML = def.views.map(v =>
+      `<button class="view-tab ${v.id === view ? 'active' : ''}" data-view="${v.id}" role="tab" aria-selected="${v.id === view}">${v.label}</button>`).join('');
+  }
+  $('sensor-tabs').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-sensor]');
+    if (!b || b.dataset.sensor === sensor) return;
+    sensor = b.dataset.sensor;
+    view = SENSORS.find(s => s.id === sensor).views[0].id;
+    renderTabs(); startPolling();
+  });
+  $('view-tabs').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-view]');
+    if (!b || b.dataset.view === view) return;
+    view = b.dataset.view;
+    renderTabs(); drawStage();
+  });
+
+  function showStage(kind) {
+    stageCanvas.style.display = kind === 'canvas' ? 'block' : 'none';
+    stageImg.style.display = kind === 'img' ? 'block' : 'none';
+    stageTiles.style.display = kind === 'tiles' ? 'block' : 'none';
+    stageEmpty.style.display = 'none';
+  }
+
+  // ---- radar --------------------------------------------------------------
+  let radarState = null;
+  async function pollRadar() {
+    const body = await getJson(URLS.radar + '?t=' + Date.now());
+    radarState = body;
+    const hz = Number(body.sensor_hz || 0);
+    setRate(body.stale ? 'stale' : hz.toFixed(1) + ' Hz', body.stale);
+    const det = body.person_detected ? 'target detected' : 'listening';
+    setFoot(
+      `${det} · frame ${Number(body.frame_index || 0) + 1} · ${Math.round(Number(body.age_seconds || 0) * 1000)}ms old`,
+      `${Number(body.configured_hz || 0).toFixed(0)} Hz configured · ${body.target_count || 0} target(s)`
+    );
+    drawStage();
+  }
+  function drawRadar() {
+    showStage('canvas');
+    const s = radarState || {};
+    let ok = false;
+    if (view === 'xy') {
+      ok = drawExample2(stageCanvas, s.intensity && s.intensity.example2_xy);
+      if (!ok) showEmpty('Waiting for the native Example 2 map');
+    } else {
+      const key = { rd: 'range_doppler', ra: 'range_azimuth', re: 'range_elevation' }[view];
+      const labels = {
+        rd: ['Velocity (m/s)', 'Range (m)'],
+        ra: ['Azimuth (°)', 'Range (m)'],
+        re: ['Elevation (°)', 'Range (m)'],
+      }[view];
+      ok = drawDenseMap(stageCanvas, (s.maps || {})[key], labels[0], labels[1]);
+      if (!ok) showEmpty('Waiting for radar maps — appear after the first processed frame');
+    }
+    if (ok) stageEmpty.style.display = 'none';
+  }
+
+  // ---- CSI ----------------------------------------------------------------
+  let csiCursor = '', csiBuf = [], csiHz = 0;
+  const CSI_WINDOW_S = 6;
+  async function pollCsi() {
+    const body = await getJson(URLS.csiTail + '?cursor=' + encodeURIComponent(csiCursor));
+    if (body.status !== 'success') { setRate('no CSI', true); showEmpty('Waiting for CSI packets'); return; }
+    if (body.minute) $('lab-minute').textContent = body.minute;
+    csiCursor = body.cursor || csiCursor;
+    const now = body.samples && body.samples.length ? body.samples[body.samples.length - 1][0] : 0;
+    for (const s of body.samples || []) csiBuf.push(s);
+    if (now) csiBuf = csiBuf.filter(s => now - s[0] < CSI_WINDOW_S * 1e9);
+    // measured rate over the last second of sample time
+    if (now) csiHz = csiBuf.filter(s => now - s[0] < 1e9).length;
+    setRate(csiHz + ' Hz', csiHz === 0);
+    setFoot(`${csiBuf.length} samples in window`, body.truncated ? 'catching up…' : 'live');
+    drawStage();
+  }
+  function drawCsi() {
+    showStage('canvas');
+    if (!csiBuf.length) { showEmpty('Waiting for CSI packets'); return; }
+    stageEmpty.style.display = 'none';
+    const { ctx, w, h } = fitCanvas(stageCanvas);
+    ctx.clearRect(0, 0, w, h);
+    const pad = 44;
+    const tMax = csiBuf[csiBuf.length - 1][0], tMin = tMax - CSI_WINDOW_S * 1e9;
+    const rxColors = ['#4fd5cd', '#f2a93b', '#a78bfa', '#f472b6'];
+    let series;
+    if (view === 'var') {
+      // rolling std over a 0.5 s trailing window, per receiver
+      const WIN = 0.5e9;
+      const byRx = new Map();
+      for (const s of csiBuf) { if (!byRx.has(s[1])) byRx.set(s[1], []); byRx.get(s[1]).push(s); }
+      series = [...byRx.entries()].map(([rx, arr]) => {
+        const out = [];
+        let lo = 0;
+        const vals = [];
+        for (let i = 0; i < arr.length; i++) {
+          vals.push(arr[i][2]);
+          while (arr[i][0] - arr[lo][0] > WIN) { vals.shift(); lo++; }
+          const m = vals.reduce((a, b) => a + b, 0) / vals.length;
+          const v = Math.sqrt(vals.reduce((a, b) => a + (b - m) * (b - m), 0) / vals.length);
+          out.push([arr[i][0], v]);
+        }
+        return { rx, pts: out };
+      });
+    } else {
+      const byRx = new Map();
+      for (const s of csiBuf) { if (!byRx.has(s[1])) byRx.set(s[1], []); byRx.get(s[1]).push([s[0], s[2]]); }
+      series = [...byRx.entries()].map(([rx, pts]) => ({ rx, pts }));
+    }
+    let vMin = Infinity, vMax = -Infinity;
+    for (const s of series) for (const p of s.pts) { vMin = Math.min(vMin, p[1]); vMax = Math.max(vMax, p[1]); }
+    if (!isFinite(vMin)) { showEmpty('Waiting for CSI packets'); return; }
     const span = vMax - vMin || 1;
     ctx.strokeStyle = '#1b2a30'; ctx.lineWidth = 1;
+    ctx.fillStyle = '#5c6f74'; ctx.font = '10px ui-monospace,monospace';
     for (let i = 0; i <= 4; i++) {
       const gy = pad + (h - pad * 2) * i / 4;
       ctx.beginPath(); ctx.moveTo(pad, gy); ctx.lineTo(w - pad, gy); ctx.stroke();
-      ctx.fillStyle = '#5c6f74'; ctx.font = '10px ui-monospace,monospace'; ctx.textAlign = 'right';
-      ctx.fillText((vMax - span * i / 4).toFixed(1), pad - 6, gy + 3);
+      ctx.textAlign = 'right'; ctx.fillText((vMax - span * i / 4).toFixed(1), pad - 6, gy + 3);
     }
-    ctx.beginPath();
-    pts.forEach((v, i) => {
-      const x = pad + i / (pts.length - 1 || 1) * (w - pad * 2);
-      const y = pad + (1 - (v - vMin) / span) * (h - pad * 2);
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-    });
-    ctx.strokeStyle = '#4fd5cd'; ctx.lineWidth = 1.6; ctx.stroke();
-    // gradient fill under the line
-    ctx.lineTo(pad + (w - pad * 2), h - pad); ctx.lineTo(pad, h - pad); ctx.closePath();
-    const grad = ctx.createLinearGradient(0, pad, 0, h - pad);
-    grad.addColorStop(0, 'rgba(79,213,205,.28)'); grad.addColorStop(1, 'rgba(79,213,205,0)');
-    ctx.fillStyle = grad; ctx.fill();
-  }, 500);
+    ctx.textAlign = 'center';
+    for (let i = 0; i <= 5; i++) {
+      const x = pad + (w - pad * 2) * i / 5;
+      ctx.fillText(((tMin + (tMax - tMin) * i / 5) / 1e9).toFixed(1) + 's', x, h - pad + 16);
+    }
+    for (const s of series) {
+      ctx.beginPath();
+      s.pts.forEach((p, i) => {
+        const x = pad + (p[0] - tMin) / (tMax - tMin || 1) * (w - pad * 2);
+        const y = pad + (1 - (p[1] - vMin) / span) * (h - pad * 2);
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      });
+      ctx.strokeStyle = rxColors[s.rx % rxColors.length]; ctx.lineWidth = 1.4; ctx.stroke();
+    }
+    ctx.fillStyle = '#7d979c'; ctx.textAlign = 'left';
+    ctx.fillText(view === 'var' ? 'rolling std · 0.5 s window' : 'mean subcarrier amplitude', pad, pad - 12);
+  }
 
   // ---- camera -------------------------------------------------------------
-  const camImg = $('cam-img'), camEmpty = $('cam-empty');
-  const camRate = rateMeter($('cam-rate'));
-  let camOk = false;
-  camImg.addEventListener('load', () => { camOk = true; camEmpty.style.display = 'none'; camRate.tick(); });
-  camImg.addEventListener('error', () => { camOk = false; camEmpty.style.display = 'flex'; camRate.stale(); });
-  loop(async () => { camImg.src = URLS.cam + '?t=' + Date.now(); }, 800);
+  let camFrames = 0, camWindowStart = 0;
+  stageImg.addEventListener('load', () => {
+    stageEmpty.style.display = 'none';
+    const now = performance.now();
+    if (!camWindowStart) camWindowStart = now;
+    camFrames++;
+    if (now - camWindowStart > 2000) {
+      setRate((camFrames / ((now - camWindowStart) / 1000)).toFixed(1) + ' fps', false);
+      camFrames = 0; camWindowStart = now;
+    }
+    if (sensor === 'camera') stageImg.src = URLS.cam + '?t=' + Date.now();
+  });
+  stageImg.addEventListener('error', () => { if (sensor === 'camera') { setRate('no camera', true); showEmpty('No camera this minute'); } });
+  function startCamera() {
+    showStage('img');
+    camFrames = 0; camWindowStart = 0;
+    setFoot('refreshing as fast as the camera produces frames', '');
+    stageImg.src = URLS.cam + '?t=' + Date.now();
+  }
 
   // ---- sense hat ----------------------------------------------------------
-  const senseRate = rateMeter($('sense-rate'));
-  const spark = $('sense-spark');
   const mag = (v) => v && typeof v === 'object' ? Math.hypot(+v.x || 0, +v.y || 0, +v.z || 0) : null;
-  loop(async () => {
-    const body = await getJson(URLS.sense);
+  async function pollSense() {
+    const body = await getJson(URLS.sense + '?t=' + Date.now());
     if (body.status !== 'success' || !body.latest) {
-      $('sense-empty').style.display = 'block';
-      senseRate.stale();
-      return;
+      setRate('absent', true); showEmpty('Sense HAT not present this minute'); return;
     }
-    $('sense-empty').style.display = 'none';
-    senseRate.tick();
+    stageEmpty.style.display = 'none';
+    setRate('1 Hz', false);
     const L = body.latest;
     if (L.temperature_c != null) $('sense-temp').textContent = (+L.temperature_c).toFixed(1);
     if (L.humidity_percent != null) $('sense-hum').textContent = (+L.humidity_percent).toFixed(1);
@@ -309,8 +423,9 @@
     if (acc != null) { $('imu-acc').style.width = Math.min(100, acc / 2 * 100) + '%'; $('imu-acc-v').textContent = acc.toFixed(2); }
     if (gyr != null) { $('imu-gyr').style.width = Math.min(100, gyr / 5 * 100) + '%'; $('imu-gyr-v').textContent = gyr.toFixed(2); }
     if (cmp != null) { $('imu-mag').style.width = Math.min(100, cmp / 80 * 100) + '%'; $('imu-mag-v').textContent = cmp.toFixed(1); }
-    // temperature sparkline
+    setFoot(`sample ${body.sample_count || '—'}`, body.minute || '');
     const series = (body.series || []).map(s => +s.temperature_c).filter(v => !isNaN(v));
+    const spark = $('sense-spark');
     if (series.length > 1) {
       const { ctx, w, h } = fitCanvas(spark);
       ctx.clearRect(0, 0, w, h);
@@ -324,9 +439,59 @@
       ctx.fillStyle = '#5c6f74'; ctx.font = '9px ui-monospace,monospace'; ctx.textAlign = 'left';
       ctx.fillText(`temp ${lo.toFixed(1)}–${hi.toFixed(1)} °C`, 4, 10);
     }
-  }, 1000);
+  }
 
-  window.addEventListener('resize', () => { [radarCanvas, csiCanvas, spark].forEach(fitCanvas); });
+  // ---- dispatcher ----------------------------------------------------------
+  function drawStage() {
+    if (sensor === 'radar') drawRadar();
+    else if (sensor === 'csi') drawCsi();
+    else if (sensor === 'camera') showStage('img');
+    else showStage('tiles');
+  }
+
+  function startPolling() {
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    stageImg.src = '';
+    radarState = null; csiBuf = []; csiCursor = ''; csiHz = 0;
+    setRate('— Hz', true); setFoot('—', '—');
+    showEmpty('Waiting for data');
+    drawStage();
+    const run = async (fn, ms) => {
+      if (pollTimer === null) return;
+      try { await fn(); } catch (e) { /* keep stale state */ }
+      pollTimer = setTimeout(() => run(fn, ms), document.hidden ? ms * 4 : ms);
+    };
+    if (sensor === 'radar') { pollTimer = 1; run(pollRadar, 110); }
+    else if (sensor === 'csi') { pollTimer = 1; run(pollCsi, 80); }
+    else if (sensor === 'camera') { pollTimer = 1; startCamera(); }
+    else { pollTimer = 1; run(pollSense, 1000); }
+  }
+
+  // ---- verdict strip --------------------------------------------------------
+  const verdictStrip = $('verdict-strip');
+  const POS = new Set(['occupied', 'present', 'presence', 'motion', 'person', 'human', 'occupied_room']);
+  (async function verdictLoop() {
+    try {
+      const body = await getJson(URLS.verdict + '?t=' + Date.now());
+      if (body.minute) $('lab-minute').textContent = body.minute;
+      const verdicts = body.verdicts || [];
+      if (verdicts.length) {
+        verdictStrip.innerHTML = verdicts.map(v => {
+          const cls = String(v.class || '').toLowerCase();
+          const pos = POS.has(cls);
+          const votes = v.window_votes ? ` · ${v.window_votes.positive}/${v.window_votes.total}` : '';
+          const conf = v.confidence != null ? ` · ${(v.confidence * 100).toFixed(0)}%` : '';
+          const label = v.status === 'ok' ? (v.class || '?') : (v.status || 'idle');
+          return `<span class="verdict-chip"><span class="verdict-dot ${v.status === 'ok' ? (pos ? 'pos' : 'neg') : 'idle'}"></span>${v.model || 'model'}: <b>${label}</b>${votes}${conf}</span>`;
+        }).join('');
+      }
+    } catch (e) { /* keep last */ }
+    setTimeout(verdictLoop, document.hidden ? 8000 : 2000);
+  })();
+
+  window.addEventListener('resize', drawStage);
+  renderTabs();
+  startPolling();
 })();
 </script>
 {% endblock %}
