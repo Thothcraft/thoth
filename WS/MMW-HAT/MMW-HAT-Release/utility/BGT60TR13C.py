@@ -311,11 +311,15 @@ class BGT60TR13C:
                     break
                 fifo_data = self.__get_fifo_data(self.__num_sampler_per_burst)
                 if fifo_data is None:
-                    # A latched FIFO overflow wedges every further burst read;
-                    # reset the FSM+FIFO so the next frame starts clean instead
-                    # of stalling capture for the rest of the minute.
+                    # A latched FIFO overflow wedges every further burst read.
+                    # Reset FSM+FIFO, then re-arm FRAME_START so streaming
+                    # resumes at a clean frame boundary (a FIFO-only reset
+                    # would lose byte alignment; an FSM reset without restart
+                    # would stop production entirely).
                     logging.warning("Radar FIFO error; resetting FSM/FIFO to recover")
                     self.soft_reset(BGT60TRXX_RESET_FSM | BGT60TRXX_RESET_FIFO)
+                    status = self.__get_reg(BGT60TRXX_REG_MAIN)
+                    self.__set_reg(BGT60TRXX_REG_MAIN, status | BGT60TRXX_REG_MAIN_FRAME_START_MSK)
                     break
                 try:
                     self.__sub_frame_buffer += fifo_data
