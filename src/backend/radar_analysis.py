@@ -799,6 +799,10 @@ class StreamingChunkAnalyzer:
         })
         if len(self.playback_frames) > self.max_visualization_frames:
             del self.playback_frames[0]
+        elapsed = time.perf_counter() - processing_started
+        self.processing_seconds += elapsed
+        self.last_processing_seconds = elapsed
+        self.max_processing_seconds = max(self.max_processing_seconds, elapsed)
         self._write_live_state(world_points)
         self.writer.writerow({
             "chunk_index": self.chunk_index,
@@ -826,22 +830,24 @@ class StreamingChunkAnalyzer:
             "targets_json": json.dumps(self.last_targets, separators=(",", ":")),
             "shadow_points_json": json.dumps(shadow_points.round(4).tolist(), separators=(",", ":")),
         })
-        elapsed = time.perf_counter() - processing_started
-        self.processing_seconds += elapsed
-        self.max_processing_seconds = max(self.max_processing_seconds, elapsed)
         return True
+
+    def _live_publish_due(self) -> bool:
+        """True when a live-state publish is due (~5 Hz cap)."""
+        if self.live_state_path is None:
+            return False
+        publish_interval = max(0.2, 0.75 / max(1.0, self.configured_frame_rate_hz))
+        return time.monotonic() - self.last_live_publish >= publish_interval
 
     def _write_live_state(self, world_points: np.ndarray) -> None:
         """Publish the analyzed frame without blocking capture or the dashboard."""
         if self.live_state_path is None:
             return
-        now = time.monotonic()
         # ~5 Hz is plenty for the live lab; each publish serializes ~70KB of
         # maps, so publishing every processed frame just burns collector CPU.
-        publish_interval = max(0.2, 0.75 / max(1.0, self.configured_frame_rate_hz))
-        if now - self.last_live_publish < publish_interval:
+        if not self._live_publish_due():
             return
-        self.last_live_publish = now
+        self.last_live_publish = time.monotonic()
         measured_hz = 0.0
         if len(self.frame_times) > 1:
             elapsed = self.frame_times[-1] - self.frame_times[0]
@@ -890,7 +896,7 @@ class StreamingChunkAnalyzer:
                 "frame_index": self.evaluated_frames - 1,
                 "sensor_hz": round(measured_hz, 2),
                 "configured_hz": self.configured_frame_rate_hz,
-                "processing_ms": round(self.max_processing_seconds * 1000.0, 1),
+                "processing_ms": round(self.last_processing_seconds * 1000.0, 1),
                 "queue_lag_ms": round(self.max_queue_lag_ms, 1),
                 "intensity": live_intensity,
                 "maps": self.last_maps,
