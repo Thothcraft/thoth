@@ -69,8 +69,16 @@ class Config:
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     LOG_FILE = os.path.join(LOGS_DIR, 'thoth.log')
 
+    # Install/runtime profile: "full" (Pi 4/5) or "lite" (Pi 3 / 1 GB boards).
+    # Set by setup/first-boot.sh into the systemd units; overridable via env.
+    PROFILE = os.getenv('THOTH_PROFILE', 'full').strip().lower() or 'full'
+    IS_LITE = PROFILE == 'lite'
+
     # Device management
-    HEARTBEAT_INTERVAL = int(os.getenv('HEARTBEAT_INTERVAL', 10))  # seconds
+    # Lite mode backs off the Brain registration retry + heartbeat to cut the
+    # network/thread churn that stalls a 1 GB Pi when registration is failing.
+    HEARTBEAT_INTERVAL = int(os.getenv('HEARTBEAT_INTERVAL', 30 if IS_LITE else 10))  # seconds
+    REGISTER_INTERVAL = int(os.getenv('THOTH_REGISTER_INTERVAL_S', 30 if IS_LITE else 10))  # seconds
     MAX_HEARTBEAT_FAILURES = int(os.getenv('MAX_HEARTBEAT_FAILURES', 3))
 
     # Captive portal

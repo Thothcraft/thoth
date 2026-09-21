@@ -24,6 +24,24 @@ SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
+# ---------------------------------------------------------------------------
+# Install profile: "full" (Pi 4/5) or "lite" (Pi 3 and other 1 GB boards).
+# Auto-detect a Pi 3 from the device-tree model unless THOTH_PROFILE is set.
+# The lite profile skips the heavy/optional Python packages (torch, numba,
+# scipy, pyfftw, matplotlib, eventlet) — all are lazily imported or unused, so
+# the app runs fine without them; TorchScript models simply report "PyTorch
+# required" instead of running.
+# ---------------------------------------------------------------------------
+THOTH_PROFILE="${THOTH_PROFILE:-}"
+if [ -z "$THOTH_PROFILE" ]; then
+    MODEL="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || true)"
+    case "$MODEL" in
+        *"Raspberry Pi 3"*|*"Raspberry Pi Zero"*|*"Raspberry Pi 2"*) THOTH_PROFILE="lite" ;;
+        *) THOTH_PROFILE="full" ;;
+    esac
+fi
+log "Install profile: $THOTH_PROFILE"
+
 log "Installing Raspberry Pi system dependencies"
 apt-get update -qq
 # Note: libopencv-dev and docker.io are intentionally NOT installed — nothing
@@ -65,18 +83,29 @@ done
 log "Creating Python environment"
 python3 -m venv --system-site-packages "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install --upgrade pip -q
+
+# Core packages every profile needs.
 "$VENV_DIR/bin/python" -m pip install -q \
-    flask flask-socketio flask-cors requests python-dotenv eventlet netifaces \
-    APScheduler psutil 'PyJWT>=2.8.0' numpy numba scipy pyfftw spidev \
-    gpiozero matplotlib pyserial pexpect
-# torch is the heaviest dependency (~90 MB ARM wheel) and only needed for
-# TorchScript model inference. Skip it on constrained devices with
-# THOTH_NO_TORCH=1 — models then report "PyTorch required" instead of running.
-if [ "${THOTH_NO_TORCH:-0}" != "1" ]; then
+    flask flask-socketio flask-cors requests python-dotenv netifaces \
+    APScheduler psutil 'PyJWT>=2.8.0' numpy spidev \
+    gpiozero pyserial pexpect
+
+if [ "$THOTH_PROFILE" = "lite" ]; then
+    # Lite (Pi 3 / 1 GB): skip the heavy scientific + inference wheels. They are
+    # all lazily imported or unused, so the app runs without them.
+    log "Lite profile: skipping torch, numba, scipy, pyfftw, matplotlib, eventlet"
+else
     "$VENV_DIR/bin/python" -m pip install -q \
-        torch --extra-index-url https://download.pytorch.org/whl/cpu
+        eventlet numba scipy pyfftw matplotlib
+    # torch is the heaviest dependency (~90 MB ARM wheel) and only needed for
+    # TorchScript model inference. Skip it on constrained devices with
+    # THOTH_NO_TORCH=1 — models then report "PyTorch required" instead of running.
+    if [ "${THOTH_NO_TORCH:-0}" != "1" ]; then
+        "$VENV_DIR/bin/python" -m pip install -q \
+            torch --extra-index-url https://download.pytorch.org/whl/cpu
+    fi
 fi
-"$VENV_DIR/bin/python" -c 'import flask, gpiozero, numba, pyfftw, scipy, serial, spidev'
+"$VENV_DIR/bin/python" -c 'import flask, gpiozero, serial, spidev'
 
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$THOTH_ROOT/data" "$THOTH_ROOT/config" "$THOTH_ROOT/logs"
 
@@ -108,6 +137,7 @@ User=$SERVICE_USER
 Group=$SERVICE_GROUP
 WorkingDirectory=$THOTH_ROOT
 Environment=THOTH_ROOT=$THOTH_ROOT
+Environment=THOTH_PROFILE=$THOTH_PROFILE
 ExecStart=$VENV_DIR/bin/python $THOTH_ROOT/src/app.py
 Restart=always
 RestartSec=5
@@ -129,6 +159,7 @@ User=$SERVICE_USER
 Group=$SERVICE_GROUP
 WorkingDirectory=$THOTH_ROOT
 Environment=THOTH_ROOT=$THOTH_ROOT
+Environment=THOTH_PROFILE=$THOTH_PROFILE
 Environment=THOTH_CAPTURE_SCRIPT=$THOTH_ROOT/src/backend/minute_collector.py
 ExecStart=$VENV_DIR/bin/python $THOTH_ROOT/src/collector.py
 Restart=always

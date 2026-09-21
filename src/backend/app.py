@@ -1288,11 +1288,12 @@ def _activate_device_session(username: str, token: str) -> None:
 # Start background tasks
 socketio.start_background_task(tail_sensor_data)
 
-# Start device registration scheduler (10 second interval for responsive uploads)
+# Start device registration scheduler. Lite profile retries less often to keep
+# a 1 GB Pi responsive while registration is failing.
 device_scheduler.add_job(
     register_device_periodically,
     'interval',
-    seconds=10,
+    seconds=getattr(Config, 'REGISTER_INTERVAL', 10),
     id='device_registration',
     replace_existing=True
 )
