@@ -401,7 +401,24 @@ def list_minute_folders() -> List[Path]:
 
 
 def _file_map(minute_dir: Path) -> Dict[str, Any]:
-    files = {item.name: item for item in minute_dir.iterdir() if item.is_file()}
+    # Single directory pass — minute folders can hold tens of thousands of
+    # camera frames, and repeated iterdir() scans measurably stall API calls.
+    files: Dict[str, Path] = {}
+    radar_candidates: List[Path] = []
+    radar_csvs: List[Path] = []
+    camera_images: List[Path] = []
+    for item in minute_dir.iterdir():
+        if not item.is_file():
+            continue
+        name = item.name
+        files[name] = item
+        suffix = item.suffix.lower()
+        if suffix == ".bin" and (name.startswith("radar_") or name.startswith("mmw_radar_raw_")):
+            radar_candidates.append(item)
+        elif suffix == ".csv" and name.startswith("mmw_radar_xy_"):
+            radar_csvs.append(item)
+        elif suffix in {".jpg", ".jpeg"} and name.startswith("camera_"):
+            camera_images.append(item)
     csi_csvs = sorted(
         [item for name, item in files.items() if re.match(r"^wifi_csi(?:_\d+)?\.csv$", name)],
         key=lambda item: item.name,
@@ -410,6 +427,9 @@ def _file_map(minute_dir: Path) -> Dict[str, Any]:
     csi_timestamped = files.get("wifi_csi_timestamped.csv")
     csi_serial = files.get("wifi_csi_serial_all.jsonl")
     xy_tracking = files.get("xy-tracking.json")
+    radar_candidates.sort(key=lambda p: p.name)
+    radar_csvs.sort(key=lambda p: p.name)
+    camera_images.sort(key=lambda p: p.name)
     result = {
         "container": files.get(CONTAINER_FILENAME),
         "manifest": files.get("manifest.json"),
@@ -418,35 +438,16 @@ def _file_map(minute_dir: Path) -> Dict[str, Any]:
         "video": files.get("usb_camera.mp4"),
         "video_log": files.get("usb_camera.ffmpeg.log"),
         "sense_hat": files.get("sense_hat.jsonl"),
-        "radar": None,
+        "radar": radar_candidates[0] if radar_candidates else None,
         "csi_csv": csi_csv,
         "csi_timestamped": csi_timestamped,
         "csi_serial": csi_serial,
         "csi": csi_timestamped or csi_csv or csi_serial,
         "csi_csvs": csi_csvs,
+        "radar_bins": radar_candidates,
+        "radar_csvs": radar_csvs,
+        "camera_images": camera_images,
     }
-    radar_candidates = sorted(
-        [
-            item for item in minute_dir.iterdir()
-            if item.is_file()
-            and item.suffix == ".bin"
-            and (item.name.startswith("radar_") or item.name.startswith("mmw_radar_raw_"))
-        ],
-        key=lambda p: p.name,
-    )
-    result["radar"] = radar_candidates[0] if radar_candidates else None
-    result["radar_bins"] = radar_candidates
-    result["radar_csvs"] = sorted(
-        [item for item in minute_dir.iterdir() if item.is_file() and item.name.startswith("mmw_radar_xy_") and item.suffix == ".csv"],
-        key=lambda p: p.name,
-    )
-    result["camera_images"] = sorted(
-        [
-            item for item in minute_dir.iterdir()
-            if item.is_file() and item.name.startswith("camera_") and item.suffix.lower() in {".jpg", ".jpeg"}
-        ],
-        key=lambda p: p.name,
-    )
     return result
 
 

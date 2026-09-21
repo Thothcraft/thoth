@@ -528,11 +528,10 @@ def _best_live_minute_for_kind(kind: str) -> tuple[Optional[Path], Dict[str, Opt
 
     # Only scan the newest few minutes: capture_files + container metadata are
     # per-minute disk reads, so an unbounded scan hangs when the sensor is
-    # absent everywhere (e.g. no Sense HAT on this device).
-    for minute in list_minutes()[:5]:
-        minute_dir = get_minute(minute.get('minute', ''))
-        if not minute_dir:
-            continue
+    # absent everywhere (e.g. no Sense HAT on this device).  Use the cheap
+    # folder listing — list_minutes() builds a full summary per folder and
+    # stalls the whole web worker on large capture stores.
+    for minute_dir in list_minute_folders()[:5]:
         files = capture_files(minute_dir)
         if _has_kind(files):
             return minute_dir, files
@@ -2677,6 +2676,173 @@ def api_capture_radar_data(minute, plot):
 
     payload['metadata'] = minute_metrics(minute_dir)
     return jsonify({'status': 'success', 'minute': minute, 'data': payload})
+
+
+@app.route('/api/captures/<minute>/csi/series')
+def api_capture_csi_series(minute):
+    """Full-minute per-receiver CSI amplitude series for the debug view.
+
+    Returns ``samples`` as ``[monotonic_ns, rx_index, mean_amplitude]`` rows,
+    stride-downsampled to a bounded count so the whole minute fits one plot.
+    """
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        abort(404, description='Minute folder not found')
+
+    files = capture_files(minute_dir)
+    paths = [p for p in (files.get('csi_csvs') or []) if p and p.exists()]
+    if not paths:
+        single = files.get('csi_csv') or files.get('csi_timestamped')
+        if single and single.exists():
+            paths = [single]
+    if not paths:
+        return jsonify({'status': 'empty', 'minute': minute, 'samples': [], 'receivers': 0})
+
+    per_rx: List[List[List[Any]]] = []
+    for rx_index, path in enumerate(paths):
+        rows: List[List[Any]] = []
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as handle:
+                for line in handle:
+                    if 'CSI_DATA' not in line:
+                        continue
+                    cells = _split_csv_line(line)
+                    if len(cells) < 4:
+                        continue
+                    try:
+                        t_ns = int(cells[1])
+                    except (TypeError, ValueError):
+                        t_ns = 0
+                    amp = _csi_mean_amplitude(cells[3])
+                    if amp is not None:
+                        rows.append([t_ns, rx_index, round(amp, 3)])
+        except OSError:
+            continue
+        per_rx.append(rows)
+
+    cap = 9000
+    samples: List[List[Any]] = []
+    for rows in per_rx:
+        stride = max(1, math.ceil(len(rows) / cap))
+        samples.extend(rows[::stride])
+    samples.sort(key=lambda item: item[0])
+    return jsonify({
+        'status': 'success',
+        'minute': minute,
+        'receivers': len(per_rx),
+        'sample_count': sum(len(rows) for rows in per_rx),
+        'samples': samples,
+    })
+
+
+@app.route('/api/captures/<minute>/radar/frame')
+def api_capture_radar_frame(minute):
+    """Raw + first-stage processed views of one radar frame for debugging.
+
+    ``?chunk=N&frame=M`` selects a 10-frame ``radar_*.bin`` chunk and a frame
+    inside it.  Returns the per-antenna range profile (FFT of raw samples —
+    a peak at the person's distance is the rawest presence signature) and a
+    range-Doppler map (the pipeline's first processed stage).
+    """
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        abort(404, description='Minute folder not found')
+    if np is None or not all((parse_radar_cfg, read_uint12, split_samples)):
+        abort(503, description='Radar decode dependencies unavailable')
+
+    files = capture_files(minute_dir)
+    radar_bins = files.get('radar_bins') or []
+    if not radar_bins:
+        abort(404, description='No radar chunks in this minute')
+
+    try:
+        chunk_index = int(request.args.get('chunk', 0))
+        frame_index = int(request.args.get('frame', 0))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'chunk and frame must be integers'}), 400
+    if chunk_index < 0 or chunk_index >= len(radar_bins):
+        return jsonify({'status': 'error', 'message': f'chunk must be 0..{len(radar_bins) - 1}'}), 400
+
+    setting = _radar_setting()
+    radar_cfg = parse_radar_cfg(setting) if setting else None
+    if not radar_cfg:
+        abort(500, description='Radar configuration could not be loaded')
+
+    target = None
+    frame_count = 0
+    for idx, (seq, raw_data) in enumerate(_iter_radar_frames(radar_bins[chunk_index])):
+        frame_count = idx + 1
+        if idx == frame_index:
+            target = (seq, raw_data)
+    if target is None:
+        return jsonify({'status': 'error', 'message': f'frame must be 0..{max(0, frame_count - 1)}', 'frame_count': frame_count}), 400
+
+    seq, raw_data = target
+    adc_data = read_uint12(raw_data)
+    split = split_samples(
+        adc_data, 1,
+        int(radar_cfg['num_chirps_per_frame']),
+        int(radar_cfg['num_samples_per_chirp']),
+        int(radar_cfg['num_antennas']),
+    )
+    cube = np.transpose(split[0], (2, 0, 1))  # rx x chirps x samples
+
+    samples_n = int(radar_cfg['num_samples_per_chirp'])
+    chirps_n = int(radar_cfg['num_chirps_per_frame'])
+    bandwidth = float(radar_cfg.get('bandwidth') or 1e9)
+    chirp_rate = float(radar_cfg.get('chirp_rate') or 0.0)
+    c = 3e8
+    range_res = c / (2.0 * bandwidth)
+
+    # Range profile per antenna: mean |FFT| over chirps, no MTI — the rawest
+    # reflection signature.  rfft bins map to range via the chirp bandwidth.
+    range_fft = np.fft.rfft(cube - cube.mean(axis=2, keepdims=True), axis=2)
+    profile_db = 20.0 * np.log10(np.maximum(np.mean(np.abs(range_fft), axis=1), np.finfo(float).tiny))
+    range_axis = (np.arange(profile_db.shape[1]) * range_res).round(3).tolist()
+
+    # Range-Doppler: range rfft then Doppler fft (2x zero-pad, shifted) with
+    # per-chirp mean removal so static clutter does not swamp motion.
+    doppler_in = cube - cube.mean(axis=1, keepdims=True)
+    rd = np.fft.fftshift(
+        np.fft.fft(np.fft.rfft(doppler_in, axis=2), n=2 * chirps_n, axis=1),
+        axes=1,
+    )
+    rd_power = np.mean(np.abs(rd) ** 2, axis=0).T  # range x doppler
+    rd_db = 20.0 * np.log10(np.maximum(rd_power, np.finfo(float).tiny))
+    finite = rd_db[np.isfinite(rd_db)]
+    if finite.size:
+        floor = float(np.percentile(finite, 55.0))
+        ceiling = float(np.percentile(finite, 99.5))
+        rd_norm = np.clip((rd_db - floor) / max(1.0, ceiling - floor), 0.0, 1.0)
+    else:
+        rd_norm = np.zeros_like(rd_db)
+    velocity_axis = (
+        np.fft.fftshift(np.fft.fftfreq(2 * chirps_n, d=1.0 / chirp_rate)) * (c / 59e9) / 2.0
+        if chirp_rate > 0 else np.arange(2 * chirps_n, dtype=float)
+    )
+    rd_range_axis = (np.arange(rd_power.shape[0]) * range_res).round(3).tolist()
+
+    return jsonify({
+        'status': 'success',
+        'minute': minute,
+        'chunk': chunk_index,
+        'chunk_count': len(radar_bins),
+        'frame': frame_index,
+        'frame_count': frame_count,
+        'seq': int(seq),
+        'range_profile': {
+            'x': range_axis,
+            'series': np.round(profile_db, 2).tolist(),
+            'label': 'Range profile (dB)',
+        },
+        'range_doppler': {
+            'rows': int(rd_norm.shape[0]),
+            'columns': int(rd_norm.shape[1]),
+            'values': np.rint(rd_norm * 255.0).astype(np.uint8).ravel().tolist(),
+            'x': np.asarray(velocity_axis).round(3).tolist(),
+            'y': rd_range_axis,
+        },
+    })
 
 
 @app.route('/api/captures/<minute>/upload', methods=['POST'])

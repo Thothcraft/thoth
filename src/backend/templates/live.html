@@ -30,6 +30,12 @@
     .view-tab { border: 0; background: transparent; color: #5c6f74; border-radius: 7px; padding: 5px 12px; font: 600 11px ui-monospace, monospace; cursor: pointer; }
     .view-tab.active { background: #1b2a30; color: #eef6f7; }
     .stage-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; border-top: 1px solid #1b2a30; color: #7d979c; font-size: 12px; flex-wrap: wrap; }
+    .lab-full { border: 1px solid #22333a; background: #122024; color: #8fa8ad; border-radius: 8px; padding: 5px 12px; font: 700 11px ui-monospace, monospace; letter-spacing: .1em; cursor: pointer; }
+    .lab-full:hover { color: #eef6f7; border-color: #4fd5cd; }
+    #lab-stage:fullscreen { display: flex; flex-direction: column; background: #0d1517; }
+    #lab-stage:fullscreen .lab-body { flex: 1; min-height: 0; }
+    #lab-stage:fullscreen .lab-canvas { height: 100%; max-height: none; }
+    #lab-stage:fullscreen #stage-img { max-height: none; height: 100%; }
 </style>
 {% endblock %}
 
@@ -48,10 +54,13 @@
         </div>
     </section>
 
-    <section class="lab-panel">
+    <section class="lab-panel" id="lab-stage">
         <div class="lab-panel-head" style="gap:14px;flex-wrap:wrap">
             <div class="sensor-tabs" id="sensor-tabs" role="tablist" aria-label="Sensor"></div>
-            <span class="lab-rate stale" id="stage-rate">— Hz</span>
+            <div class="flex items-center gap-2">
+                <span class="lab-rate stale" id="stage-rate">— Hz</span>
+                <button type="button" class="lab-full" id="stage-full" title="Fullscreen">⛶</button>
+            </div>
         </div>
         <div class="view-tabs" id="view-tabs" role="tablist" aria-label="View"></div>
         <div class="lab-body" style="min-height:420px">
@@ -280,11 +289,11 @@
     const hz = Number(body.sensor_hz || 0);
     setRate(body.stale ? 'stale' : hz.toFixed(1) + ' Hz', body.stale);
     const det = body.person_detected ? 'target detected' : 'listening';
+    const staleNote = body.stale ? ` · ${String(body.stale_reason || 'stale').replace(/_/g, ' ')}` : '';
     setFoot(
-      `${det} · frame ${Number(body.frame_index || 0) + 1} · ${Math.round(Number(body.age_seconds || 0) * 1000)}ms old`,
+      `${det} · frame ${Number(body.frame_index || 0) + 1} · ${Math.round(Number(body.age_seconds || 0) * 1000)}ms old${staleNote}`,
       `${Number(body.configured_hz || 0).toFixed(0)} Hz configured · ${body.target_count || 0} target(s)`
     );
-    drawStage();
   }
   function drawRadar() {
     showStage('canvas');
@@ -323,14 +332,10 @@
     setFoot(`${csiBuf.length} samples in window`, body.truncated ? 'catching up…' : 'live');
     drawStage();
   }
-  function drawCsi() {
-    showStage('canvas');
-    if (!csiBuf.length) { showEmpty('Waiting for CSI packets'); return; }
-    stageEmpty.style.display = 'none';
-    const { ctx, w, h } = fitCanvas(stageCanvas);
-    ctx.clearRect(0, 0, w, h);
-    const pad = 44;
-    const tMax = csiBuf[csiBuf.length - 1][0], tMin = tMax - CSI_WINDOW_S * 1e9;
+  let csiSeriesCache = { key: '', view: '', series: [] };
+  function csiSeries() {
+    const key = csiBuf.length + ':' + (csiBuf.length ? csiBuf[csiBuf.length - 1][0] : 0);
+    if (csiSeriesCache.key === key && csiSeriesCache.view === view) return csiSeriesCache.series;
     const rxColors = ['#4fd5cd', '#f2a93b', '#a78bfa', '#f472b6'];
     let series;
     if (view === 'var') {
@@ -356,6 +361,20 @@
       for (const s of csiBuf) { if (!byRx.has(s[1])) byRx.set(s[1], []); byRx.get(s[1]).push([s[0], s[2]]); }
       series = [...byRx.entries()].map(([rx, pts]) => ({ rx, pts }));
     }
+    csiSeriesCache = { key, view, series };
+    return series;
+  }
+
+  function drawCsi() {
+    showStage('canvas');
+    if (!csiBuf.length) { showEmpty('Waiting for CSI packets'); return; }
+    stageEmpty.style.display = 'none';
+    const { ctx, w, h } = fitCanvas(stageCanvas);
+    ctx.clearRect(0, 0, w, h);
+    const pad = 44;
+    const tMax = csiBuf[csiBuf.length - 1][0], tMin = tMax - CSI_WINDOW_S * 1e9;
+    const rxColors = ['#4fd5cd', '#f2a93b', '#a78bfa', '#f472b6'];
+    const series = csiSeries();
     let vMin = Infinity, vMax = -Infinity;
     for (const s of series) for (const p of s.pts) { vMin = Math.min(vMin, p[1]); vMax = Math.max(vMax, p[1]); }
     if (!isFinite(vMin)) { showEmpty('Waiting for CSI packets'); return; }
@@ -449,6 +468,18 @@
     else showStage('tiles');
   }
 
+  // Render on the display's own cadence so high-rate feeds (CSI ~100 Hz,
+  // radar ~9 Hz) animate smoothly instead of jumping per fetch.
+  let rafId = null;
+  function startRenderLoop() {
+    if (rafId !== null) cancelAnimationFrame(rafId);
+    const tick = () => {
+      if (sensor === 'csi' || sensor === 'radar') drawStage();
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+  }
+
   function startPolling() {
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
     stageImg.src = '';
@@ -489,9 +520,17 @@
     setTimeout(verdictLoop, document.hidden ? 8000 : 2000);
   })();
 
+  $('stage-full').addEventListener('click', () => {
+    const stage = $('lab-stage');
+    if (document.fullscreenElement) document.exitFullscreen();
+    else if (stage.requestFullscreen) stage.requestFullscreen();
+  });
+  document.addEventListener('fullscreenchange', drawStage);
+
   window.addEventListener('resize', drawStage);
   renderTabs();
   startPolling();
+  startRenderLoop();
 })();
 </script>
 {% endblock %}

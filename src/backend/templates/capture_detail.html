@@ -107,6 +107,44 @@
     </section>
     {% endif %}
 
+    <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="flex items-center justify-between gap-4">
+            <div>
+                <div class="text-xs uppercase tracking-[0.22em] text-slate-500">Sensor data</div>
+                <h2 class="mt-1 text-xl font-semibold text-slate-950">Raw signals for this minute</h2>
+                <p class="mt-1 text-sm text-slate-500">Check whether presence is reflected in the sensor output. Processed X&#8209;Y tracking is on the Localization tab below.</p>
+            </div>
+            <button type="button" id="sensor-debug-reload" class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">Reload</button>
+        </div>
+
+        <div class="mt-4 grid gap-4 lg:grid-cols-2">
+            <div class="rounded-xl border border-slate-200 p-3">
+                <div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold uppercase tracking-wide text-slate-500">CSI amplitude</span><span id="csi-amp-meta" class="text-xs text-slate-400">loading…</span></div>
+                <canvas id="csi-amp" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+            </div>
+            <div class="rounded-xl border border-slate-200 p-3">
+                <div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold uppercase tracking-wide text-slate-500">CSI rolling variance</span><span id="csi-var-meta" class="text-xs text-slate-400">loading…</span></div>
+                <canvas id="csi-var" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+            </div>
+        </div>
+
+        <div class="mt-4 rounded-xl border border-slate-200 p-3">
+            <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <span class="text-xs font-semibold uppercase tracking-wide text-slate-500">Radar frame — raw range profile + range-Doppler</span>
+                <span id="radar-frame-meta" class="text-xs text-slate-400">loading…</span>
+            </div>
+            <div class="mb-3 flex flex-wrap items-center gap-4 text-xs text-slate-600">
+                <label class="flex items-center gap-2">Chunk <input id="radar-chunk" type="range" min="0" max="0" value="0" class="w-40 accent-slate-950"><span id="radar-chunk-label" class="font-mono">1/1</span></label>
+                <label class="flex items-center gap-2">Frame <input id="radar-frame" type="range" min="0" max="9" value="0" class="w-40 accent-slate-950"><span id="radar-frame-label" class="font-mono">1/10</span></label>
+                <button id="radar-play" type="button" class="rounded-lg border border-slate-300 px-2.5 py-1 font-semibold">Play</button>
+            </div>
+            <div class="grid gap-4 lg:grid-cols-2">
+                <canvas id="radar-profile" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+                <canvas id="radar-rd" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+            </div>
+        </div>
+    </section>
+
     {% if capture_metrics %}
     <section class="rounded-2xl border border-slate-800 bg-slate-950 p-5 text-slate-100 shadow-sm">
         <div class="flex items-center justify-between gap-4">
@@ -536,5 +574,230 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (renderTimer) window.clearInterval(renderTimer);
   });
 });
+</script>
+<script>
+(function () {
+  const MINUTE = {{ minute|tojson }};
+  const $ = (id) => document.getElementById(id);
+  const RX_COLORS = ['#4fd5cd', '#f2a93b', '#a78bfa', '#f472b6', '#34d399', '#f87171'];
+
+  function fit(canvas) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const r = canvas.getBoundingClientRect();
+    const w = Math.max(50, Math.round(r.width * dpr)), h = Math.max(50, Math.round(r.height * dpr));
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx, w: r.width, h: r.height };
+  }
+
+  function viridis(v) {
+    const s = [[68,1,84],[72,40,120],[62,73,137],[49,104,142],[38,130,142],[31,158,137],[53,183,121],[110,206,88],[181,222,43],[253,231,37]];
+    const p = Math.max(0, Math.min(1, v)) * (s.length - 1), i = Math.min(s.length - 2, Math.floor(p)), t = p - i;
+    return s[i].map((c, k) => Math.round(c + (s[i + 1][k] - c) * t));
+  }
+
+  function drawLines(canvas, series, opts) {
+    const { ctx, w, h } = fit(canvas);
+    ctx.clearRect(0, 0, w, h);
+    const pad = 46;
+    let vMin = Infinity, vMax = -Infinity, tMin = Infinity, tMax = -Infinity;
+    for (const s of series) for (const p of s.pts) {
+      vMin = Math.min(vMin, p[1]); vMax = Math.max(vMax, p[1]);
+      tMin = Math.min(tMin, p[0]); tMax = Math.max(tMax, p[0]);
+    }
+    if (!isFinite(vMin)) {
+      ctx.fillStyle = '#5c6f74'; ctx.font = '12px ui-monospace,monospace'; ctx.textAlign = 'center';
+      ctx.fillText(opts.empty || 'no data', w / 2, h / 2);
+      return;
+    }
+    const span = vMax - vMin || 1, tSpan = tMax - tMin || 1;
+    ctx.strokeStyle = 'rgba(148,163,184,.25)'; ctx.lineWidth = 1;
+    ctx.fillStyle = '#94a3b8'; ctx.font = '10px ui-monospace,monospace';
+    for (let i = 0; i <= 4; i++) {
+      const y = pad + (h - pad * 2) * i / 4;
+      ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(w - pad, y); ctx.stroke();
+      ctx.textAlign = 'right'; ctx.fillText((vMax - span * i / 4).toFixed(1), pad - 6, y + 3);
+    }
+    ctx.textAlign = 'center';
+    for (let i = 0; i <= 5; i++) {
+      const x = pad + (w - pad * 2) * i / 5;
+      ctx.fillText(((tMin + tSpan * i / 5) / 1e9).toFixed(1) + 's', x, h - pad + 16);
+    }
+    for (const s of series) {
+      ctx.beginPath();
+      s.pts.forEach((p, i) => {
+        const x = pad + (p[0] - tMin) / tSpan * (w - pad * 2);
+        const y = pad + (1 - (p[1] - vMin) / span) * (h - pad * 2);
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      });
+      ctx.strokeStyle = s.color; ctx.lineWidth = 1.3; ctx.stroke();
+    }
+    ctx.fillStyle = '#94a3b8'; ctx.textAlign = 'left';
+    ctx.fillText(opts.label || '', pad, pad - 12);
+  }
+
+  function drawHeat(canvas, map, xLabel, yLabel) {
+    const { ctx, w, h } = fit(canvas);
+    ctx.clearRect(0, 0, w, h);
+    const pad = 46;
+    ctx.fillStyle = '#440154'; ctx.fillRect(pad, pad, w - pad * 2, h - pad * 2);
+    if (!map || !map.values || map.values.length !== map.rows * map.columns) {
+      ctx.fillStyle = '#5c6f74'; ctx.font = '12px ui-monospace,monospace'; ctx.textAlign = 'center';
+      ctx.fillText('no data', w / 2, h / 2);
+      return;
+    }
+    const off = document.createElement('canvas');
+    off.width = map.columns; off.height = map.rows;
+    const octx = off.getContext('2d'), img = octx.createImageData(map.columns, map.rows);
+    for (let i = 0; i < map.values.length; i++) {
+      const [r, g, b] = viridis(map.values[i] / 255);
+      const row = Math.floor(i / map.columns), col = i % map.columns;
+      const p = ((map.rows - 1 - row) * map.columns + col) * 4;
+      img.data[p] = r; img.data[p + 1] = g; img.data[p + 2] = b; img.data[p + 3] = 255;
+    }
+    octx.putImageData(img, 0, 0);
+    ctx.save(); ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(off, pad, pad, w - pad * 2, h - pad * 2); ctx.restore();
+    // axes
+    const x0 = map.x[0], x1 = map.x[map.x.length - 1], y0 = map.y[0], y1 = map.y[map.y.length - 1];
+    ctx.strokeStyle = 'rgba(221,232,234,.8)'; ctx.lineWidth = 1.2;
+    ctx.strokeRect(pad, pad, w - pad * 2, h - pad * 2);
+    ctx.fillStyle = '#aebdc1'; ctx.font = '11px ui-monospace,monospace'; ctx.textAlign = 'center';
+    for (let i = 0; i <= 5; i++) ctx.fillText((x0 + (x1 - x0) * i / 5).toFixed(1), pad + (w - pad * 2) * i / 5, h - pad + 18);
+    ctx.textAlign = 'right';
+    for (let i = 0; i <= 4; i++) ctx.fillText((y0 + (y1 - y0) * i / 4).toFixed(1), pad - 9, h - pad - (h - pad * 2) * i / 4 + 4);
+    ctx.textAlign = 'center';
+    ctx.fillText(xLabel, w / 2, h - 8);
+    ctx.save(); ctx.translate(16, h / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(yLabel, 0, 0); ctx.restore();
+  }
+
+  // ---- CSI -----------------------------------------------------------------
+  let csiSamples = [];
+  async function loadCsi() {
+    $('csi-amp-meta').textContent = 'loading…';
+    $('csi-var-meta').textContent = 'loading…';
+    try {
+      const r = await fetch(`/api/captures/${encodeURIComponent(MINUTE)}/csi/series`, { cache: 'no-store' });
+      const body = await r.json();
+      if (body.status !== 'success' || !body.samples.length) {
+        $('csi-amp-meta').textContent = 'no CSI data';
+        $('csi-var-meta').textContent = 'no CSI data';
+        drawLines($('csi-amp'), [], { empty: 'no CSI samples this minute' });
+        drawLines($('csi-var'), [], { empty: 'no CSI samples this minute' });
+        return;
+      }
+      csiSamples = body.samples;
+      const byRx = new Map();
+      for (const s of csiSamples) { if (!byRx.has(s[1])) byRx.set(s[1], []); byRx.get(s[1]).push(s); }
+      const ampSeries = [...byRx.entries()].map(([rx, arr]) => ({
+        color: RX_COLORS[rx % RX_COLORS.length],
+        pts: arr.map(s => [s[0], s[2]]),
+      }));
+      drawLines($('csi-amp'), ampSeries, { label: 'mean subcarrier amplitude vs time' });
+      // rolling std over a 1 s trailing window per receiver
+      const WIN = 1e9;
+      const varSeries = [...byRx.entries()].map(([rx, arr]) => {
+        const out = [], vals = [];
+        let lo = 0;
+        for (let i = 0; i < arr.length; i++) {
+          vals.push(arr[i][2]);
+          while (arr[i][0] - arr[lo][0] > WIN) { vals.shift(); lo++; }
+          const m = vals.reduce((a, b) => a + b, 0) / vals.length;
+          out.push([arr[i][0], Math.sqrt(vals.reduce((a, b) => a + (b - m) * (b - m), 0) / vals.length)]);
+        }
+        return { color: RX_COLORS[rx % RX_COLORS.length], pts: out };
+      });
+      drawLines($('csi-var'), varSeries, { label: 'rolling std · 1 s window — motion shows as a rise' });
+      $('csi-amp-meta').textContent = `${body.sample_count} samples · ${body.receivers} rx`;
+      $('csi-var-meta').textContent = `${body.sample_count} samples · ${body.receivers} rx`;
+    } catch (e) {
+      $('csi-amp-meta').textContent = String(e).slice(0, 60);
+      $('csi-var-meta').textContent = String(e).slice(0, 60);
+    }
+  }
+
+  // ---- radar ---------------------------------------------------------------
+  const radarChunkSlider = $('radar-chunk'), radarFrameSlider = $('radar-frame');
+  let radarTimer = null, radarChunkCount = 0, radarFrameCount = 10, radarReq = 0;
+
+  async function loadRadarFrame() {
+    const token = ++radarReq;
+    const chunk = Number(radarChunkSlider.value), frame = Number(radarFrameSlider.value);
+    $('radar-chunk-label').textContent = `${chunk + 1}/${radarChunkCount || '?'}`;
+    $('radar-frame-label').textContent = `${frame + 1}/${radarFrameCount}`;
+    try {
+      const r = await fetch(`/api/captures/${encodeURIComponent(MINUTE)}/radar/frame?chunk=${chunk}&frame=${frame}`, { cache: 'no-store' });
+      const body = await r.json();
+      if (token !== radarReq) return;
+      if (body.status !== 'success') {
+        $('radar-frame-meta').textContent = body.message || 'no frame';
+        return;
+      }
+      radarChunkCount = body.chunk_count;
+      radarFrameCount = body.frame_count;
+      radarChunkSlider.max = String(Math.max(0, radarChunkCount - 1));
+      radarFrameSlider.max = String(Math.max(0, radarFrameCount - 1));
+      $('radar-chunk-label').textContent = `${chunk + 1}/${radarChunkCount}`;
+      $('radar-frame-label').textContent = `${frame + 1}/${radarFrameCount}`;
+      $('radar-frame-meta').textContent = `seq ${body.seq} · chunk ${chunk + 1}/${radarChunkCount} · frame ${frame + 1}/${radarFrameCount}`;
+      drawRangeProfile(body.range_profile);
+      drawHeat($('radar-rd'), body.range_doppler, 'Velocity (m/s)', 'Range (m)');
+    } catch (e) {
+      if (token === radarReq) $('radar-frame-meta').textContent = String(e).slice(0, 60);
+    }
+  }
+
+  function drawRangeProfile(prof) {
+    const canvas = $('radar-profile');
+    const { ctx, w, h } = fit(canvas);
+    ctx.clearRect(0, 0, w, h);
+    const pad = 46;
+    let vMin = Infinity, vMax = -Infinity;
+    for (const s of prof.series) for (const v of s) { vMin = Math.min(vMin, v); vMax = Math.max(vMax, v); }
+    if (!isFinite(vMin)) { ctx.fillStyle = '#5c6f74'; ctx.textAlign = 'center'; ctx.fillText('no data', w / 2, h / 2); return; }
+    const span = vMax - vMin || 1;
+    const x0 = prof.x[0], x1 = prof.x[prof.x.length - 1], xSpan = x1 - x0 || 1;
+    ctx.strokeStyle = 'rgba(148,163,184,.25)'; ctx.lineWidth = 1;
+    ctx.fillStyle = '#94a3b8'; ctx.font = '10px ui-monospace,monospace';
+    for (let i = 0; i <= 4; i++) {
+      const y = pad + (h - pad * 2) * i / 4;
+      ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(w - pad, y); ctx.stroke();
+      ctx.textAlign = 'right'; ctx.fillText((vMax - span * i / 4).toFixed(0), pad - 6, y + 3);
+    }
+    ctx.textAlign = 'center';
+    for (let i = 0; i <= 5; i++) ctx.fillText((x0 + xSpan * i / 5).toFixed(1) + 'm', pad + (w - pad * 2) * i / 5, h - pad + 16);
+    prof.series.forEach((s, rx) => {
+      ctx.beginPath();
+      s.forEach((v, i) => {
+        const x = pad + (prof.x[i] - x0) / xSpan * (w - pad * 2);
+        const y = pad + (1 - (v - vMin) / span) * (h - pad * 2);
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      });
+      ctx.strokeStyle = RX_COLORS[rx % RX_COLORS.length]; ctx.lineWidth = 1.3; ctx.stroke();
+    });
+    ctx.fillStyle = '#94a3b8'; ctx.textAlign = 'left';
+    ctx.fillText(`range profile (dB) · RX0–${prof.series.length - 1} · peak = reflection at that range`, pad, pad - 12);
+  }
+
+  function stopRadarPlay() { if (radarTimer) { clearInterval(radarTimer); radarTimer = null; } $('radar-play').textContent = 'Play'; }
+  chunkSlider.addEventListener('input', () => { stopRadarPlay(); loadRadarFrame(); });
+  frameSlider.addEventListener('input', () => { stopRadarPlay(); loadRadarFrame(); });
+  $('radar-play').addEventListener('click', () => {
+    if (radarTimer) { stopRadarPlay(); return; }
+    $('radar-play').textContent = 'Pause';
+    radarTimer = setInterval(() => {
+  radarC   let f = Number(frameSlider.value) + 1, c = Number(chunkSlider.value);
+    darFra if (f > Number(frameSlider.max)) { f = 0; c = Math.min(Number(chunkSlider.max), c + 1); chunkSlider.value = String(c); }
+      frameSlider.value = String(f);
+      loadRadarFrame();
+    }, 200);
+  });
+  $('sensor-debug-reladdarFra').addEventListener('click', () radarC> { loadCsi(); loadRadarFrame(); });
+  window.addEventListradarFner('resize', () => { if (csiSamples.length) lradarCadCsi(); loadRadarFrame()radarC });
+radarF
+  loadCsi();
+  loadRadarFrame();
+})();
 </script>
 {% endblock %}
