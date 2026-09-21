@@ -850,9 +850,10 @@
   const SENSOR_KEY = { radar: 'dreamhat_radar', csi: 'esp32_csi', camera: 'usb_camera', sensehat: 'sense_hat' };
   function sensorDetected(key, s) {
     if (!s) return false;
-    // spidev nodes and the collector service exist on every installed Pi —
-    // only recent radar samples prove the HAT is really attached.
-    if (key === 'dreamhat_radar') return !!(s.chip_online || s.online);
+    // ever_seen = the device has produced radar samples at some point —
+    // proves the HAT is attached even while collection is paused, without
+    // false-positiving on SPI-only devices that never captured radar data.
+    if (key === 'dreamhat_radar') return !!(s.chip_online || s.online || s.ever_seen);
     if (key === 'esp32_csi') return !!(s.online || (s.devices || []).length);
     return !!(s.online || s.available);
   }

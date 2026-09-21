@@ -187,13 +187,23 @@ def detect_dreamhat_radar() -> Dict[str, Any]:
     # lines. Probing the chip from the web process races the collector and can
     # leave GPIO12/GPIO25 busy, so inventory detection is intentionally passive.
     chip_online = False
+    ever_seen = False
     try:
         data_root = Path(Config.CAPTURE_DATA_DIR).expanduser()
         manifests = sorted(data_root.rglob("manifest.json"), key=lambda item: item.stat().st_mtime, reverse=True)
-        if manifests and time.time() - manifests[0].stat().st_mtime < 180:
-            manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+        # Any manifest with radar samples — regardless of age — proves the
+        # HAT was attached at some point; only the freshest proves it's live.
+        for candidate in manifests[:25]:
+            try:
+                manifest = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
             radar = (manifest.get("outputs") or {}).get("radar") or {}
-            chip_online = int(radar.get("sample_count") or 0) > 0
+            if int(radar.get("sample_count") or 0) > 0:
+                ever_seen = True
+                if time.time() - candidate.stat().st_mtime < 180:
+                    chip_online = True
+                break
     except Exception:
         chip_online = False
     error = None if chip_online else "no recent radar samples"
@@ -220,6 +230,7 @@ def detect_dreamhat_radar() -> Dict[str, Any]:
         "spi_available": spi_available,
         "service_active": service_active,
         "chip_online": chip_online,
+        "ever_seen": ever_seen,
         "error": error,
     }
 
