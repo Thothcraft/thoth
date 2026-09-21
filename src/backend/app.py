@@ -80,6 +80,7 @@ from backend.capture_container import (
     radar_bytes as container_radar_bytes,
     read_camera_frame,
     read_capture_metadata,
+    read_sensor_window,
 )
 from backend.model_runtime import (
     ModelRegistry,
@@ -2028,7 +2029,18 @@ def api_sensor_inventory():
 
 @app.route('/api/internal/capture-chunk', methods=['POST'])
 def api_internal_capture_chunk():
-    return jsonify({'success': False, 'message': 'Built-in chunk predictions have been removed'}), 410
+    """Relay a collector live-update (per-second signal features) to the brain.
+
+    Local-only: the collector subprocess POSTs here; we forward to the brain's
+    live-chunks feed via the authenticated device manager.
+    """
+    if request.remote_addr not in {'127.0.0.1', '::1', None}:
+        return jsonify({'success': False, 'message': 'Local requests only'}), 403
+    payload = request.get_json(silent=True) or {}
+    if not payload.get('minute'):
+        return jsonify({'success': False, 'message': 'minute is required'}), 400
+    ok = device_manager.publish_capture_chunk(payload)
+    return jsonify({'success': ok}), (200 if ok else 202)
 
 
 @app.route('/api/internal/home-assistant/publish', methods=['POST'])
@@ -2691,6 +2703,61 @@ def api_capture_csi_data(minute):
     return jsonify({'status': 'success', 'minute': minute, 'data': data})
 
 
+@app.route('/api/captures/<minute>/sensor/<sensor>')
+def api_capture_sensor_window(minute, sensor):
+    """Return a time-windowed slice of a sensor's resampled grid (plan §6).
+
+    ``t0``/``t1`` are seconds offset into the minute (preferred) or absolute
+    unix-ns. The response carries the uniform grid timestamps, the ``real``
+    mask (measured vs held/interpolated), and either interpolated values
+    (csi/sense) or held source indices (radar/camera).
+    """
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        abort(404, description='Minute folder not found')
+    files = capture_files(minute_dir)
+    container = files.get('container')
+    if not container or not container.exists():
+        abort(404, description='No synchronized capture container available')
+
+    def _bound(name: str):
+        raw = request.args.get(name)
+        if raw in (None, ''):
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            abort(400, description=f'Invalid {name} bound')
+        return value
+
+    t0 = _bound('t0')
+    t1 = _bound('t1')
+    # Values below ~1e12 are treated as seconds offset into the minute; larger
+    # values are already absolute unix nanoseconds.
+    origin_ns = 0
+    if (t0 is not None and t0 < 1e12) or (t1 is not None and t1 < 1e12):
+        try:
+            meta = read_capture_metadata(container)
+            origin_ns = int((meta.get('timebase') or {}).get('capture_started_unix_ns') or 0)
+        except Exception:
+            origin_ns = 0
+        if t0 is not None and t0 < 1e12:
+            t0 = origin_ns + int(t0 * 1e9)
+        if t1 is not None and t1 < 1e12:
+            t1 = origin_ns + int(t1 * 1e9)
+    t0_ns = int(t0) if t0 is not None else None
+    t1_ns = int(t1) if t1 is not None else None
+
+    try:
+        window = read_sensor_window(container, sensor, t0_ns=t0_ns, t1_ns=t1_ns)
+    except KeyError:
+        abort(404, description=f'Unsupported sensor: {sensor}')
+    except Exception as exc:
+        logger.exception(f'Failed to read {sensor} window for {minute}: {exc}')
+        abort(500, description=str(exc))
+    return jsonify({'status': 'success', 'minute': minute, 'window': window})
+
+
 @app.route('/api/captures/<minute>/radar/plot/<plot>')
 def api_capture_radar_plot(minute, plot):
     """Render a radar plot for a saved minute."""
@@ -3027,6 +3094,142 @@ def api_capture_radar_snr(minute):
             except Exception:
                 continue
     return jsonify({'status': 'success', 'minute': minute, 'frames': len(series), 'snr': series})
+
+
+def _sense_rows(path):
+    """Parse sense_hat.jsonl into compact per-sample dicts."""
+    rows = []
+    if not path or not path.exists():
+        return rows
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                acc = row.get('acceleration') or {}
+                gyro = row.get('gyroscope') or {}
+                orient = row.get('orientation') or {}
+                rows.append({
+                    't': int(row.get('monotonic_ns') or 0),
+                    'temp': row.get('temperature_c'),
+                    'hum': row.get('humidity_percent'),
+                    'pres': row.get('pressure_mbar'),
+                    'ax': acc.get('x'), 'ay': acc.get('y'), 'az': acc.get('z'),
+                    'gx': gyro.get('x'), 'gy': gyro.get('y'), 'gz': gyro.get('z'),
+                    'pitch': orient.get('pitch'), 'roll': orient.get('roll'), 'yaw': orient.get('yaw'),
+                })
+    except OSError:
+        pass
+    return rows
+
+
+def _csi_rows(path, rx_index):
+    """Parse one wifi_csi csv into [monotonic_ns, rx, mean_amp] rows."""
+    rows = []
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as handle:
+            for line in handle:
+                if 'CSI_DATA' not in line:
+                    continue
+                cells = _split_csv_line(line)
+                if len(cells) < 4:
+                    continue
+                try:
+                    t_ns = int(cells[1])
+                except (TypeError, ValueError):
+                    t_ns = 0
+                amp = _csi_mean_amplitude(cells[3])
+                if amp is not None:
+                    rows.append([t_ns, rx_index, round(amp, 3)])
+    except OSError:
+        pass
+    return rows
+
+
+@app.route('/api/captures/<minute>/chunk/<int:chunk_index>')
+def api_capture_chunk(minute, chunk_index):
+    """Per-sensor frame data for one chunk so the minute page can play a single
+    chunk the way the live page plays a sensor.
+
+    The minute is divided into ``chunk_count`` equal slices. Radar maps chunk n
+    to ``radar_bins[n]`` (10 frames each); camera/CSI/sense are continuous and
+    are sliced by index fraction, which matches how they were captured.
+    """
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        return jsonify({'status': 'error', 'message': 'Minute folder not found'}), 404
+    files = capture_files(minute_dir)
+    detail = minute_summary(minute_dir)
+    progress = detail.get('progress') or {}
+    prog_chunks = progress.get('chunks') or []
+    manifest = detail.get('manifest') or {}
+    try:
+        chunk_seconds = float(manifest.get('chunk_seconds') or 10.0)
+    except (TypeError, ValueError):
+        chunk_seconds = 10.0
+
+    radar_bins = files.get('radar_bins') or []
+    camera_images = files.get('camera_images') or []
+    sense_path = files.get('sense_hat')
+    csi_paths = [p for p in (files.get('csi_csvs') or []) if p and p.exists()]
+    if not csi_paths:
+        single = files.get('csi_csv') or files.get('csi_timestamped')
+        if single and single.exists():
+            csi_paths = [single]
+
+    # Chunk count: prefer the manifest/progress model, fall back to data.
+    chunk_count = max(len(prog_chunks), len(radar_bins), 1)
+    if chunk_index < 0 or chunk_index >= chunk_count:
+        return jsonify({'status': 'error', 'message': f'chunk must be 0..{chunk_count - 1}', 'chunk_count': chunk_count}), 400
+
+    def _slice(total):
+        per = int(math.ceil(total / float(chunk_count))) if chunk_count else total
+        start = min(total, chunk_index * per)
+        end = min(total, start + per)
+        return start, end
+
+    # Radar: chunk n -> radar_bins[n], count its frames.
+    radar_frames = 0
+    if chunk_index < len(radar_bins):
+        for _seq, _raw in _iter_radar_frames(radar_bins[chunk_index]):
+            radar_frames += 1
+
+    # Camera: even index slice across the minute.
+    cam_start, cam_end = _slice(len(camera_images))
+    camera = {'start': cam_start, 'count': max(0, cam_end - cam_start), 'total': len(camera_images)}
+
+    # CSI: per-rx index slice.
+    csi_samples = []
+    for rx_index, path in enumerate(csi_paths):
+        rows = _csi_rows(path, rx_index)
+        s, e = _slice(len(rows))
+        csi_samples.extend(rows[s:e])
+    csi_samples.sort(key=lambda r: r[0])
+
+    # Sense HAT: index slice of the jsonl rows.
+    sense_rows = _sense_rows(sense_path)
+    ss, se = _slice(len(sense_rows))
+    sense = sense_rows[ss:se]
+
+    prog = prog_chunks[chunk_index] if chunk_index < len(prog_chunks) else {}
+    return jsonify({
+        'status': 'success',
+        'minute': minute,
+        'chunk': chunk_index,
+        'chunk_count': chunk_count,
+        'chunk_seconds': chunk_seconds,
+        'state': prog.get('state'),
+        'prediction': prog.get('prediction') or prog.get('classification'),
+        'radar': {'frames': radar_frames, 'available': chunk_index < len(radar_bins)},
+        'camera': camera,
+        'csi': {'samples': csi_samples, 'receivers': len(csi_paths)},
+        'sense': sense,
+    })
 
 
 @app.route('/api/captures/<minute>/upload', methods=['POST'])

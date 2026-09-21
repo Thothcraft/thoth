@@ -115,67 +115,101 @@
         <div class="flex items-center justify-between gap-4">
             <div>
                 <div class="text-xs uppercase tracking-[0.22em] text-slate-500">Sensor data</div>
-                <h2 class="mt-1 text-xl font-semibold text-slate-950">Raw signals for this minute</h2>
-                <p class="mt-1 text-sm text-slate-500">Check whether presence is reflected in the sensor output. Processed X&#8209;Y tracking is on the Localization tab below.</p>
+                <h2 class="mt-1 text-xl font-semibold text-slate-950">Chunk player</h2>
+                <p class="mt-1 text-sm text-slate-500">Pick a chunk and a sensor, then scrub or play that chunk's frames — like the live page.</p>
             </div>
             <button type="button" id="sensor-debug-reload" class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">Reload</button>
         </div>
 
-        <div class="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs text-slate-600">
-            <label class="flex items-center gap-2" title="Rolling-variance window — saved to capture settings and reused for processed minutes">
-                <span class="font-semibold uppercase tracking-wide text-slate-500">Rolling window</span>
-                <input id="csi-roll" type="range" min="0.1" max="5" step="0.1" value="0.5" class="w-32 accent-slate-950">
-                <span id="csi-roll-val" class="font-mono">0.5 s</span>
-            </label>
-            <label class="flex items-center gap-2" title="Fixed Y-axis range for the line plots (leave blank for auto)">
-                <span class="font-semibold uppercase tracking-wide text-slate-500">Y-axis</span>
-                <input id="y-min" type="number" step="any" placeholder="auto" class="w-16 rounded border border-slate-300 px-1.5 py-0.5 font-mono">
-                <span>to</span>
-                <input id="y-max" type="number" step="any" placeholder="auto" class="w-16 rounded border border-slate-300 px-1.5 py-0.5 font-mono">
-            </label>
-            <label class="flex items-center gap-2" title="Time window shown for the CSI plots">
-                <span class="font-semibold uppercase tracking-wide text-slate-500">Window</span>
-                <select id="csi-window" class="rounded border border-slate-300 px-1.5 py-0.5 font-mono">
-                    <option value="0" selected>full minute</option><option value="10">10 s</option>
-                    <option value="20">20 s</option><option value="30">30 s</option>
-                </select>
-            </label>
+        <!-- chunk selector -->
+        <div class="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <button id="chunk-prev" type="button" class="h-8 w-8 rounded-lg border border-slate-300 bg-white font-bold">&#8249;</button>
+            <input id="chunk-sel" type="range" min="0" max="0" value="0" class="min-w-0 flex-1 accent-slate-950">
+            <button id="chunk-next" type="button" class="h-8 w-8 rounded-lg border border-slate-300 bg-white font-bold">&#8250;</button>
+            <span id="chunk-label" class="font-mono text-xs text-slate-600">Chunk 1/1</span>
+            <span id="chunk-state" class="rounded-full bg-slate-200 px-2.5 py-0.5 text-xs font-semibold text-slate-700">—</span>
         </div>
-        <div class="mt-4 grid gap-4 lg:grid-cols-2">
-            <div class="rounded-xl border border-slate-200 p-3">
-                <div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold uppercase tracking-wide text-slate-500">CSI amplitude</span><span id="csi-amp-meta" class="text-xs text-slate-400">loading…</span></div>
-                <canvas id="csi-amp" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
-            </div>
-            <div class="rounded-xl border border-slate-200 p-3">
-                <div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold uppercase tracking-wide text-slate-500">CSI rolling variance</span><span id="csi-var-meta" class="text-xs text-slate-400">loading…</span></div>
-                <canvas id="csi-var" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+
+        <!-- sensor tabs -->
+        <div class="mt-4 flex flex-wrap gap-2" id="sensor-tabs">
+            <button data-sensor="radar" type="button" class="sensor-tab rounded-lg border border-slate-900 bg-slate-900 px-3 py-1.5 text-sm font-medium text-white">Radar</button>
+            <button data-sensor="camera" type="button" class="sensor-tab rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">Camera</button>
+            <button data-sensor="csi" type="button" class="sensor-tab rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">CSI</button>
+            <button data-sensor="sense" type="button" class="sensor-tab rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">Sense HAT</button>
+        </div>
+
+        <!-- shared frame controls -->
+        <div class="mt-4 flex flex-wrap items-center gap-4 text-xs text-slate-600">
+            <button id="frame-play" type="button" class="rounded-lg border border-slate-300 px-3 py-1.5 font-semibold">Play</button>
+            <label class="flex flex-1 min-w-40 items-center gap-2">Frame
+                <input id="frame-sel" type="range" min="0" max="0" value="0" class="min-w-0 flex-1 accent-slate-950">
+                <span id="frame-label" class="font-mono">1/1</span>
+            </label>
+            <span id="frame-meta" class="text-xs text-slate-400">—</span>
+        </div>
+
+        <!-- radar panel -->
+        <div id="panel-radar" class="mt-4">
+            <div class="grid gap-4 lg:grid-cols-2">
+                <div class="rounded-xl border border-slate-200 p-3">
+                    <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Range profile (raw)</div>
+                    <canvas id="radar-profile" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+                </div>
+                <div class="rounded-xl border border-slate-200 p-3">
+                    <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Range–Doppler</div>
+                    <canvas id="radar-rd" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+                </div>
+                <div class="rounded-xl border border-slate-200 p-3">
+                    <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Range–Azimuth</div>
+                    <canvas id="radar-ra" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+                </div>
+                <div class="rounded-xl border border-slate-200 p-3">
+                    <div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold uppercase tracking-wide text-slate-500">Detection SNR (minute)</span><span id="radar-snr-meta" class="text-xs text-slate-400">—</span></div>
+                    <canvas id="radar-snr" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+                </div>
             </div>
         </div>
 
-        <div class="mt-4 grid gap-4 lg:grid-cols-2">
+        <!-- camera panel -->
+        <div id="panel-camera" class="mt-4 hidden">
             <div class="rounded-xl border border-slate-200 p-3">
-                <div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold uppercase tracking-wide text-slate-500">Range–Azimuth</span><span id="radar-ra-meta" class="text-xs text-slate-400">—</span></div>
-                <canvas id="radar-ra" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
-            </div>
-            <div class="rounded-xl border border-slate-200 p-3">
-                <div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold uppercase tracking-wide text-slate-500">Detection SNR (whole minute)</span><span id="radar-snr-meta" class="text-xs text-slate-400">loading…</span></div>
-                <canvas id="radar-snr" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+                <img id="cp-camera-img" class="w-full rounded-lg bg-black object-contain" style="max-height:60vh" alt="camera frame">
             </div>
         </div>
 
-        <div class="mt-4 rounded-xl border border-slate-200 p-3">
-            <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-                <span class="text-xs font-semibold uppercase tracking-wide text-slate-500">Radar frame — raw range profile + range-Doppler</span>
-                <span id="radar-frame-meta" class="text-xs text-slate-400">loading…</span>
-            </div>
-            <div class="mb-3 flex flex-wrap items-center gap-4 text-xs text-slate-600">
-                <label class="flex items-center gap-2">Chunk <input id="radar-chunk" type="range" min="0" max="0" value="0" class="w-40 accent-slate-950"><span id="radar-chunk-label" class="font-mono">1/1</span></label>
-                <label class="flex items-center gap-2">Frame <input id="radar-frame" type="range" min="0" max="9" value="0" class="w-40 accent-slate-950"><span id="radar-frame-label" class="font-mono">1/10</span></label>
-                <button id="radar-play" type="button" class="rounded-lg border border-slate-300 px-2.5 py-1 font-semibold">Play</button>
+        <!-- csi panel -->
+        <div id="panel-csi" class="mt-4 hidden">
+            <div class="mb-3 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs text-slate-600">
+                <label class="flex items-center gap-2" title="Rolling-variance window — saved to capture settings">
+                    <span class="font-semibold uppercase tracking-wide text-slate-500">Rolling window</span>
+                    <input id="csi-roll" type="range" min="0.1" max="5" step="0.1" value="0.5" class="w-32 accent-slate-950">
+                    <span id="csi-roll-val" class="font-mono">0.5 s</span>
+                </label>
+                <label class="flex items-center gap-2" title="Fixed Y-axis range (blank = auto)">
+                    <span class="font-semibold uppercase tracking-wide text-slate-500">Y-axis</span>
+                    <input id="y-min" type="number" step="any" placeholder="auto" class="w-16 rounded border border-slate-300 px-1.5 py-0.5 font-mono">
+                    <span>to</span>
+                    <input id="y-max" type="number" step="any" placeholder="auto" class="w-16 rounded border border-slate-300 px-1.5 py-0.5 font-mono">
+                </label>
             </div>
             <div class="grid gap-4 lg:grid-cols-2">
-                <canvas id="radar-profile" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
-                <canvas id="radar-rd" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+                <div class="rounded-xl border border-slate-200 p-3">
+                    <div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold uppercase tracking-wide text-slate-500">CSI amplitude</span><span id="csi-amp-meta" class="text-xs text-slate-400">—</span></div>
+                    <canvas id="csi-amp" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+                </div>
+                <div class="rounded-xl border border-slate-200 p-3">
+                    <div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold uppercase tracking-wide text-slate-500">CSI rolling variance</span><span id="csi-var-meta" class="text-xs text-slate-400">—</span></div>
+                    <canvas id="csi-var" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- sense panel -->
+        <div id="panel-sense" class="mt-4 hidden">
+            <div id="sense-cards" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"></div>
+            <div class="mt-4 rounded-xl border border-slate-200 p-3">
+                <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Orientation (pitch / roll / yaw)</div>
+                <canvas id="sense-orient" class="h-48 w-full rounded-lg bg-slate-950"></canvas>
             </div>
         </div>
     </section>

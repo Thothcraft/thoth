@@ -98,6 +98,119 @@ def _second_index(
     return max(0, min(second_count - 1, int(value)))
 
 
+def _grid_ns(origin_unix_ns: int, duration: float, hz: float) -> np.ndarray:
+    """Uniform sample grid for one sensor at ``hz`` over ``duration`` seconds."""
+    count = max(0, int(round(float(hz) * float(duration))))
+    if count <= 0 or hz <= 0:
+        return np.zeros(0, dtype=np.int64)
+    step = int(round(NANOSECONDS / float(hz)))
+    return origin_unix_ns + np.arange(count, dtype=np.int64) * step
+
+
+def _grid_time_ns(mono_ns: list[int], unix_ns: list[int], origin_mono_ns: int, origin_unix_ns: int) -> np.ndarray:
+    """Best-available sample time on the unix grid timebase.
+
+    Monotonic timestamps are precise but on CLOCK_MONOTONIC; shifting them by
+    the capture origin puts them on the same axis as the unix grid. Falls back
+    to the (coarser) unix estimate when no monotonic value exists.
+    """
+    out = np.asarray(unix_ns, dtype=np.int64)
+    if origin_mono_ns > 0 and origin_unix_ns > 0:
+        mono = np.asarray(mono_ns, dtype=np.int64)
+        valid = mono > 0
+        out = np.where(valid, mono - origin_mono_ns + origin_unix_ns, out)
+    return out
+
+
+def _nearest_source_indices(grid_ns: np.ndarray, source_ns: np.ndarray, half_period_ns: int) -> tuple[np.ndarray, np.ndarray]:
+    """Map each grid tick to the nearest source sample index + a real mask.
+
+    Returns ``(source_index, is_real)`` where ``source_index`` holds the nearest
+    measured sample (nearest-neighbour hold) and ``is_real`` is True only when a
+    real sample landed within ``half_period_ns`` of the grid tick.
+    """
+    count = len(grid_ns)
+    source_index = np.zeros(count, dtype=np.int32)
+    is_real = np.zeros(count, dtype=bool)
+    if count == 0 or len(source_ns) == 0:
+        return source_index, is_real
+    order = np.argsort(source_ns)
+    sorted_ns = source_ns[order]
+    pos = np.searchsorted(sorted_ns, grid_ns)
+    left = np.clip(pos - 1, 0, len(sorted_ns) - 1)
+    right = np.clip(pos, 0, len(sorted_ns) - 1)
+    choose_right = (sorted_ns[right] - grid_ns) < (grid_ns - sorted_ns[left])
+    nearest_sorted = np.where(choose_right, right, left)
+    nearest = order[nearest_sorted]
+    distance = np.abs(sorted_ns[nearest_sorted] - grid_ns)
+    source_index = nearest.astype(np.int32)
+    is_real = distance <= half_period_ns
+    return source_index, is_real
+
+
+def _interp_channels(grid_ns: np.ndarray, source_ns: np.ndarray, values: np.ndarray, half_period_ns: int) -> tuple[np.ndarray, np.ndarray]:
+    """Linearly interpolate each column of ``values`` onto ``grid_ns``.
+
+    ``values`` is ``[n, channels]`` float32; returns ``(grid_values, is_real)``
+    with ``grid_values`` shaped ``[len(grid_ns), channels]``. Grid ticks with a
+    real sample within ``half_period_ns`` are marked real; the rest are held /
+    interpolated and flagged False so consumers can weight them honestly.
+    """
+    channels = values.shape[1] if values.ndim == 2 else 0
+    count = len(grid_ns)
+    grid_values = np.zeros((count, channels), dtype=np.float32)
+    is_real = np.zeros(count, dtype=bool)
+    if count == 0 or channels == 0 or len(source_ns) == 0:
+        return grid_values, is_real
+    order = np.argsort(source_ns)
+    sorted_ns = source_ns[order].astype(np.float64)
+    sorted_values = values[order]
+    grid_f = grid_ns.astype(np.float64)
+    for channel in range(channels):
+        column = sorted_values[:, channel].astype(np.float64)
+        valid = np.isfinite(column)
+        if not valid.any():
+            continue
+        grid_values[:, channel] = np.interp(grid_f, sorted_ns[valid], column[valid]).astype(np.float32)
+    _, is_real = _nearest_source_indices(grid_ns, source_ns, half_period_ns)
+    # Interpolation is only meaningful inside the measured span.
+    is_real &= (grid_ns >= sorted_ns[0]) & (grid_ns <= sorted_ns[-1])
+    return grid_values, is_real
+
+
+# Fixed channel order for the resampled Sense HAT grid. Rows missing a channel
+# contribute NaN, which _interp_channels skips per channel.
+SENSE_GRID_CHANNELS = (
+    "temperature_c", "humidity_percent", "pressure_mbar",
+    "accel_x", "accel_y", "accel_z",
+    "gyro_x", "gyro_y", "gyro_z",
+    "compass_x", "compass_y", "compass_z",
+    "orientation_pitch", "orientation_roll", "orientation_yaw",
+)
+
+
+def _sense_row_to_vector(row: dict[str, Any]) -> np.ndarray:
+    def num(value: object) -> float:
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return float("nan")
+
+    accel = row.get("acceleration") if isinstance(row.get("acceleration"), dict) else {}
+    gyro = row.get("gyroscope") if isinstance(row.get("gyroscope"), dict) else {}
+    compass = row.get("compass") if isinstance(row.get("compass"), dict) else {}
+    orient = row.get("orientation") if isinstance(row.get("orientation"), dict) else {}
+    return np.asarray([
+        num(row.get("temperature_c")),
+        num(row.get("humidity_percent")),
+        num(row.get("pressure_mbar")),
+        num(accel.get("x")), num(accel.get("y")), num(accel.get("z")),
+        num(gyro.get("x")), num(gyro.get("y")), num(gyro.get("z")),
+        num(compass.get("x")), num(compass.get("y")), num(compass.get("z")),
+        num(orient.get("pitch")), num(orient.get("roll")), num(orient.get("yaw")),
+    ], dtype=np.float32)
+
+
 def _manifest_without_host_paths(manifest: dict[str, Any]) -> dict[str, Any]:
     """Copy a manifest while replacing absolute capture paths with basenames."""
     def clean(value: object, key: str = "") -> object:
@@ -288,6 +401,118 @@ def build_capture_container(
     csi_payload_data, csi_offsets = _pack_blobs(csi_payloads)
     sense_payload_data, sense_offsets = _pack_blobs(sense_payloads)
 
+    # ---- Fixed-Hz resampled grids + *_real masks (plan §3.2) ----
+    # Each sensor is resampled onto a uniform time grid at its target rate so
+    # models and the UI can trust a uniform sample count. Radar/camera use
+    # nearest-neighbour hold (not linearly interpolable); CSI amplitude and
+    # sense channels use per-channel np.interp. A *_real mask marks measured
+    # vs held/interpolated samples.
+    capture_settings = manifest.get("capture_settings") if isinstance(manifest.get("capture_settings"), dict) else {}
+    radar_hz = float(capture_settings.get("radar_hz") or 10.0)
+    csi_hz = float(capture_settings.get("csi_hz") or 100.0)
+    camera_hz = float(capture_settings.get("camera_fps") or capture_settings.get("camera_hz") or 1.0)
+    sense_hz = float(capture_settings.get("sense_hz") or 5.0)
+
+    radar_grid_ts = _grid_ns(origin_unix_ns, duration, radar_hz)
+    radar_source_ns = _grid_time_ns(radar_mono, radar_unix, origin_monotonic_ns, origin_unix_ns)
+    radar_grid_source, radar_real = _nearest_source_indices(
+        radar_grid_ts, radar_source_ns, int(NANOSECONDS / max(radar_hz, 0.001) / 2)
+    )
+
+    camera_grid_ts = _grid_ns(origin_unix_ns, duration, camera_hz)
+    camera_present_arr = np.asarray([bool(item[0]) for item in camera_by_second], dtype=bool)
+    camera_unix_arr = np.asarray([item[1] for item in camera_by_second], dtype=np.int64)
+    camera_src_ns = camera_unix_arr[camera_present_arr]
+    camera_src_idx = np.flatnonzero(camera_present_arr)
+    camera_grid_source = np.zeros(len(camera_grid_ts), dtype=np.int32)
+    camera_real = np.zeros(len(camera_grid_ts), dtype=bool)
+    if len(camera_src_ns):
+        nearest, camera_real = _nearest_source_indices(
+            camera_grid_ts, camera_src_ns, int(NANOSECONDS / max(camera_hz, 0.001) / 2)
+        )
+        camera_grid_source = camera_src_idx[nearest].astype(np.int32)
+
+    # CSI amplitude: parse each raw line to a 52-subcarrier vector, then
+    # interpolate per receiver onto the grid -> [G, n_rx, 52].
+    csi_grid_ts = _grid_ns(origin_unix_ns, duration, csi_hz)
+    n_receivers = max(1, len(receiver_metadata))
+    csi_grid_amp = np.zeros((len(csi_grid_ts), n_receivers, 52), dtype=np.float32)
+    csi_real = np.zeros((len(csi_grid_ts), n_receivers), dtype=bool)
+    try:
+        from .model_e2 import _e2_parse_csi_amplitude  # type: ignore
+    except Exception:
+        try:
+            from backend.model_e2 import _e2_parse_csi_amplitude  # type: ignore
+        except Exception:
+            _e2_parse_csi_amplitude = None  # type: ignore
+    if _e2_parse_csi_amplitude is not None and csi_payloads:
+        csi_unix_arr = _grid_time_ns(csi_mono, csi_unix, origin_monotonic_ns, origin_unix_ns)
+        csi_rx_arr = np.asarray(csi_receivers, dtype=np.int64)
+        half_csi = int(NANOSECONDS / max(csi_hz, 0.001) / 2)
+        for rx in range(n_receivers):
+            rx_mask = csi_rx_arr == rx
+            if not rx_mask.any():
+                continue
+            rx_ns = csi_unix_arr[rx_mask]
+            rx_lines = [csi_payloads[i] for i in np.flatnonzero(rx_mask)]
+            vectors = []
+            keep_ns = []
+            for ns_value, raw in zip(rx_ns, rx_lines):
+                parsed = _e2_parse_csi_amplitude(raw.decode("utf-8", errors="replace"))
+                if parsed is None:
+                    continue
+                vectors.append(parsed)
+                keep_ns.append(ns_value)
+            if not vectors:
+                continue
+            amp = np.stack(vectors).astype(np.float32)  # [n, 52]
+            grid_amp, rx_real = _interp_channels(
+                csi_grid_ts, np.asarray(keep_ns, dtype=np.int64), amp, half_csi
+            )
+            csi_grid_amp[:, rx, :] = grid_amp
+            csi_real[:, rx] = rx_real
+
+    # Sense HAT: flatten each JSONL row to the fixed channel vector, then
+    # interpolate per channel onto the grid -> [G, len(SENSE_GRID_CHANNELS)].
+    sense_grid_ts = _grid_ns(origin_unix_ns, duration, sense_hz)
+    sense_grid = np.zeros((len(sense_grid_ts), len(SENSE_GRID_CHANNELS)), dtype=np.float32)
+    sense_real = np.zeros(len(sense_grid_ts), dtype=bool)
+    if sense_payloads:
+        sense_time_ns = _grid_time_ns(sense_mono, sense_unix, origin_monotonic_ns, origin_unix_ns)
+        sense_vectors = []
+        sense_keep_ns = []
+        for ns_value, raw in zip(sense_time_ns, sense_payloads):
+            try:
+                row = json.loads(raw.decode("utf-8", errors="replace"))
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            sense_vectors.append(_sense_row_to_vector(row))
+            sense_keep_ns.append(ns_value)
+        if sense_vectors:
+            sense_values = np.stack(sense_vectors).astype(np.float32)
+            sense_grid, sense_real = _interp_channels(
+                sense_grid_ts,
+                np.asarray(sense_keep_ns, dtype=np.int64),
+                sense_values,
+                int(NANOSECONDS / max(sense_hz, 0.001) / 2),
+            )
+
+    grids_meta = {
+        "radar": {"hz": radar_hz, "count": int(len(radar_grid_ts)), "real": int(radar_real.sum())},
+        "csi": {
+            "hz": csi_hz, "count": int(len(csi_grid_ts)),
+            "receivers": n_receivers, "subcarriers": 52,
+            "real": int(csi_real.sum()),
+        },
+        "camera": {"hz": camera_hz, "count": int(len(camera_grid_ts)), "real": int(camera_real.sum())},
+        "sense": {
+            "hz": sense_hz, "count": int(len(sense_grid_ts)),
+            "channels": list(SENSE_GRID_CHANNELS), "real": int(sense_real.sum()),
+        },
+    }
+
     per_second = []
     for index in range(second_count):
         per_second.append({
@@ -324,6 +549,7 @@ def build_capture_container(
         },
         "manifest": _manifest_without_host_paths(manifest),
         "seconds": per_second,
+        "grids": grids_meta,
     }
 
     arrays: dict[str, np.ndarray] = {
@@ -352,6 +578,20 @@ def build_capture_container(
         "sense_sample_second_index": np.asarray(sense_seconds, dtype=np.int16),
         "sense_sample_bytes": sense_payload_data,
         "sense_sample_offsets": sense_offsets,
+        # Fixed-Hz resampled grids (plan §3.2/§3.3). *_ts is the uniform grid
+        # timebase; *_real marks measured (True) vs held/interpolated (False).
+        "radar_grid_ts": radar_grid_ts,
+        "radar_grid_source": radar_grid_source,
+        "radar_real": radar_real,
+        "csi_grid_ts": csi_grid_ts,
+        "csi_grid_amp": csi_grid_amp,
+        "csi_real": csi_real,
+        "camera_grid_ts": camera_grid_ts,
+        "camera_grid_source": camera_grid_source,
+        "camera_real": camera_real,
+        "sense_grid_ts": sense_grid_ts,
+        "sense_grid": sense_grid,
+        "sense_real": sense_real,
     }
     destination = minute_dir / CONTAINER_FILENAME
     temporary = minute_dir / f".{CONTAINER_FILENAME}.{os.getpid()}.tmp"
@@ -443,6 +683,74 @@ def csi_average_series(path: Path, limit: int = 2400) -> list[float]:
         if magnitudes:
             series.append(sum(magnitudes) / len(magnitudes))
     return series[-limit:]
+
+
+def _window_slice(grid_ts: np.ndarray, t0_ns: int | None, t1_ns: int | None) -> slice:
+    """Return the [start:stop] slice of a grid covering [t0_ns, t1_ns]."""
+    count = len(grid_ts)
+    if count == 0:
+        return slice(0, 0)
+    start = 0 if t0_ns is None else int(np.searchsorted(grid_ts, t0_ns, side="left"))
+    stop = count if t1_ns is None else int(np.searchsorted(grid_ts, t1_ns, side="right"))
+    return slice(max(0, start), max(0, min(count, stop)))
+
+
+def read_sensor_window(
+    path: Path,
+    sensor: str,
+    t0_ns: int | None = None,
+    t1_ns: int | None = None,
+) -> dict[str, Any]:
+    """Slice one sensor's resampled grid to a time window (plan §6).
+
+    Returns the uniform grid timestamps, the ``*_real`` mask, and either the
+    interpolated values (csi/sense) or the held source indices (radar/camera)
+    so callers can fetch blobs. Times are unix ns; ``t0_ns``/``t1_ns`` are
+    inclusive/exclusive bounds on the same axis.
+    """
+    sensor = str(sensor or "").strip().lower()
+    with np.load(Path(path), allow_pickle=False) as archive:
+        meta = read_metadata_from_archive(archive)
+        grids = meta.get("grids") if isinstance(meta.get("grids"), dict) else {}
+        if sensor == "radar":
+            grid_ts = archive["radar_grid_ts"]
+            w = _window_slice(grid_ts, t0_ns, t1_ns)
+            return {
+                "sensor": "radar", "hz": (grids.get("radar") or {}).get("hz"),
+                "t_ns": grid_ts[w].tolist(),
+                "real": archive["radar_real"][w].astype(bool).tolist(),
+                "source_index": archive["radar_grid_source"][w].astype(int).tolist(),
+            }
+        if sensor in ("csi", "wifi_csi"):
+            grid_ts = archive["csi_grid_ts"]
+            w = _window_slice(grid_ts, t0_ns, t1_ns)
+            return {
+                "sensor": "csi", "hz": (grids.get("csi") or {}).get("hz"),
+                "t_ns": grid_ts[w].tolist(),
+                "amp": archive["csi_grid_amp"][w].tolist(),
+                "real": archive["csi_real"][w].astype(bool).tolist(),
+                "channels": (grids.get("csi") or {}).get("subcarriers"),
+            }
+        if sensor == "camera":
+            grid_ts = archive["camera_grid_ts"]
+            w = _window_slice(grid_ts, t0_ns, t1_ns)
+            return {
+                "sensor": "camera", "hz": (grids.get("camera") or {}).get("hz"),
+                "t_ns": grid_ts[w].tolist(),
+                "real": archive["camera_real"][w].astype(bool).tolist(),
+                "source_index": archive["camera_grid_source"][w].astype(int).tolist(),
+            }
+        if sensor in ("sense", "sense_hat", "sensehat"):
+            grid_ts = archive["sense_grid_ts"]
+            w = _window_slice(grid_ts, t0_ns, t1_ns)
+            return {
+                "sensor": "sense", "hz": (grids.get("sense") or {}).get("hz"),
+                "t_ns": grid_ts[w].tolist(),
+                "values": archive["sense_grid"][w].tolist(),
+                "real": archive["sense_real"][w].astype(bool).tolist(),
+                "channels": (grids.get("sense") or {}).get("channels"),
+            }
+    raise KeyError(f"unknown sensor '{sensor}'")
 
 
 def update_capture_metadata(path: Path, updates: dict[str, Any]) -> dict[str, Any]:
