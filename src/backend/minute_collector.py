@@ -29,7 +29,7 @@ if __package__ in (None, ""):
     from backend.config import Config  # type: ignore
     from backend.sensor_detection import likely_csi_serial_candidates, usable_usb_camera_devices  # type: ignore
     from backend.capture_container import build_capture_container, _split_radar_packets  # type: ignore
-    from backend.model_runtime import ModelRegistry, E2_WINDOW_FRAMES, is_occupancy_result  # type: ignore
+    from backend.model_runtime import ModelRegistry, WindowedAnalyzer, E2_WINDOW_FRAMES, is_occupancy_result  # type: ignore
     from backend.radar_analysis import (  # type: ignore
         PersistentTargetIdentity,
         StreamingChunkAnalyzer,
@@ -43,7 +43,7 @@ else:
     from .config import Config
     from .sensor_detection import likely_csi_serial_candidates, usable_usb_camera_devices
     from .capture_container import build_capture_container, _split_radar_packets
-    from .model_runtime import ModelRegistry, E2_WINDOW_FRAMES, is_occupancy_result
+    from .model_runtime import ModelRegistry, WindowedAnalyzer, E2_WINDOW_FRAMES, is_occupancy_result
     from .radar_analysis import (
         PersistentTargetIdentity,
         StreamingChunkAnalyzer,
@@ -1083,6 +1083,10 @@ def main() -> int:
     radar_last_frame_at: float | None = None
     publish_lock = threading.Lock()
     model_registry = ModelRegistry(THOTH_ROOT / "models" / "user")
+    # Per-model sliding-window inference: each chunk-execution model runs once
+    # its declared window is collected, then every `stride` samples; votes
+    # aggregate into the minute prediction (replaces fixed-chunk cadence).
+    windowed_analyzer = WindowedAnalyzer(model_registry)
     model_queue: queue.Queue[Any] = queue.Queue()
     partial_minute_queue: queue.Queue[Any] = queue.Queue(maxsize=1)
     model_thread: threading.Thread | None = None
@@ -1145,7 +1149,7 @@ def main() -> int:
                     return
                 chunk_index, frames, timestamp = job
                 try:
-                    results = model_registry.run_enabled(frames, current_csi_samples(), chunk_index, timestamp)
+                    results = windowed_analyzer.push(frames, current_csi_samples(), timestamp)
                 except Exception as exc:
                     logging.getLogger(__name__).error("User model runtime unavailable: %s", exc)
                     results = []
@@ -1840,7 +1844,9 @@ def main() -> int:
             with publish_lock:
                 write_live_manifest()
             upload_queue.put(chunk_index)
-            model_queue.put((chunk_index, tuple(radar_model_history), iso_now()))
+            # Feed only this chunk's new frames; the WindowedAnalyzer keeps the
+            # full-minute buffer and gives each model its own trailing window.
+            model_queue.put((chunk_index, tuple(frames), iso_now()))
             # Queue the chunk for XY localization / occupancy analysis so the
             # per-chunk location, targets and xy_map land in the collected data.
             enqueue_analysis_chunk(
@@ -2203,6 +2209,23 @@ def main() -> int:
                     })
                     timeline["timeline"].append(prediction)
                 manifest["model_predictions"] = list(by_id.values())
+
+        # Voted minute verdict for chunk-execution models: each model ran on its
+        # own sliding window through the minute; votes aggregate to one verdict.
+        try:
+            voted = windowed_analyzer.minute_predictions()
+        except Exception:
+            voted = []
+        if voted:
+            manifest["minute_predictions"] = voted
+            fire_model_device_links(voted, "minute")
+            occupancy_votes = [
+                item for item in voted
+                if item.get("status") == "ok" and is_occupancy_result(item)
+            ]
+            if occupancy_votes:
+                selected = max(occupancy_votes, key=lambda item: float(item.get("confidence") or 0.0))
+                publish_model_occupancy(selected, folder_name, chunk_index=None)
 
         if live_only:
             manifest["container"] = {"skipped": "live-only mode"}

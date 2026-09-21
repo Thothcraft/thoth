@@ -741,8 +741,61 @@ class ModelRegistry:
                 match["last_error"] = message
                 self._save(models)
 
-    def run_enabled(self, radar_frames: Sequence[bytes], csi_samples: Sequence[str | tuple[int, str]], chunk_index: int, timestamp: str) -> list[dict[str, Any]]:
+    def run_model(
+        self,
+        item: dict[str, Any],
+        radar_frames: Sequence[bytes],
+        csi_samples: Sequence[str | tuple[int, str]],
+        chunk_index: int,
+        timestamp: str,
+    ) -> dict[str, Any]:
+        """Run one chunk-execution model on the provided window of samples.
+
+        ``radar_frames``/``csi_samples`` may be larger than the model's declared
+        window — ``radar_tensor``/``csi_tensor`` select the trailing ``frames`` /
+        ``samples`` required by each input spec.
+        """
         torch = _torch()
+        metadata = item.get("metadata") or {}
+        base = {"model_id": item.get("id"), "model_name": metadata.get("name"), "model_version": metadata.get("version"), "chunk_index": int(chunk_index), "timestamp": timestamp}
+        try:
+            tensors = []
+            missing = []
+            for spec in metadata.get("inputs") or []:
+                if spec.get("sensor") == "radar":
+                    if not radar_frames:
+                        missing.append(f"radar requires {spec.get('frames')} frames; received 0")
+                    array = radar_tensor(radar_frames, spec)
+                else:
+                    receivers = set(spec.get("receivers") or [])
+                    available = sum(1 for value in csi_samples if not receivers or (isinstance(value, tuple) and int(value[0]) in receivers) or (not isinstance(value, tuple) and 0 in receivers))
+                    if available == 0:
+                        missing.append(f"csi requires {spec.get('samples')} selected samples; received 0")
+                    array = csi_tensor(csi_samples, spec)
+                tensors.append(torch.from_numpy(np.ascontiguousarray(array)).float())
+            if missing:
+                return {**base, "status": "skipped", "reason": "; ".join(missing)}
+            model, _ = _cached_load(self.artifacts / str(item["filename"]))
+            with torch.inference_mode():
+                output = _select_output(model(*tensors), metadata.get("output", {}).get("path") or [])
+                values = output.detach().cpu().float().reshape(-1)
+                if metadata.get("binary_output"):
+                    positive = torch.sigmoid(values[0]) if metadata["output"]["kind"] == "logits" else values[0].clamp(0, 1)
+                    probabilities = torch.stack((1 - positive, positive))
+                else:
+                    probabilities = torch.softmax(values, dim=0) if metadata["output"]["kind"] == "logits" else values
+                probabilities = probabilities / probabilities.sum().clamp_min(1e-12)
+            index = int(torch.argmax(probabilities).item())
+            names = metadata["class_names"]
+            confidence = float(probabilities[index].item())
+            self._set_last_error(str(item.get("id")), None)
+            return {**base, "status": "ok", "class": names[index], "confidence": confidence, "confidence_saturated": confidence >= 0.999, "scores": {name: float(probabilities[i].item()) for i, name in enumerate(names)}}
+        except Exception as exc:
+            message = str(exc)
+            self._set_last_error(str(item.get("id")), message)
+            return {**base, "status": "error", "error": message}
+
+    def run_enabled(self, radar_frames: Sequence[bytes], csi_samples: Sequence[str | tuple[int, str]], chunk_index: int, timestamp: str) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for item in self.list():
             if not item.get("enabled"):
@@ -750,44 +803,7 @@ class ModelRegistry:
             metadata = item.get("metadata") or {}
             if str(metadata.get("execution") or "chunk") == "minute":
                 continue  # minute-level models run once via run_minute()
-            base = {"model_id": item.get("id"), "model_name": metadata.get("name"), "model_version": metadata.get("version"), "chunk_index": int(chunk_index), "timestamp": timestamp}
-            try:
-                tensors = []
-                missing = []
-                for spec in metadata.get("inputs") or []:
-                    if spec.get("sensor") == "radar":
-                        if not radar_frames:
-                            missing.append(f"radar requires {spec.get('frames')} frames; received 0")
-                        array = radar_tensor(radar_frames, spec)
-                    else:
-                        receivers = set(spec.get("receivers") or [])
-                        available = sum(1 for value in csi_samples if not receivers or (isinstance(value, tuple) and int(value[0]) in receivers) or (not isinstance(value, tuple) and 0 in receivers))
-                        if available == 0:
-                            missing.append(f"csi requires {spec.get('samples')} selected samples; received 0")
-                        array = csi_tensor(csi_samples, spec)
-                    tensors.append(torch.from_numpy(np.ascontiguousarray(array)).float())
-                if missing:
-                    results.append({**base, "status": "skipped", "reason": "; ".join(missing)})
-                    continue
-                model, _ = _cached_load(self.artifacts / str(item["filename"]))
-                with torch.inference_mode():
-                    output = _select_output(model(*tensors), metadata.get("output", {}).get("path") or [])
-                    values = output.detach().cpu().float().reshape(-1)
-                    if metadata.get("binary_output"):
-                        positive = torch.sigmoid(values[0]) if metadata["output"]["kind"] == "logits" else values[0].clamp(0, 1)
-                        probabilities = torch.stack((1 - positive, positive))
-                    else:
-                        probabilities = torch.softmax(values, dim=0) if metadata["output"]["kind"] == "logits" else values
-                    probabilities = probabilities / probabilities.sum().clamp_min(1e-12)
-                index = int(torch.argmax(probabilities).item())
-                names = metadata["class_names"]
-                confidence = float(probabilities[index].item())
-                results.append({**base, "status": "ok", "class": names[index], "confidence": confidence, "confidence_saturated": confidence >= 0.999, "scores": {name: float(probabilities[i].item()) for i, name in enumerate(names)}})
-                self._set_last_error(str(item.get("id")), None)
-            except Exception as exc:
-                message = str(exc)
-                results.append({**base, "status": "error", "error": message})
-                self._set_last_error(str(item.get("id")), message)
+            results.append(self.run_model(item, radar_frames, csi_samples, chunk_index, timestamp))
         return results
 
     def run_minute(
@@ -971,3 +987,115 @@ def append_manifest_predictions(path: Path, results: Iterable[dict[str, Any]]) -
         manifest["model_predictions"] = list(by_id.values())
         _atomic_json(Path(path), manifest)
         return manifest
+
+
+class WindowedAnalyzer:
+    """Per-model sliding-window inference with voting -> minute prediction.
+
+    Unlike the fixed 10-frame chunk cadence, each enabled chunk-execution model
+    runs only once its declared window (``inputs[].frames`` for radar,
+    ``inputs[].samples`` for CSI) has been collected, then again every ``stride``
+    new samples.  ``stride`` defaults to the window size (non-overlapping); a
+    model may set ``metadata["stride"]`` to overlap windows.  Every run is a
+    vote; ``minute_predictions`` aggregates votes into a per-model verdict.
+
+    Feed samples as they arrive via :meth:`push`.  Buffers grow for the whole
+    minute so each model always sees its full trailing window — the tensor
+    builders select the last ``frames``/``samples`` required by each input spec.
+    """
+
+    def __init__(self, registry: ModelRegistry):
+        self.registry = registry
+        self.radar_frames: list[bytes] = []
+        self.csi_samples: list[Any] = []
+        self._cursor: dict[str, int] = {}
+        self.votes: dict[str, list[dict[str, Any]]] = {}
+
+    @staticmethod
+    def _window(metadata: dict[str, Any]) -> tuple[int, int]:
+        """Return (radar_frames_needed, csi_samples_needed) for a model."""
+        radar_need = csi_need = 0
+        for spec in metadata.get("inputs") or []:
+            if spec.get("sensor") == "radar":
+                radar_need = max(radar_need, int(spec.get("frames") or 0))
+            else:
+                csi_need = max(csi_need, int(spec.get("samples") or 0))
+        return radar_need, csi_need
+
+    def push(
+        self,
+        radar_frames: Sequence[bytes],
+        csi_samples: Sequence[Any],
+        timestamp: str = "",
+    ) -> list[dict[str, Any]]:
+        """Append new samples and run any model whose window just filled.
+
+        ``radar_frames`` is the newly captured batch (appended).  ``csi_samples``
+        is the full cumulative CSI buffer for the minute (replaced) — matching
+        ``current_csi_samples()`` which re-reads the receiver file each call.
+        """
+        self.radar_frames.extend(radar_frames)
+        self.csi_samples = list(csi_samples)
+        results: list[dict[str, Any]] = []
+        for item in self.registry.list():
+            if not item.get("enabled"):
+                continue
+            metadata = item.get("metadata") or {}
+            if str(metadata.get("execution") or "chunk") == "minute":
+                continue  # minute-execution models run once via run_minute()
+            radar_need, csi_need = self._window(metadata)
+            # The driving stream is radar when the model reads radar, else CSI.
+            driving = len(self.radar_frames) if radar_need else len(self.csi_samples)
+            need = radar_need or csi_need
+            if need <= 0:
+                continue
+            stride = max(1, int(metadata.get("stride") or need))
+            cursor = self._cursor.get(str(item.get("id")), 0)
+            while driving - cursor >= stride and driving >= need:
+                result = self.registry.run_model(
+                    item, self.radar_frames, self.csi_samples, cursor, timestamp,
+                )
+                self.votes.setdefault(str(item.get("id")), []).append(result)
+                results.append(result)
+                cursor += stride
+            self._cursor[str(item.get("id"))] = cursor
+        return results
+
+    def minute_predictions(self) -> list[dict[str, Any]]:
+        """Aggregate each model's votes into a final per-model prediction.
+
+        Votes are confidence-weighted: each run's ``scores`` are summed and the
+        argmax wins.  Returns one entry per model that produced at least one
+        successful run.
+        """
+        predictions: list[dict[str, Any]] = []
+        for item in self.registry.list():
+            model_id = str(item.get("id"))
+            votes = [v for v in self.votes.get(model_id, []) if v.get("status") == "ok"]
+            if not votes:
+                continue
+            metadata = item.get("metadata") or {}
+            names = metadata.get("class_names") or []
+            totals = {name: 0.0 for name in names}
+            counts: dict[str, int] = {}
+            for vote in votes:
+                scores = vote.get("scores") or {}
+                for name in names:
+                    totals[name] = totals.get(name, 0.0) + float(scores.get(name) or 0.0)
+                cls = str(vote.get("class") or "")
+                counts[cls] = counts.get(cls, 0) + 1
+            winner = max(totals, key=totals.get) if totals else (max(counts, key=counts.get) if counts else "")
+            mean_conf = sum(float(v.get("confidence") or 0.0) for v in votes) / len(votes)
+            predictions.append({
+                "model_id": model_id,
+                "model_name": metadata.get("name"),
+                "model_version": metadata.get("version"),
+                "scope": "minute",
+                "status": "ok",
+                "class": winner,
+                "confidence": mean_conf,
+                "votes": len(votes),
+                "vote_counts": counts,
+                "scores": {name: totals[name] / len(votes) for name in totals},
+            })
+        return predictions
