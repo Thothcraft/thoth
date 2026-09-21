@@ -2849,14 +2849,14 @@ def api_capture_radar_frame(minute):
     """
     minute_dir = get_minute(minute)
     if not minute_dir:
-        abort(404, description='Minute folder not found')
+        return jsonify({'status': 'error', 'message': 'Minute folder not found'}), 404
     if np is None or not all((parse_radar_cfg, read_uint12, split_samples)):
-        abort(503, description='Radar decode dependencies unavailable')
+        return jsonify({'status': 'error', 'message': 'Radar decode dependencies unavailable'}), 503
 
     files = capture_files(minute_dir)
     radar_bins = files.get('radar_bins') or []
     if not radar_bins:
-        abort(404, description='No radar chunks in this minute')
+        return jsonify({'status': 'error', 'message': 'No radar chunks in this minute'}), 404
 
     try:
         chunk_index = int(request.args.get('chunk', 0))
@@ -2869,7 +2869,7 @@ def api_capture_radar_frame(minute):
     setting = _radar_setting()
     radar_cfg = parse_radar_cfg(setting) if setting else None
     if not radar_cfg:
-        abort(500, description='Radar configuration could not be loaded')
+        return jsonify({'status': 'error', 'message': 'Radar configuration could not be loaded'}), 500
 
     target = None
     frame_count = 0
@@ -2995,17 +2995,17 @@ def api_capture_radar_snr(minute):
     """
     minute_dir = get_minute(minute)
     if not minute_dir:
-        abort(404, description='Minute folder not found')
+        return jsonify({'status': 'error', 'message': 'Minute folder not found'}), 404
     if np is None or not all((parse_radar_cfg, read_uint12, split_samples)):
-        abort(503, description='Radar decode dependencies unavailable')
+        return jsonify({'status': 'error', 'message': 'Radar decode dependencies unavailable'}), 503
     files = capture_files(minute_dir)
     radar_bins = files.get('radar_bins') or []
     if not radar_bins:
-        abort(404, description='No radar chunks in this minute')
+        return jsonify({'status': 'error', 'message': 'No radar chunks in this minute'}), 404
     setting = _radar_setting()
     radar_cfg = parse_radar_cfg(setting) if setting else None
     if not radar_cfg:
-        abort(500, description='Radar configuration could not be loaded')
+        return jsonify({'status': 'error', 'message': 'Radar configuration could not be loaded'}), 500
     chirps_n = int(radar_cfg['num_chirps_per_frame'])
     samples_n = int(radar_cfg['num_samples_per_chirp'])
     antennas = int(radar_cfg['num_antennas'])

@@ -665,6 +665,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     return s[i].map((c, k) => Math.round(c + (s[i + 1][k] - c) * t));
   }
 
+  // Fetch JSON but never throw a SyntaxError on an HTML error page.
+  async function getJson(url) {
+    const r = await fetch(url, { cache: 'no-store' });
+    const ct = r.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) return { status: 'error', message: `HTTP ${r.status}` };
+    const body = await r.json();
+    if (!r.ok && body.status !== 'error') body.status = 'error';
+    if (!body.message && body.detail) body.message = typeof body.detail === 'string' ? body.detail : `HTTP ${r.status}`;
+    return body;
+  }
+
   // Fixed/adjustable y-axis + time window, shared by the line plots.
   let yMin = null, yMax = null, csiWindowS = 0, rollingWin = 0.5;
   function drawLines(canvas, series, opts) {
@@ -755,8 +766,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     $('csi-amp-meta').textContent = 'loading…';
     $('csi-var-meta').textContent = 'loading…';
     try {
-      const r = await fetch(`/api/captures/${encodeURIComponent(MINUTE)}/csi/series`, { cache: 'no-store' });
-      const body = await r.json();
+      const body = await getJson(`/api/captures/${encodeURIComponent(MINUTE)}/csi/series`);
       if (body.status !== 'success' || !body.samples.length) {
         $('csi-amp-meta').textContent = 'no CSI data';
         $('csi-var-meta').textContent = 'no CSI data';
@@ -809,9 +819,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     $('radar-chunk-label').textContent = `${chunk + 1}/${radarChunkCount || '?'}`;
     $('radar-frame-label').textContent = `${frame + 1}/${radarFrameCount}`;
     try {
-      const r = await fetch(`/api/captures/${encodeURIComponent(MINUTE)}/radar/frame?chunk=${chunk}&frame=${frame}`, { cache: 'no-store' });
-      const body = await r.json();
-      if (token !== radarReq) return;
+      const body = await getJson(`/api/captures/${encodeURIComponent(MINUTE)}/radar/frame?chunk=${chunk}&frame=${frame}`);
       if (body.status !== 'success') {
         $('radar-frame-meta').textContent = body.message || 'no frame';
         return;
@@ -837,8 +845,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Whole-minute detection SNR series.
   async function loadSnr() {
     try {
-      const r = await fetch(`/api/captures/${encodeURIComponent(MINUTE)}/radar/snr`, { cache: 'no-store' });
-      const body = await r.json();
+      const body = await getJson(`/api/captures/${encodeURIComponent(MINUTE)}/radar/snr`);
       if (body.status !== 'success' || !body.snr || !body.snr.length) {
         $('radar-snr-meta').textContent = 'no radar frames';
         drawLines($('radar-snr'), [], { empty: 'no radar frames this minute' });
