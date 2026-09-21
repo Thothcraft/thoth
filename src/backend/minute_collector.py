@@ -1989,10 +1989,21 @@ def main() -> int:
                 )
                 radar_reader_thread.start()
 
+        last_live_prune = 0.0
         while True:
             remaining = stop_at - time.monotonic()
             if remaining <= 0:
                 break
+            if live_only and time.monotonic() - last_live_prune >= 10.0:
+                last_live_prune = time.monotonic()
+                # Live mode only needs the freshest camera frame — prune the
+                # image2 backlog so long sessions don't fill the disk.
+                try:
+                    frames = sorted(output_dir.glob("camera_*.jpg"))
+                    for stale in frames[:-30]:
+                        stale.unlink(missing_ok=True)
+                except OSError:
+                    pass
             time.sleep(min(remaining, 0.25))
         if radar_reader_thread is not None:
             radar_reader_thread.join(timeout=2)
