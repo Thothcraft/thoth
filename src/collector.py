@@ -109,6 +109,8 @@ def handle_shutdown(_signum, _frame) -> None:
 def load_capture_settings() -> dict:
     settings = {
         "labels": [item.strip() for item in os.environ.get("THOTH_MINUTE_LABELS", "").split(",") if item.strip()],
+        "chunk_seconds": DEFAULT_CAPTURE_SETTINGS["chunk_seconds"],
+        "system_mode": DEFAULT_CAPTURE_SETTINGS["system_mode"],
         "sensors": dict(DEFAULT_CAPTURE_SETTINGS["sensors"]),
     }
     try:
