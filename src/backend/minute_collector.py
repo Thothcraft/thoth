@@ -14,6 +14,7 @@ import math
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -212,6 +213,11 @@ def parse_args() -> argparse.Namespace:
         "--scheduled-start",
         default=None,
         help="Exact ISO-8601 wall-clock minute assigned by the continuous supervisor.",
+    )
+    parser.add_argument(
+        "--live-only",
+        action="store_true",
+        help="Stream sensors into the live dir without minute chunking, model inference, or finalization.",
     )
     return parser.parse_args()
 
@@ -966,6 +972,11 @@ def chown_to_invoking_user(path: Path) -> None:
 
 def main() -> int:
     args = parse_args()
+    live_only = bool(getattr(args, "live_only", False))
+    if live_only:
+        # SIGTERM from the supervisor should unwind finally blocks so the
+        # radar GPIO/SPI handoff settles before the process exits.
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     preset_labels = normalize_labels(args.label or [])
     initial_settings = load_processing_settings()
     device_identity: dict[str, Any] = {}
@@ -977,9 +988,17 @@ def main() -> int:
     chunk_seconds = 1.0
     expected_chunks = max(1, int(math.floor(float(args.duration))))
     target_start = minute_start(args.start_now, args.scheduled_start)
-    folder_name = target_start.strftime("%Y%m%d_%H%M")
-    output_dir = output_dir_for_minute(folder_name, preset_labels)
-    output_dir.mkdir(parents=True, exist_ok=False)
+    if live_only:
+        # Dedicated live-streaming mode: a fixed pseudo-minute dir feeds the
+        # Sensor Lab endpoints; nothing here is archived or model-scored.
+        folder_name = "live"
+        output_dir = DATA_ROOT / "live"
+        shutil.rmtree(output_dir, ignore_errors=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        folder_name = target_start.strftime("%Y%m%d_%H%M")
+        output_dir = output_dir_for_minute(folder_name, preset_labels)
+        output_dir.mkdir(parents=True, exist_ok=False)
 
     manifest: dict[str, Any] = {
         "schema": "thoth-minute-manifest/v7",
@@ -1022,12 +1041,15 @@ def main() -> int:
     }
 
     print(f"Output folder: {output_dir}")
-    print(f"Waiting for real-clock minute: {target_start.isoformat(timespec='seconds')}")
-    sleep_until(target_start)
+    if live_only:
+        print("Live-only mode: streaming sensors until terminated")
+    else:
+        print(f"Waiting for real-clock minute: {target_start.isoformat(timespec='seconds')}")
+        sleep_until(target_start)
 
     capture_started_monotonic = time.monotonic()
     capture_started_monotonic_ns = time.monotonic_ns()
-    stop_at = capture_started_monotonic + args.duration
+    stop_at = math.inf if live_only else capture_started_monotonic + args.duration
     capture_started = iso_now()
     manifest["capture_started_monotonic_ns"] = capture_started_monotonic_ns
     print(f"Capture started: {capture_started}")
@@ -1042,6 +1064,9 @@ def main() -> int:
         camera_fps = max(0.2, min(30.0, float(initial_settings.get("camera_fps") or 1.0)))
     except (TypeError, ValueError):
         camera_fps = 1.0
+    if live_only:
+        # The Sensor Lab wants a fluid preview, not the archival 1 fps grid.
+        camera_fps = max(camera_fps, 5.0)
     radar_reader_thread: threading.Thread | None = None
     radar: Any | None = None
     radar_lock: Any | None = None
@@ -1728,6 +1753,25 @@ def main() -> int:
             captured_at = time.monotonic()
             if not frames:
                 live_settings = load_processing_settings()
+            if live_only:
+                # Live-only mode: every frame goes to the live worker, which
+                # keeps only the newest pending frame — full sensor rate, no
+                # chunking, no model queues.
+                try:
+                    enqueue_latest_chunk_frame(
+                        live_analysis_queue,
+                        live_queue_key,
+                        full_frame,
+                        captured_at,
+                        0,
+                        live_settings,
+                    )
+                except queue.Full:
+                    pass
+                radar_frame_count += 1
+                radar_first_frame_at = captured_at if radar_first_frame_at is None else radar_first_frame_at
+                radar_last_frame_at = captured_at
+                continue
             if captured_at - last_live_enqueue >= LIVE_VISUALIZATION_INTERVAL_SECONDS:
                 try:
                     enqueue_latest_chunk_frame(
@@ -1813,20 +1857,22 @@ def main() -> int:
             )
 
     try:
-        model_thread = threading.Thread(target=run_model_worker, name="UserModelInference", daemon=True)
-        model_thread.start()
-        radar_analysis_thread = threading.Thread(
-            target=run_analysis_worker, name="RadarChunkAnalysis", daemon=True
-        )
-        radar_analysis_thread.start()
+        if not live_only:
+            model_thread = threading.Thread(target=run_model_worker, name="UserModelInference", daemon=True)
+            model_thread.start()
+            radar_analysis_thread = threading.Thread(
+                target=run_analysis_worker, name="RadarChunkAnalysis", daemon=True
+            )
+            radar_analysis_thread.start()
         radar_live_thread = threading.Thread(
             target=run_live_analysis_worker, name="RadarLive", daemon=True
         )
         radar_live_thread.start()
-        partial_minute_thread = threading.Thread(
-            target=run_partial_minute_worker, name="PartialMinuteInference", daemon=True
-        )
-        partial_minute_thread.start()
+        if not live_only:
+            partial_minute_thread = threading.Thread(
+                target=run_partial_minute_worker, name="PartialMinuteInference", daemon=True
+            )
+            partial_minute_thread.start()
         if not args.no_sensehat:
             sense_file = output_dir / "sense_hat.jsonl"
             manifest["outputs"]["sense_hat"] = {
@@ -1924,8 +1970,9 @@ def main() -> int:
             }
             with publish_lock:
                 write_live_manifest()
-            radar_upload_thread = threading.Thread(target=run_upload_worker, name="RadarUpload", daemon=True)
-            radar_upload_thread.start()
+            if not live_only:
+                radar_upload_thread = threading.Thread(target=run_upload_worker, name="RadarUpload", daemon=True)
+                radar_upload_thread.start()
             try:
                 radar_lock = acquire_radar_lock()
                 radar = start_radar_capture()
@@ -1981,7 +2028,7 @@ def main() -> int:
         if radar_upload_thread is not None:
             upload_queue.put(None)
             radar_upload_thread.join(timeout=15.0)
-        if not radar_chunk_results and model_registry.list():
+        if not live_only and not radar_chunk_results and model_registry.list():
             # Make sensor outages visible in every enabled model timeline.
             try:
                 skipped = model_registry.run_enabled([], current_csi_samples(), 0, iso_now())
@@ -2015,7 +2062,7 @@ def main() -> int:
         manifest["preset_labels"] = current_labels
         manifest["labels"] = current_labels
         manifest["primary_label"] = current_labels[0] if current_labels else None
-        if not any(output_dir.glob("radar_*.bin")) and not args.no_radar:
+        if not live_only and not any(output_dir.glob("radar_*.bin")) and not args.no_radar:
             manifest["errors"].append("Radar produced no complete 10-frame chunks for this minute.")
 
         radar_files = sorted(str(path) for path in output_dir.glob("radar_*.bin"))
@@ -2110,17 +2157,19 @@ def main() -> int:
         # Minute-level occupancy models (E2 exports): one verdict per minute.
         # Runs while the radar_*.bin / wifi_csi_*.csv fragments are still on
         # disk so results are also embedded in the container manifest.
-        try:
-            minute_frames, minute_frame_times = _minute_radar_frames(output_dir, manifest)
-            minute_results = model_registry.run_minute(
-                minute_frames,
-                minute_frame_times,
-                _minute_csi_samples(manifest),
-                iso_now(),
-            )
-        except Exception as exc:
-            minute_results = []
-            manifest["errors"].append(f"Minute-level model inference failed: {exc}")
+        minute_results: list[dict[str, Any]] = []
+        if not live_only:
+            try:
+                minute_frames, minute_frame_times = _minute_radar_frames(output_dir, manifest)
+                minute_results = model_registry.run_minute(
+                    minute_frames,
+                    minute_frame_times,
+                    _minute_csi_samples(manifest),
+                    iso_now(),
+                )
+            except Exception as exc:
+                minute_results = []
+                manifest["errors"].append(f"Minute-level model inference failed: {exc}")
         if minute_results:
             fire_model_device_links(minute_results, "minute")
             occupancy_results = [
@@ -2144,25 +2193,28 @@ def main() -> int:
                     timeline["timeline"].append(prediction)
                 manifest["model_predictions"] = list(by_id.values())
 
-        try:
-            manifest["container"] = build_capture_container(output_dir, manifest, remove_fragments=True)
-            manifest["assets"] = [
-                {
-                    "sensor": "synchronized_capture",
-                    "filename": "capture.npz",
-                    "content_type": "application/x-npz",
-                    "coverage": "all synchronized sensor samples",
-                    "labels": manifest.get("labels") or [],
-                },
-                *([{
-                    "sensor": "radar_tracking",
-                    "filename": "xy-tracking.json",
-                    "content_type": "application/json",
-                    "labels": manifest.get("labels") or [],
-                }] if (output_dir / "xy-tracking.json").exists() else []),
-            ]
-        except Exception as exc:
-            manifest["errors"].append(f"Synchronized container finalization failed: {exc}")
+        if live_only:
+            manifest["container"] = {"skipped": "live-only mode"}
+        else:
+            try:
+                manifest["container"] = build_capture_container(output_dir, manifest, remove_fragments=True)
+                manifest["assets"] = [
+                    {
+                        "sensor": "synchronized_capture",
+                        "filename": "capture.npz",
+                        "content_type": "application/x-npz",
+                        "coverage": "all synchronized sensor samples",
+                        "labels": manifest.get("labels") or [],
+                    },
+                    *([{
+                        "sensor": "radar_tracking",
+                        "filename": "xy-tracking.json",
+                        "content_type": "application/json",
+                        "labels": manifest.get("labels") or [],
+                    }] if (output_dir / "xy-tracking.json").exists() else []),
+                ]
+            except Exception as exc:
+                manifest["errors"].append(f"Synchronized container finalization failed: {exc}")
         manifest["status"] = "success" if not manifest["errors"] else "partial" if manifest["warnings"] else "error"
         manifest = compact_manifest(manifest)
         write_json_atomic(manifest_file, manifest)

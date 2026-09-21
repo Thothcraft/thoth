@@ -96,6 +96,11 @@ RADAR_ROOM_CONFIG = MMW_RELEASE / 'example_2_advanced' / 'config' / 'room_config
 RADAR_LIVE_STALE_SECONDS = max(
     5.0, float(os.getenv('THOTH_RADAR_LIVE_STALE_SECONDS', '12.0'))
 )
+# While the Sensor Lab page is open it heartbeats here; the collector watches
+# this file and switches to a dedicated live-streaming mode (no minute
+# collection, no model inference) so the selected sensor gets the full CPU.
+LIVE_SESSION_PATH = THOTH_ROOT / 'config' / 'live_session.json'
+LIVE_SESSION_TTL_SECONDS = 15.0
 if str(MMW_RELEASE) not in sys.path:
     sys.path.append(str(MMW_RELEASE))
 
@@ -496,6 +501,34 @@ def _current_live_video_path() -> Optional[Path]:
     return None
 
 
+def _live_session_dir() -> Optional[Path]:
+    """Return the live-mode pseudo-minute dir while a live session is fresh."""
+    try:
+        session = _read_json_file(LIVE_SESSION_PATH, {})
+        if time.time() - float(session.get('ts') or 0) >= LIVE_SESSION_TTL_SECONDS:
+            return None
+        live_dir = Path(Config.CAPTURE_DATA_DIR).expanduser() / 'live'
+        return live_dir if live_dir.is_dir() else None
+    except Exception:
+        return None
+
+
+@app.route('/api/live/session', methods=['GET', 'POST'])
+def api_live_session():
+    """Heartbeat from the Sensor Lab page: marks live streaming as wanted.
+
+    The collector checks this file and pauses minute collection + model
+    inference while it stays fresh, dedicating the device to streaming the
+    selected sensor at its maximum rate.
+    """
+    sensor = str(request.values.get('sensor') or '')[:32]
+    try:
+        _write_json_file(LIVE_SESSION_PATH, {'sensor': sensor, 'ts': time.time()})
+    except Exception as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 500
+    return jsonify({'success': True})
+
+
 def _best_live_minute_for_kind(kind: str) -> tuple[Optional[Path], Dict[str, Optional[Path]]]:
     """Return the best available minute folder and file map for a live kind."""
     def _has_kind(files: Dict[str, Optional[Path]]) -> bool:
@@ -525,6 +558,14 @@ def _best_live_minute_for_kind(kind: str) -> tuple[Optional[Path], Dict[str, Opt
         if kind == 'sensehat':
             return bool(files.get('sense_hat') and files['sense_hat'].exists())
         return False
+
+    # Live-streaming mode writes sensor files into a dedicated pseudo-minute
+    # dir; while the session is fresh it is the authoritative live source.
+    live_dir = _live_session_dir()
+    if live_dir is not None:
+        live_files = capture_files(live_dir)
+        if _has_kind(live_files):
+            return live_dir, live_files
 
     current = current_minute()
     if current:

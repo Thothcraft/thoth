@@ -873,6 +873,12 @@
   refreshInventory();
   window.setInterval(() => { if (!document.hidden) refreshInventory(); }, 30000);
 
+  // Heartbeat: while this page is open the collector pauses minute
+  // collection + model inference and streams sensors at full rate.
+  function beatSession() { fetch('/api/live/session?sensor=' + sensor).catch(() => {}); }
+  beatSession();
+  window.setInterval(beatSession, 2000);
+
   renderTabs();
   startPolling();
   startRenderLoop();

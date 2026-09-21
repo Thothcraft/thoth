@@ -28,7 +28,15 @@ CAPTURE_SETTINGS_PATH = Path(
     os.environ.get("THOTH_CAPTURE_SETTINGS", THOTH_ROOT / "config" / "capture_settings.json")
 )
 PAUSE_PATH = Path(os.environ.get("THOTH_COLLECTOR_PAUSE", THOTH_ROOT / "config" / "collector.pause"))
+# While the Sensor Lab page is open it heartbeats this file; the collector
+# then pauses minute collection + model inference and runs a dedicated
+# live-streaming child so the selected sensor gets the full device.
+LIVE_SESSION_PATH = Path(os.environ.get("THOTH_LIVE_SESSION", THOTH_ROOT / "config" / "live_session.json"))
+LIVE_SESSION_TTL_SECONDS = 15.0
 active_captures: list[subprocess.Popen] = []
+live_capture: subprocess.Popen | None = None
+live_capture_started_at = 0.0
+LIVE_RESTART_MIN_SECONDS = 5.0
 shutdown_requested = False
 
 sys.path.insert(0, str(THOTH_ROOT / "src"))
@@ -82,10 +90,20 @@ def requested_pause() -> bool:
     return PAUSE_PATH.exists()
 
 
+def live_session_active() -> bool:
+    """True while the Sensor Lab heartbeat is fresh."""
+    try:
+        data = json.loads(LIVE_SESSION_PATH.read_text(encoding="utf-8"))
+        return time.time() - float(data.get("ts") or 0) < LIVE_SESSION_TTL_SECONDS
+    except Exception:
+        return False
+
+
 def handle_shutdown(_signum, _frame) -> None:
     global shutdown_requested
     shutdown_requested = True
     terminate_captures()
+    terminate_live_capture()
 
 
 def load_capture_settings() -> dict:
@@ -126,6 +144,30 @@ def terminate_captures() -> None:
         except subprocess.TimeoutExpired:
             capture.kill()
     reap_captures()
+
+
+def terminate_live_capture() -> None:
+    global live_capture
+    if live_capture is None:
+        return
+    if live_capture.poll() is None:
+        live_capture.terminate()
+        try:
+            live_capture.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            live_capture.kill()
+    live_capture = None
+
+
+def start_live_capture(python: str, capture_script: str) -> subprocess.Popen:
+    """Spawn the dedicated live-streaming worker (no minute collection)."""
+    settings = load_capture_settings()
+    command = [python, capture_script, "--live-only"]
+    for sensor, flag in SENSOR_FLAGS.items():
+        if settings["sensors"].get(sensor) is False:
+            command.append(flag)
+    print("Live session active: streaming sensors at full rate (collection paused)", flush=True)
+    return subprocess.Popen(command, start_new_session=True)
 
 
 def reap_captures() -> None:
@@ -170,6 +212,7 @@ def start_capture(python: str, capture_script: str, target: datetime) -> subproc
 
 
 def main() -> int:
+    global live_capture, live_capture_started_at
     args = parse_args()
     capture_script = str(Path(args.capture_script).expanduser())
     if not Path(capture_script).exists():
@@ -186,6 +229,27 @@ def main() -> int:
     if target.timestamp() - time.time() < PREPARE_LEAD_SECONDS:
         target += timedelta(minutes=1)
     while not shutdown_requested:
+        if live_session_active():
+            # Sensor Lab open: stop minute collection + models, stream sensors.
+            terminate_captures()
+            if live_capture is None or live_capture.poll() is not None:
+                if time.monotonic() - live_capture_started_at >= LIVE_RESTART_MIN_SECONDS:
+                    terminate_live_capture()
+                    live_capture = start_live_capture(args.python, capture_script)
+                    live_capture_started_at = time.monotonic()
+            time.sleep(0.5)
+            target = next_minute_boundary()
+            if target.timestamp() - time.time() < PREPARE_LEAD_SECONDS:
+                target += timedelta(minutes=1)
+            continue
+        if live_capture is not None:
+            # Session ended — resume normal minute collection.
+            print("Live session ended: resuming minute collection", flush=True)
+            terminate_live_capture()
+            target = next_minute_boundary()
+            if target.timestamp() - time.time() < PREPARE_LEAD_SECONDS:
+                target += timedelta(minutes=1)
+            continue
         if requested_pause():
             terminate_captures()
             time.sleep(0.5)
@@ -195,13 +259,13 @@ def main() -> int:
             continue
         prepare_at = target - timedelta(seconds=PREPARE_LEAD_SECONDS)
         print(f"Preparing capture for {target.isoformat(timespec='seconds')}")
-        while not shutdown_requested and not requested_pause():
+        while not shutdown_requested and not requested_pause() and not live_session_active():
             reap_captures()
             remaining = prepare_at.timestamp() - time.time()
             if remaining <= 0:
                 break
             time.sleep(min(remaining, 0.25))
-        if requested_pause() or shutdown_requested:
+        if requested_pause() or shutdown_requested or live_session_active():
             continue
         # The child imports and configures during the lead time, then sleeps on
         # its explicit target. At most two children coexist for a few seconds:
@@ -216,6 +280,7 @@ def main() -> int:
                 target += timedelta(minutes=1)
 
     terminate_captures()
+    terminate_live_capture()
     return 0
 
 
