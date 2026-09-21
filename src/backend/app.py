@@ -2925,6 +2925,41 @@ def api_capture_radar_frame(minute):
     )
     rd_range_axis = (np.arange(rd_power.shape[0]) * range_res).round(3).tolist()
 
+    # Range-azimuth: range FFT per antenna, then a Bartlett across-antenna FFT
+    # for bearing. 3 RX give a coarse azimuth; zero-pad for a smoother map.
+    n_rx = int(cube.shape[0])
+    range_azimuth = None
+    if n_rx >= 2:
+        rc = np.mean(range_fft, axis=1)  # rx x range (complex)
+        naz = 32
+        az = np.fft.fftshift(np.fft.fft(rc, n=naz, axis=0), axes=0)  # az x range
+        az_power = np.abs(az) ** 2
+        az_db = 20.0 * np.log10(np.maximum(az_power, np.finfo(float).tiny))
+        afinite = az_db[np.isfinite(az_db)]
+        if afinite.size:
+            afloor = float(np.percentile(afinite, 55.0))
+            aceil = float(np.percentile(afinite, 99.5))
+            az_norm = np.clip((az_db - afloor) / max(1.0, aceil - afloor), 0.0, 1.0)
+        else:
+            az_norm = np.zeros_like(az_db)
+        # lambda/2 spacing -> spatial frequency maps to sin(theta)
+        azimuth_axis = np.degrees(
+            np.arcsin(np.clip(np.fft.fftshift(np.fft.fftfreq(naz)) * 2.0, -1.0, 1.0))
+        )
+        range_azimuth = {
+            'rows': int(az_norm.shape[0]),
+            'columns': int(az_norm.shape[1]),
+            'values': np.rint(az_norm * 255.0).astype(np.uint8).ravel().tolist(),
+            'x': np.asarray(azimuth_axis).round(1).tolist(),
+            'y': rd_range_axis,
+        }
+
+    # Per-frame SNR: strongest range-bin peak vs the median noise floor.
+    frame_power = np.mean(np.abs(range_fft) ** 2, axis=(0, 1))  # per range bin
+    noise = float(np.median(frame_power)) if frame_power.size else 0.0
+    peak = float(np.max(frame_power)) if frame_power.size else 0.0
+    snr_db = 10.0 * np.log10(max(peak, 1e-12) / max(noise, 1e-12))
+
     return jsonify({
         'status': 'success',
         'minute': minute,
@@ -2933,6 +2968,7 @@ def api_capture_radar_frame(minute):
         'frame': frame_index,
         'frame_count': frame_count,
         'seq': int(seq),
+        'snr_db': round(float(snr_db), 2),
         'range_profile': {
             'x': range_axis,
             'series': np.round(profile_db, 2).tolist(),
@@ -2945,7 +2981,51 @@ def api_capture_radar_frame(minute):
             'x': np.asarray(velocity_axis).round(3).tolist(),
             'y': rd_range_axis,
         },
+        'range_azimuth': range_azimuth,
     })
+
+
+@app.route('/api/captures/<minute>/radar/snr')
+def api_capture_radar_snr(minute):
+    """Per-frame detection SNR across the whole minute.
+
+    Decodes every radar frame's range profile and reports the strongest peak's
+    margin over the median noise floor — the same quantity the live SNR plot
+    shows, computed offline for a stored minute.
+    """
+    minute_dir = get_minute(minute)
+    if not minute_dir:
+        abort(404, description='Minute folder not found')
+    if np is None or not all((parse_radar_cfg, read_uint12, split_samples)):
+        abort(503, description='Radar decode dependencies unavailable')
+    files = capture_files(minute_dir)
+    radar_bins = files.get('radar_bins') or []
+    if not radar_bins:
+        abort(404, description='No radar chunks in this minute')
+    setting = _radar_setting()
+    radar_cfg = parse_radar_cfg(setting) if setting else None
+    if not radar_cfg:
+        abort(500, description='Radar configuration could not be loaded')
+    chirps_n = int(radar_cfg['num_chirps_per_frame'])
+    samples_n = int(radar_cfg['num_samples_per_chirp'])
+    antennas = int(radar_cfg['num_antennas'])
+
+    series = []
+    for bin_path in radar_bins:
+        for seq, raw_data in _iter_radar_frames(bin_path):
+            try:
+                adc = read_uint12(raw_data)
+                split = split_samples(adc, 1, chirps_n, samples_n, antennas)
+                cube = np.transpose(split[0], (2, 0, 1))
+                rfft = np.fft.rfft(cube - cube.mean(axis=2, keepdims=True), axis=2)
+                power = np.mean(np.abs(rfft) ** 2, axis=(0, 1))
+                noise = float(np.median(power)) if power.size else 0.0
+                peak = float(np.max(power)) if power.size else 0.0
+                snr = 10.0 * np.log10(max(peak, 1e-12) / max(noise, 1e-12))
+                series.append([int(seq), round(float(snr), 2)])
+            except Exception:
+                continue
+    return jsonify({'status': 'success', 'minute': minute, 'frames': len(series), 'snr': series})
 
 
 @app.route('/api/captures/<minute>/upload', methods=['POST'])

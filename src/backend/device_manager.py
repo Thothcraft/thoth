@@ -43,6 +43,14 @@ def _clamp_fps(value: Any) -> float:
         return 1.0
 
 
+def _clamp_rolling_window(value: Any) -> float:
+    """Coerce the CSI rolling-variance window to a sane 0.1–10 s range."""
+    try:
+        return min(10.0, max(0.1, float(value)))
+    except (TypeError, ValueError):
+        return 0.5
+
+
 def _clamp_threshold_db(value: Any) -> float:
     """Coerce a radar detection threshold into [0, 30] dB (default 8)."""
     try:
@@ -428,6 +436,7 @@ class DeviceManager:
             'csi_device_ids': {},
             'camera_fps': 1.0,
             'radar_detection_threshold_db': 8.0,
+            'csi_rolling_window_s': 0.5,
             'calibrations': {},
             'revision': 0,
             'updated_at': None,
@@ -475,6 +484,9 @@ class DeviceManager:
             'camera_fps': _clamp_fps(source.get('camera_fps')),
             'radar_detection_threshold_db': _clamp_threshold_db(
                 source.get('radar_detection_threshold_db')
+            ),
+            'csi_rolling_window_s': _clamp_rolling_window(
+                source.get('csi_rolling_window_s')
             ),
             'calibrations': source.get('calibrations') if isinstance(source.get('calibrations'), dict) else {},
             'revision': revision,

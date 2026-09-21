@@ -121,6 +121,26 @@
             <button type="button" id="sensor-debug-reload" class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">Reload</button>
         </div>
 
+        <div class="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs text-slate-600">
+            <label class="flex items-center gap-2" title="Rolling-variance window — saved to capture settings and reused for processed minutes">
+                <span class="font-semibold uppercase tracking-wide text-slate-500">Rolling window</span>
+                <input id="csi-roll" type="range" min="0.1" max="5" step="0.1" value="0.5" class="w-32 accent-slate-950">
+                <span id="csi-roll-val" class="font-mono">0.5 s</span>
+            </label>
+            <label class="flex items-center gap-2" title="Fixed Y-axis range for the line plots (leave blank for auto)">
+                <span class="font-semibold uppercase tracking-wide text-slate-500">Y-axis</span>
+                <input id="y-min" type="number" step="any" placeholder="auto" class="w-16 rounded border border-slate-300 px-1.5 py-0.5 font-mono">
+                <span>to</span>
+                <input id="y-max" type="number" step="any" placeholder="auto" class="w-16 rounded border border-slate-300 px-1.5 py-0.5 font-mono">
+            </label>
+            <label class="flex items-center gap-2" title="Time window shown for the CSI plots">
+                <span class="font-semibold uppercase tracking-wide text-slate-500">Window</span>
+                <select id="csi-window" class="rounded border border-slate-300 px-1.5 py-0.5 font-mono">
+                    <option value="0" selected>full minute</option><option value="10">10 s</option>
+                    <option value="20">20 s</option><option value="30">30 s</option>
+                </select>
+            </label>
+        </div>
         <div class="mt-4 grid gap-4 lg:grid-cols-2">
             <div class="rounded-xl border border-slate-200 p-3">
                 <div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold uppercase tracking-wide text-slate-500">CSI amplitude</span><span id="csi-amp-meta" class="text-xs text-slate-400">loading…</span></div>
@@ -129,6 +149,17 @@
             <div class="rounded-xl border border-slate-200 p-3">
                 <div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold uppercase tracking-wide text-slate-500">CSI rolling variance</span><span id="csi-var-meta" class="text-xs text-slate-400">loading…</span></div>
                 <canvas id="csi-var" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+            </div>
+        </div>
+
+        <div class="mt-4 grid gap-4 lg:grid-cols-2">
+            <div class="rounded-xl border border-slate-200 p-3">
+                <div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold uppercase tracking-wide text-slate-500">Range–Azimuth</span><span id="radar-ra-meta" class="text-xs text-slate-400">—</span></div>
+                <canvas id="radar-ra" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
+            </div>
+            <div class="rounded-xl border border-slate-200 p-3">
+                <div class="mb-2 flex items-center justify-between"><span class="text-xs font-semibold uppercase tracking-wide text-slate-500">Detection SNR (whole minute)</span><span id="radar-snr-meta" class="text-xs text-slate-400">loading…</span></div>
+                <canvas id="radar-snr" class="h-56 w-full rounded-lg bg-slate-950"></canvas>
             </div>
         </div>
 
@@ -634,6 +665,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     return s[i].map((c, k) => Math.round(c + (s[i + 1][k] - c) * t));
   }
 
+  // Fixed/adjustable y-axis + time window, shared by the line plots.
+  let yMin = null, yMax = null, csiWindowS = 0, rollingWin = 0.5;
   function drawLines(canvas, series, opts) {
     const { ctx, w, h } = fit(canvas);
     ctx.clearRect(0, 0, w, h);
@@ -648,6 +681,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       ctx.fillText(opts.empty || 'no data', w / 2, h / 2);
       return;
     }
+    // Fixed y-axis overrides auto-ranging when both bounds are set.
+    if (yMin != null && yMax != null && yMax > yMin) { vMin = yMin; vMax = yMax; }
+    // Time window: show only the last csiWindowS seconds when set.
+    if (csiWindowS > 0) tMin = Math.max(tMin, tMax - csiWindowS * 1e9);
     const span = vMax - vMin || 1, tSpan = tMax - tMin || 1;
     ctx.strokeStyle = 'rgba(148,163,184,.25)'; ctx.lineWidth = 1;
     ctx.fillStyle = '#94a3b8'; ctx.font = '10px ui-monospace,monospace';
@@ -663,10 +700,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     for (const s of series) {
       ctx.beginPath();
-      s.pts.forEach((p, i) => {
+      let started = false;
+      s.pts.forEach((p) => {
+        if (p[0] < tMin) return;
         const x = pad + (p[0] - tMin) / tSpan * (w - pad * 2);
         const y = pad + (1 - (p[1] - vMin) / span) * (h - pad * 2);
-        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        started ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        started = true;
       });
       ctx.strokeStyle = s.color; ctx.lineWidth = 1.3; ctx.stroke();
     }
@@ -725,33 +765,38 @@ document.addEventListener('DOMContentLoaded', async () => {
         return;
       }
       csiSamples = body.samples;
-      const byRx = new Map();
-      for (const s of csiSamples) { if (!byRx.has(s[1])) byRx.set(s[1], []); byRx.get(s[1]).push(s); }
-      const ampSeries = [...byRx.entries()].map(([rx, arr]) => ({
-        color: RX_COLORS[rx % RX_COLORS.length],
-        pts: arr.map(s => [s[0], s[2]]),
-      }));
-      drawLines($('csi-amp'), ampSeries, { label: 'mean subcarrier amplitude vs time' });
-      // rolling std over a 1 s trailing window per receiver
-      const WIN = 1e9;
-      const varSeries = [...byRx.entries()].map(([rx, arr]) => {
-        const out = [], vals = [];
-        let lo = 0;
-        for (let i = 0; i < arr.length; i++) {
-          vals.push(arr[i][2]);
-          while (arr[i][0] - arr[lo][0] > WIN) { vals.shift(); lo++; }
-          const m = vals.reduce((a, b) => a + b, 0) / vals.length;
-          out.push([arr[i][0], Math.sqrt(vals.reduce((a, b) => a + (b - m) * (b - m), 0) / vals.length)]);
-        }
-        return { color: RX_COLORS[rx % RX_COLORS.length], pts: out };
-      });
-      drawLines($('csi-var'), varSeries, { label: 'rolling std · 1 s window — motion shows as a rise' });
+      renderCsi();
       $('csi-amp-meta').textContent = `${body.sample_count} samples · ${body.receivers} rx`;
       $('csi-var-meta').textContent = `${body.sample_count} samples · ${body.receivers} rx`;
     } catch (e) {
       $('csi-amp-meta').textContent = String(e).slice(0, 60);
       $('csi-var-meta').textContent = String(e).slice(0, 60);
     }
+  }
+
+  function renderCsi() {
+    if (!csiSamples.length) return;
+    const byRx = new Map();
+    for (const s of csiSamples) { if (!byRx.has(s[1])) byRx.set(s[1], []); byRx.get(s[1]).push(s); }
+    const ampSeries = [...byRx.entries()].map(([rx, arr]) => ({
+      color: RX_COLORS[rx % RX_COLORS.length],
+      pts: arr.map(s => [s[0], s[2]]),
+    }));
+    drawLines($('csi-amp'), ampSeries, { label: 'mean subcarrier amplitude vs time' });
+    // rolling std over a trailing window per receiver (settable, persisted)
+    const WIN = Math.max(0.1, rollingWin) * 1e9;
+    const varSeries = [...byRx.entries()].map(([rx, arr]) => {
+      const out = [], vals = [];
+      let lo = 0;
+      for (let i = 0; i < arr.length; i++) {
+        vals.push(arr[i][2]);
+        while (arr[i][0] - arr[lo][0] > WIN) { vals.shift(); lo++; }
+        const m = vals.reduce((a, b) => a + b, 0) / vals.length;
+        out.push([arr[i][0], Math.sqrt(vals.reduce((a, b) => a + (b - m) * (b - m), 0) / vals.length)]);
+      }
+      return { color: RX_COLORS[rx % RX_COLORS.length], pts: out };
+    });
+    drawLines($('csi-var'), varSeries, { label: `rolling std · ${rollingWin.toFixed(1)} s window — motion shows as a rise` });
   }
 
   // ---- radar ---------------------------------------------------------------
@@ -777,11 +822,33 @@ document.addEventListener('DOMContentLoaded', async () => {
       radarFrameSlider.max = String(Math.max(0, radarFrameCount - 1));
       $('radar-chunk-label').textContent = `${chunk + 1}/${radarChunkCount}`;
       $('radar-frame-label').textContent = `${frame + 1}/${radarFrameCount}`;
-      $('radar-frame-meta').textContent = `seq ${body.seq} · chunk ${chunk + 1}/${radarChunkCount} · frame ${frame + 1}/${radarFrameCount}`;
+      $('radar-frame-meta').textContent = `seq ${body.seq} · chunk ${chunk + 1}/${radarChunkCount} · frame ${frame + 1}/${radarFrameCount} · SNR ${Number(body.snr_db).toFixed(1)} dB`;
       drawRangeProfile(body.range_profile);
       drawHeat($('radar-rd'), body.range_doppler, 'Velocity (m/s)', 'Range (m)');
+      if (body.range_azimuth) {
+        drawHeat($('radar-ra'), body.range_azimuth, 'Azimuth (°)', 'Range (m)');
+        $('radar-ra-meta').textContent = 'this frame';
+      }
     } catch (e) {
       if (token === radarReq) $('radar-frame-meta').textContent = String(e).slice(0, 60);
+    }
+  }
+
+  // Whole-minute detection SNR series.
+  async function loadSnr() {
+    try {
+      const r = await fetch(`/api/captures/${encodeURIComponent(MINUTE)}/radar/snr`, { cache: 'no-store' });
+      const body = await r.json();
+      if (body.status !== 'success' || !body.snr || !body.snr.length) {
+        $('radar-snr-meta').textContent = 'no radar frames';
+        drawLines($('radar-snr'), [], { empty: 'no radar frames this minute' });
+        return;
+      }
+      const pts = body.snr.map((s, i) => [i * 1e9, s[1]]); // x = frame index (s)
+      drawLines($('radar-snr'), [{ color: '#4fd5cd', pts }], { label: 'peak SNR per frame (dB)' });
+      $('radar-snr-meta').textContent = `${body.frames} frames`;
+    } catch (e) {
+      $('radar-snr-meta').textContent = String(e).slice(0, 60);
     }
   }
 
@@ -818,23 +885,57 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function stopRadarPlay() { if (radarTimer) { clearInterval(radarTimer); radarTimer = null; } $('radar-play').textContent = 'Play'; }
-  chunkSlider.addEventListener('input', () => { stopRadarPlay(); loadRadarFrame(); });
-  frameSlider.addEventListener('input', () => { stopRadarPlay(); loadRadarFrame(); });
+  radarChunkSlider.addEventListener('input', () => { stopRadarPlay(); loadRadarFrame(); });
+  radarFrameSlider.addEventListener('input', () => { stopRadarPlay(); loadRadarFrame(); });
   $('radar-play').addEventListener('click', () => {
     if (radarTimer) { stopRadarPlay(); return; }
     $('radar-play').textContent = 'Pause';
     radarTimer = setInterval(() => {
-  radarC   let f = Number(frameSlider.value) + 1, c = Number(chunkSlider.value);
-    darFra if (f > Number(frameSlider.max)) { f = 0; c = Math.min(Number(chunkSlider.max), c + 1); chunkSlider.value = String(c); }
-      frameSlider.value = String(f);
+      let f = Number(radarFrameSlider.value) + 1, c = Number(radarChunkSlider.value);
+      if (f > Number(radarFrameSlider.max)) { f = 0; c = Math.min(Number(radarChunkSlider.max), c + 1); radarChunkSlider.value = String(c); }
+      radarFrameSlider.value = String(f);
       loadRadarFrame();
     }, 200);
   });
-  $('sensor-debug-reladdarFra').addEventListener('click', () radarC> { loadCsi(); loadRadarFrame(); });
-  window.addEventListradarFner('resize', () => { if (csiSamples.length) lradarCadCsi(); loadRadarFrame()radarC });
-radarF
+  // ---- controls -------------------------------------------------------------
+  const rollSlider = $('csi-roll'), rollVal = $('csi-roll-val'), yMinIn = $('y-min'), yMaxIn = $('y-max'), winSel = $('csi-window');
+  let rollSaveTimer = null;
+  rollSlider.addEventListener('input', () => {
+    rollingWin = Number(rollSlider.value);
+    rollVal.textContent = rollingWin.toFixed(1) + ' s';
+    renderCsi();
+    clearTimeout(rollSaveTimer);
+    rollSaveTimer = setTimeout(async () => {
+      try {
+        await fetch('/api/capture-settings', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ csi_rolling_window_s: rollingWin }),
+        });
+      } catch (e) { /* keep last */ }
+    }, 350);
+  });
+  function applyYAxis() {
+    const a = parseFloat(yMinIn.value), b = parseFloat(yMaxIn.value);
+    yMin = isFinite(a) ? a : null; yMax = isFinite(b) ? b : null;
+    renderCsi(); loadSnr();
+  }
+  yMinIn.addEventListener('input', applyYAxis);
+  yMaxIn.addEventListener('input', applyYAxis);
+  winSel.addEventListener('change', () => { csiWindowS = Number(winSel.value) || 0; renderCsi(); });
+  (async function loadRoll() {
+    try {
+      const body = await (await fetch('/api/capture-settings', { cache: 'no-store' })).json();
+      const rw = Number(body.capture_settings && body.capture_settings.csi_rolling_window_s);
+      if (isFinite(rw)) { rollingWin = Math.max(0.1, Math.min(10, rw)); rollSlider.value = rollingWin; rollVal.textContent = rollingWin.toFixed(1) + ' s'; renderCsi(); }
+    } catch (e) { /* default */ }
+  })();
+
+  $('sensor-debug-reload').addEventListener('click', () => { loadCsi(); loadRadarFrame(); loadSnr(); });
+  window.addEventListener('resize', () => { if (csiSamples.length) renderCsi(); loadRadarFrame(); });
+
   loadCsi();
   loadRadarFrame();
+  loadSnr();
 })();
 </script>
 {% endblock %}

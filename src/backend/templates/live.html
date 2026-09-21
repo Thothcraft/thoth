@@ -31,7 +31,11 @@
     .view-tabs { display: flex; gap: 4px; padding: 8px 16px; border-bottom: 1px solid #1b2a30; flex-wrap: wrap; }
     .view-tab { border: 0; background: transparent; color: #5c6f74; border-radius: 7px; padding: 5px 12px; font: 600 11px ui-monospace, monospace; cursor: pointer; }
     .view-tab.active { background: #1b2a30; color: #eef6f7; }
-    .stage-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; border-top: 1px solid #1b2a30; color: #7d979c; font-size: 12px; flex-wrap: wrap; }
+    .stage-foot { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; padding: 10px 16px; border-top: 1px solid #1b2a30; color: #7d979c; font-size: 12px; }
+    .stage-foot > #stage-left { text-align: left; }
+    .stage-foot > #stage-right { text-align: right; }
+    .foot-controls { display: flex; align-items: center; gap: 14px; justify-content: center; }
+    .sens-control select, .sens-control input[type=number] { background: #122024; border: 1px solid #22333a; color: #eef6f7; border-radius: 6px; padding: 3px 6px; font: 600 11px ui-monospace, monospace; }
     .lab-full { border: 1px solid #22333a; background: #122024; color: #8fa8ad; border-radius: 8px; padding: 5px 12px; font: 700 11px ui-monospace, monospace; letter-spacing: .1em; cursor: pointer; }
     .lab-full:hover { color: #eef6f7; border-color: #4fd5cd; }
     .lab-full.active { background: #4fd5cd; border-color: #4fd5cd; color: #071012; }
@@ -104,14 +108,27 @@
         </div>
         <div class="stage-foot">
             <span id="stage-left">—</span>
-            <span class="flex items-center gap-3">
+            <span class="foot-controls">
                 <label class="sens-control" id="stage-sens" title="Detection threshold — lower is more sensitive">
                     threshold
                     <input id="sens-slider" type="range" min="2" max="15" step="0.5" value="8" aria-label="Radar detection threshold (dB)">
                     <span class="sens-val" id="sens-val">8.0 dB</span>
                 </label>
-                <span id="stage-right">—</span>
+                <label class="sens-control" id="stage-window" title="Plot time window">
+                    window
+                    <select id="window-select" aria-label="Plot window seconds">
+                        <option value="5">5 s</option><option value="10">10 s</option>
+                        <option value="30" selected>30 s</option><option value="60">60 s</option>
+                        <option value="120">120 s</option>
+                    </select>
+                </label>
+                <label class="sens-control" id="stage-roll" title="CSI rolling-variance window — saved to capture settings">
+                    rolling
+                    <input id="roll-slider" type="range" min="0.1" max="5" step="0.1" value="0.5" aria-label="CSI rolling window (s)">
+                    <span class="sens-val" id="roll-val">0.5 s</span>
+                </label>
             </span>
+            <span id="stage-right">—</span>
         </div>
         <div class="help-panel" id="stage-help-panel"></div>
     </section>
@@ -298,6 +315,7 @@
       { id: 'rd', label: 'Range–Doppler' },
       { id: 'ra', label: 'Range–Azimuth' },
       { id: 're', label: 'Range–Elevation' },
+      { id: 'raw', label: 'Raw range' },
     ]},
     { id: 'csi', label: 'WiFi CSI', views: [
       { id: 'amp', label: 'Amplitude' },
@@ -357,6 +375,14 @@
     stageEmpty.style.display = 'none';
   }
 
+  // ---- shared plot state ----------------------------------------------------
+  // Time-window (seconds) for the SNR + CSI time-series plots, persisted.
+  let windowSec = 30;
+  try { windowSec = Math.max(5, Math.min(120, Number(localStorage.getItem('lab-window-s')) || 30)); } catch (e) {}
+  // CSI rolling-variance window (seconds), persisted server-side in capture
+  // settings so processed minutes use the same value.
+  let rollingWin = 0.5;
+
   // ---- radar --------------------------------------------------------------
   let radarState = null;
   const snrBuf = [];   // {t, snr, thr, detected}
@@ -370,7 +396,7 @@
     const snr = Number(det.snr_db), thr = Number(det.threshold_db ?? body.threshold_db);
     if (isFinite(snr)) {
       snrBuf.push({ t: Date.now(), snr, thr: isFinite(thr) ? thr : 8, detected: !!det.detected });
-      if (snrBuf.length > 900) snrBuf.shift();
+      if (snrBuf.length > 2400) snrBuf.shift();
     }
     const loc = body.intensity && body.intensity.example2_xy && body.intensity.example2_xy.location;
     const score = Number(body.intensity && body.intensity.example2_xy && body.intensity.example2_xy.score);
@@ -455,7 +481,7 @@
     ctx.clearRect(0, 0, w, h);
     const pad = 44;
     if (snrBuf.length < 2) return false;
-    const tMax = snrBuf[snrBuf.length - 1].t, tMin = Math.max(snrBuf[0].t, tMax - 90000);
+    const tMax = snrBuf[snrBuf.length - 1].t, tMin = Math.max(snrBuf[0].t, tMax - windowSec * 1000);
     const pts = snrBuf.filter(p => p.t >= tMin);
     let vMax = -Infinity, vMin = Infinity, thr = 8;
     for (const p of pts) { vMax = Math.max(vMax, p.snr, p.thr); vMin = Math.min(vMin, p.snr, 0); thr = p.thr; }
@@ -503,6 +529,9 @@
     } else if (view === 'snr') {
       ok = drawSnr(stageCanvas);
       if (!ok) showEmpty('Collecting SNR history — needs a few frames');
+    } else if (view === 'raw') {
+      ok = drawRangeProfile(stageCanvas, (s.maps || {}).range_profile);
+      if (!ok) showEmpty('Waiting for the raw range profile — appears after the first processed frame');
     } else {
       const key = { rd: 'range_doppler', ra: 'range_azimuth', re: 'range_elevation' }[view];
       const labels = {
@@ -518,9 +547,45 @@
     if (ok) stageEmpty.style.display = 'none';
   }
 
+  // Raw range profile {values: dB per range bin, x: range axis (m)}.
+  function drawRangeProfile(canvas, prof) {
+    const { ctx, w, h } = fitCanvas(canvas);
+    ctx.clearRect(0, 0, w, h);
+    const pad = 44;
+    if (!prof || !Array.isArray(prof.values) || !prof.values.length) return false;
+    const vals = prof.values, xs = prof.x || [];
+    let vMin = Infinity, vMax = -Infinity;
+    for (const v of vals) { if (isFinite(v)) { vMin = Math.min(vMin, v); vMax = Math.max(vMax, v); } }
+    if (!isFinite(vMin)) return false;
+    const span = vMax - vMin || 1;
+    ctx.strokeStyle = '#1b2a30'; ctx.lineWidth = 1;
+    ctx.fillStyle = '#5c6f74'; ctx.font = '10px ui-monospace,monospace';
+    for (let i = 0; i <= 4; i++) {
+      const gy = pad + (h - pad * 2) * i / 4;
+      ctx.beginPath(); ctx.moveTo(pad, gy); ctx.lineTo(w - pad, gy); ctx.stroke();
+      ctx.textAlign = 'right'; ctx.fillText((vMax - span * i / 4).toFixed(0), pad - 6, gy + 3);
+    }
+    ctx.beginPath();
+    vals.forEach((v, i) => {
+      const x = pad + i / (vals.length - 1) * (w - pad * 2);
+      const y = pad + (1 - (v - vMin) / span) * (h - pad * 2);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.strokeStyle = '#4fd5cd'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = '#aebdc1'; ctx.textAlign = 'center';
+    const x0 = xs[0] || 0, x1 = xs[xs.length - 1] || vals.length;
+    for (let i = 0; i <= 5; i++) {
+      const x = pad + (w - pad * 2) * i / 5;
+      ctx.fillText((x0 + (x1 - x0) * i / 5).toFixed(1) + 'm', x, h - pad + 16);
+    }
+    ctx.fillStyle = '#7d979c'; ctx.textAlign = 'left';
+    ctx.fillText(`range-FFT energy ${vMin.toFixed(0)}–${vMax.toFixed(0)} dB · collapsed over Doppler + antennas`, pad, pad - 12);
+    return true;
+  }
+
   // ---- CSI ----------------------------------------------------------------
   let csiCursor = '', csiBuf = [], csiHz = 0;
-  const CSI_WINDOW_S = 6;
+  const CSI_WINDOW_S = 6; // fallback; live window is windowSec
   async function pollCsi() {
     const body = await getJson(URLS.csiTail + '?cursor=' + encodeURIComponent(csiCursor));
     if (body.status !== 'success') { setRate('no CSI', true); showEmpty('Waiting for CSI packets'); return; }
@@ -528,7 +593,10 @@
     csiCursor = body.cursor || csiCursor;
     const now = body.samples && body.samples.length ? body.samples[body.samples.length - 1][0] : 0;
     for (const s of body.samples || []) csiBuf.push(s);
-    if (now) csiBuf = csiBuf.filter(s => now - s[0] < CSI_WINDOW_S * 1e9);
+    // Keep enough history for the larger of the display window and the
+    // rolling-variance window.
+    const keepS = Math.max(windowSec, rollingWin + 2, 8);
+    if (now) csiBuf = csiBuf.filter(s => now - s[0] < keepS * 1e9);
     // measured rate over the last second of sample time
     if (now) csiHz = csiBuf.filter(s => now - s[0] < 1e9).length;
     setRate(csiHz + ' Hz', csiHz === 0);
@@ -542,8 +610,8 @@
     const rxColors = ['#4fd5cd', '#f2a93b', '#a78bfa', '#f472b6'];
     let series;
     if (view === 'var') {
-      // rolling std over a 0.5 s trailing window, per receiver
-      const WIN = 0.5e9;
+      // rolling std over a trailing window, per receiver (settable, persisted)
+      const WIN = Math.max(0.1, rollingWin) * 1e9;
       const byRx = new Map();
       for (const s of csiBuf) { if (!byRx.has(s[1])) byRx.set(s[1], []); byRx.get(s[1]).push(s); }
       series = [...byRx.entries()].map(([rx, arr]) => {
@@ -578,7 +646,7 @@
     const { ctx, w, h } = fitCanvas(stageCanvas);
     ctx.clearRect(0, 0, w, h);
     const pad = 44;
-    const tMax = csiBuf[csiBuf.length - 1][0], tMin = tMax - CSI_WINDOW_S * 1e9;
+    const tMax = csiBuf[csiBuf.length - 1][0], tMin = tMax - windowSec * 1e9;
     const rxIds = [...new Set(csiBuf.map(s => s[1]))].sort((a, b) => a - b);
     const cols = 160, rows = Math.max(1, rxIds.length);
     let vMin = Infinity, vMax = -Infinity;
@@ -625,7 +693,7 @@
     const { ctx, w, h } = fitCanvas(stageCanvas);
     ctx.clearRect(0, 0, w, h);
     const pad = 44;
-    const tMax = csiBuf[csiBuf.length - 1][0], tMin = tMax - CSI_WINDOW_S * 1e9;
+    const tMax = csiBuf[csiBuf.length - 1][0], tMin = tMax - windowSec * 1e9;
     const rxColors = ['#4fd5cd', '#f2a93b', '#a78bfa', '#f472b6'];
     const series = csiSeries();
     let vMin = Infinity, vMax = -Infinity;
@@ -654,7 +722,7 @@
       ctx.strokeStyle = rxColors[s.rx % rxColors.length]; ctx.lineWidth = 1.4; ctx.stroke();
     }
     ctx.fillStyle = '#7d979c'; ctx.textAlign = 'left';
-    ctx.fillText(view === 'var' ? 'rolling std · 0.5 s window' : 'mean subcarrier amplitude', pad, pad - 12);
+    ctx.fillText(view === 'var' ? `rolling std · ${rollingWin.toFixed(1)} s window` : 'mean subcarrier amplitude', pad, pad - 12);
   }
 
   // ---- camera -------------------------------------------------------------
@@ -793,12 +861,16 @@
     env: '<b>Sense HAT</b> — temperature, humidity, pressure and IMU magnitudes at 1 Hz, with a temperature sparkline for the current minute.',
   };
   const denoiseBtn = $('stage-denoise'), helpBtn = $('stage-help'), helpPanel = $('stage-help-panel'), sensCtl = $('stage-sens'), sensSlider = $('sens-slider'), sensVal = $('sens-val');
+  const winCtl = $('stage-window'), winSelect = $('window-select'), rollCtl = $('stage-roll'), rollSlider = $('roll-slider'), rollVal = $('roll-val');
+  const WINDOW_VIEWS = new Set(['snr', 'amp', 'var', 'heat']);
   function syncControls() {
     const canDenoise = DENOISE_VIEWS.has(view);
     denoiseBtn.disabled = !canDenoise;
     denoiseBtn.classList.toggle('active', canDenoise && denoiseOn(view));
     denoiseBtn.setAttribute('aria-pressed', String(canDenoise && denoiseOn(view)));
     sensCtl.style.display = sensor === 'radar' ? 'inline-flex' : 'none';
+    winCtl.style.display = WINDOW_VIEWS.has(view) ? 'inline-flex' : 'none';
+    rollCtl.style.display = view === 'var' ? 'inline-flex' : 'none';
     helpPanel.innerHTML = HELP[view] || '';
   }
   denoiseBtn.addEventListener('click', () => {
@@ -830,10 +902,39 @@
   (async function loadSens() {
     try {
       const body = await getJson('/api/capture-settings');
-      const v = Number(body.capture_settings && body.capture_settings.radar_detection_threshold_db);
+      const cs = body.capture_settings || {};
+      const v = Number(cs.radar_detection_threshold_db);
       if (isFinite(v)) { sensSlider.value = v; sensVal.textContent = v.toFixed(1) + ' dB'; }
-    } catch (e) { /* default 8 dB */ }
+      const rw = Number(cs.csi_rolling_window_s);
+      if (isFinite(rw)) { rollingWin = Math.max(0.1, Math.min(10, rw)); rollSlider.value = rollingWin; rollVal.textContent = rollingWin.toFixed(1) + ' s'; }
+    } catch (e) { /* defaults */ }
   })();
+
+  // Plot time window — localStorage only (display preference).
+  winSelect.value = String(windowSec);
+  winSelect.addEventListener('change', () => {
+    windowSec = Math.max(5, Math.min(120, Number(winSelect.value) || 30));
+    try { localStorage.setItem('lab-window-s', String(windowSec)); } catch (e) {}
+    drawStage();
+  });
+
+  // CSI rolling-variance window — persisted to capture settings so processed
+  // minutes use the same window.
+  let rollSaveTimer = null;
+  rollSlider.addEventListener('input', () => {
+    rollingWin = Number(rollSlider.value);
+    rollVal.textContent = rollingWin.toFixed(1) + ' s';
+    clearTimeout(rollSaveTimer);
+    rollSaveTimer = setTimeout(async () => {
+      try {
+        await fetch('/api/capture-settings', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ csi_rolling_window_s: rollingWin }),
+        });
+      } catch (e) { /* keep last */ }
+    }, 350);
+    drawStage();
+  });
 
   $('stage-full').addEventListener('click', () => {
     const stage = $('lab-stage');

@@ -394,6 +394,15 @@ def _live_map_payloads(processor: Any, radar_config: Dict[str, Any]) -> Dict[str
                 range_bin,
             ),
         }
+        # Raw range profile: range-FFT energy collapsed over Doppler and
+        # antennas, in dB — the closest view to unprocessed radar returns.
+        profile_db = 20.0 * np.log10(
+            np.maximum(np.mean(np.abs(rd_spectrum) ** 2, axis=(1, 2)), np.finfo(float).tiny)
+        )
+        maps["range_profile"] = {
+            "values": np.asarray(profile_db, dtype=float).round(2).tolist(),
+            "x": np.asarray(range_bin, dtype=float).round(3).tolist(),
+        }
         if isinstance(beam_range, np.ndarray) and beam_range.ndim == 2:
             maps["range_azimuth"] = _map_u8(
                 _norm_db(beam_range),

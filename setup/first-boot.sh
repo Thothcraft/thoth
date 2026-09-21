@@ -26,9 +26,11 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 log "Installing Raspberry Pi system dependencies"
 apt-get update -qq
+# Note: libopencv-dev and docker.io are intentionally NOT installed — nothing
+# in the codebase uses cv2, and Home Assistant is a manual opt-in (see below).
 apt-get install -y -qq \
     python3-venv python3-pip python3-dev python3-spidev python3-gpiozero \
-    libopencv-dev ffmpeg v4l-utils sox openssh-server avahi-daemon avahi-utils docker.io
+    ffmpeg v4l-utils sox openssh-server avahi-daemon avahi-utils
 apt-get install -y -qq python3-picamera2 || true
 apt-get install -y -qq python3-rpi.gpio || true
 # Sense HAT support (optional — only present on some devices)
@@ -59,7 +61,6 @@ fi
 for group in dialout video render spi gpio; do
     getent group "$group" >/dev/null 2>&1 && usermod -aG "$group" "$SERVICE_USER"
 done
-getent group docker >/dev/null 2>&1 && usermod -aG docker "$SERVICE_USER"
 
 log "Creating Python environment"
 python3 -m venv --system-site-packages "$VENV_DIR"
@@ -67,12 +68,17 @@ python3 -m venv --system-site-packages "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install -q \
     flask flask-socketio flask-cors requests python-dotenv eventlet netifaces \
     APScheduler psutil 'PyJWT>=2.8.0' numpy numba scipy pyfftw spidev \
-    gpiozero matplotlib pyserial pexpect \
-    torch --extra-index-url https://download.pytorch.org/whl/cpu
-"$VENV_DIR/bin/python" -c 'import flask, gpiozero, numba, pyfftw, scipy, serial, spidev, torch'
+    gpiozero matplotlib pyserial pexpect
+# torch is the heaviest dependency (~90 MB ARM wheel) and only needed for
+# TorchScript model inference. Skip it on constrained devices with
+# THOTH_NO_TORCH=1 — models then report "PyTorch required" instead of running.
+if [ "${THOTH_NO_TORCH:-0}" != "1" ]; then
+    "$VENV_DIR/bin/python" -m pip install -q \
+        torch --extra-index-url https://download.pytorch.org/whl/cpu
+fi
+"$VENV_DIR/bin/python" -c 'import flask, gpiozero, numba, pyfftw, scipy, serial, spidev'
 
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$THOTH_ROOT/data" "$THOTH_ROOT/config" "$THOTH_ROOT/logs"
-install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$THOTH_ROOT/config/homeassistant"
 
 # Seed the two optional example classifiers when the checkout is next to Desktop/models.
 EXAMPLE_MODELS="$(dirname "$THOTH_ROOT")/models"
@@ -80,21 +86,14 @@ if [[ -d "$EXAMPLE_MODELS" ]]; then
   sudo -u "$SERVICE_USER" "$VENV_DIR/bin/python" "$THOTH_ROOT/setup/seed-models.py" "$EXAMPLE_MODELS" || echo "Example model import skipped; upload models from the dashboard." >&2
 fi
 
-log "Installing Home Assistant Container"
-systemctl enable --now docker
-docker pull ghcr.io/home-assistant/home-assistant:stable
-if docker container inspect homeassistant >/dev/null 2>&1; then
-    docker start homeassistant >/dev/null
-else
-    docker run -d \
-        --name homeassistant \
-        --restart unless-stopped \
-        --privileged \
-        --network host \
-        -e TZ="${TZ:-America/Toronto}" \
-        -v "$THOTH_ROOT/config/homeassistant:/config" \
-        ghcr.io/home-assistant/home-assistant:stable
-fi
+# Home Assistant is intentionally NOT installed here — it is heavy (a ~1 GB
+# docker image plus a always-on container) and overwhelms small Pis. To add it
+# manually later:
+#   sudo apt-get install -y docker.io
+#   sudo docker run -d --name homeassistant --restart unless-stopped \
+#       --privileged --network host -e TZ=America/Toronto \
+#       -v "$THOTH_ROOT/config/homeassistant:/config" \
+#       ghcr.io/home-assistant/home-assistant:stable
 
 log "Installing systemd services"
 cat > /etc/systemd/system/thoth.service <<EOF
@@ -164,7 +163,6 @@ fi
 
 touch /etc/thoth-first-boot-done
 log "Thoth installation complete: http://$DEVICE_HOSTNAME.local:5000"
-log "Home Assistant onboarding: http://$DEVICE_HOSTNAME.local:8123"
 if [ ! -e /dev/spidev0.0 ]; then
     log "Reboot once to activate the newly enabled SPI radar interface"
 fi
