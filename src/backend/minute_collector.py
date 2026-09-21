@@ -347,6 +347,7 @@ def load_processing_settings() -> dict[str, Any]:
         "sleep_study_enabled": False,
         "csi_device_ids": {},
         "camera_fps": 1.0,
+        "radar_detection_threshold_db": 8.0,
         "revision": 0,
         "updated_at": None,
     }

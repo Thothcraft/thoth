@@ -833,18 +833,19 @@ class StreamingChunkAnalyzer:
         return True
 
     def _live_publish_due(self) -> bool:
-        """True when a live-state publish is due (~5 Hz cap)."""
+        """True when a live-state publish is due (~10 Hz cap)."""
         if self.live_state_path is None:
             return False
-        publish_interval = max(0.2, 0.75 / max(1.0, self.configured_frame_rate_hz))
+        publish_interval = max(0.1, 0.75 / max(1.0, self.configured_frame_rate_hz))
         return time.monotonic() - self.last_live_publish >= publish_interval
 
     def _write_live_state(self, world_points: np.ndarray) -> None:
         """Publish the analyzed frame without blocking capture or the dashboard."""
         if self.live_state_path is None:
             return
-        # ~5 Hz is plenty for the live lab; each publish serializes ~70KB of
-        # maps, so publishing every processed frame just burns collector CPU.
+        # ~10 Hz tracks the sensor's native rate; each publish serializes
+        # ~70KB of maps, so publishing every processed frame just burns
+        # collector CPU.
         if not self._live_publish_due():
             return
         self.last_live_publish = time.monotonic()

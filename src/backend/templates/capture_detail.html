@@ -25,7 +25,11 @@
         <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
             <div>
                 <div class="text-xs uppercase tracking-[0.22em] text-slate-500">Minute folder</div>
-                <h1 class="mt-1 text-3xl font-semibold text-slate-950 font-mono">{{ minute }}</h1>
+                <div class="mt-1 flex items-center gap-3">
+                    <a id="minute-prev" href="#" class="hidden h-9 w-9 items-center justify-center rounded-full border border-slate-200 text-lg text-slate-600 hover:bg-slate-50" title="Previous minute" aria-label="Previous minute">&#8249;</a>
+                    <h1 class="text-3xl font-semibold text-slate-950 font-mono">{{ minute }}</h1>
+                    <a id="minute-next" href="#" class="hidden h-9 w-9 items-center justify-center rounded-full border border-slate-200 text-lg text-slate-600 hover:bg-slate-50" title="Next minute" aria-label="Next minute">&#8250;</a>
+                </div>
                 <p class="mt-2 text-sm text-slate-600">
                     Folder on disk: <code>{{ capture }}</code>
                 </p>
@@ -527,8 +531,41 @@ function initTabs() {
   showTab('video');
 }
 
+// Prev/next minute navigation — the timeline is ordered oldest → newest.
+const thisMinute = {{ minute|tojson }};
+let prevMinute = null, nextMinute = null;
+async function initMinuteNav() {
+  try {
+    const response = await fetch('/api/captures/timeline', {cache: 'no-store'});
+    const body = await response.json();
+    const names = (body.minutes || []).map(item => String(item.minute || ''));
+    const index = names.indexOf(thisMinute);
+    if (index < 0) return;
+    prevMinute = index > 0 ? names[index - 1] : null;
+    nextMinute = index < names.length - 1 ? names[index + 1] : null;
+    const prev = document.getElementById('minute-prev'), next = document.getElementById('minute-next');
+    if (prevMinute && prev) {
+      prev.href = `/captures/${encodeURIComponent(prevMinute)}`;
+      prev.title = `Previous minute · ${prevMinute}`;
+      prev.classList.remove('hidden'); prev.classList.add('inline-flex');
+    }
+    if (nextMinute && next) {
+      next.href = `/captures/${encodeURIComponent(nextMinute)}`;
+      next.title = `Next minute · ${nextMinute}`;
+      next.classList.remove('hidden'); next.classList.add('inline-flex');
+    }
+  } catch (error) { /* arrows stay hidden */ }
+}
+document.addEventListener('keydown', (event) => {
+  if (event.target.closest('input, textarea, select')) return;
+  if (!chunkDialog.classList.contains('hidden')) return;
+  if (event.key === 'ArrowLeft' && prevMinute) window.location.href = `/captures/${encodeURIComponent(prevMinute)}`;
+  if (event.key === 'ArrowRight' && nextMinute) window.location.href = `/captures/${encodeURIComponent(nextMinute)}`;
+});
+
 document.addEventListener('DOMContentLoaded', async () => {
   initTabs();
+  initMinuteNav();
   drawChunkMaps(chunkProgress);
   const activeMinute = {{ 'true' if minute == active_minute else 'false' }};
   let progressTimer = null;

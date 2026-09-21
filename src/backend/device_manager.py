@@ -43,6 +43,14 @@ def _clamp_fps(value: Any) -> float:
         return 1.0
 
 
+def _clamp_threshold_db(value: Any) -> float:
+    """Coerce a radar detection threshold into [0, 30] dB (default 8)."""
+    try:
+        return max(0.0, min(30.0, float(value)))
+    except (TypeError, ValueError):
+        return 8.0
+
+
 class DeviceManager:
     """Manages device registration and status updates with the Brain server."""
 
@@ -419,6 +427,7 @@ class DeviceManager:
             'sleep_study_enabled': False,
             'csi_device_ids': {},
             'camera_fps': 1.0,
+            'radar_detection_threshold_db': 8.0,
             'calibrations': {},
             'revision': 0,
             'updated_at': None,
@@ -464,6 +473,9 @@ class DeviceManager:
                 if str(port).strip() and str(device_id).strip()
             } if isinstance(source.get('csi_device_ids'), dict) else {},
             'camera_fps': _clamp_fps(source.get('camera_fps')),
+            'radar_detection_threshold_db': _clamp_threshold_db(
+                source.get('radar_detection_threshold_db')
+            ),
             'calibrations': source.get('calibrations') if isinstance(source.get('calibrations'), dict) else {},
             'revision': revision,
             'updated_at': str(updated_at) if updated_at else None,

@@ -26,12 +26,22 @@
     .sensor-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
     .sensor-tab { border: 1px solid #22333a; background: #122024; color: #8fa8ad; border-radius: 999px; padding: 7px 16px; font: 700 11px ui-monospace, monospace; letter-spacing: .12em; text-transform: uppercase; cursor: pointer; }
     .sensor-tab.active { background: #4fd5cd; border-color: #4fd5cd; color: #071012; }
+    .sensor-tab.offline { opacity: .38; border-style: dashed; }
+    .sensor-tab.offline.active { opacity: .7; }
     .view-tabs { display: flex; gap: 4px; padding: 8px 16px; border-bottom: 1px solid #1b2a30; flex-wrap: wrap; }
     .view-tab { border: 0; background: transparent; color: #5c6f74; border-radius: 7px; padding: 5px 12px; font: 600 11px ui-monospace, monospace; cursor: pointer; }
     .view-tab.active { background: #1b2a30; color: #eef6f7; }
     .stage-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; border-top: 1px solid #1b2a30; color: #7d979c; font-size: 12px; flex-wrap: wrap; }
     .lab-full { border: 1px solid #22333a; background: #122024; color: #8fa8ad; border-radius: 8px; padding: 5px 12px; font: 700 11px ui-monospace, monospace; letter-spacing: .1em; cursor: pointer; }
     .lab-full:hover { color: #eef6f7; border-color: #4fd5cd; }
+    .lab-full.active { background: #4fd5cd; border-color: #4fd5cd; color: #071012; }
+    .lab-full:disabled { opacity: .35; cursor: not-allowed; }
+    .help-panel { display: none; padding: 12px 16px; border-top: 1px solid #1b2a30; color: #aebdc1; font-size: 12px; line-height: 1.6; }
+    .help-panel.open { display: block; }
+    .help-panel b { color: #eef6f7; }
+    .sens-control { display: none; align-items: center; gap: 7px; font: 600 11px ui-monospace, monospace; color: #7d979c; }
+    .sens-control input { width: 90px; accent-color: #4fd5cd; }
+    .sens-control .sens-val { color: #4fd5cd; min-width: 48px; }
     #lab-stage:fullscreen { display: flex; flex-direction: column; background: #0d1517; }
     #lab-stage:fullscreen .lab-body { flex: 1; min-height: 0; }
     #lab-stage:fullscreen .lab-canvas { height: 100%; max-height: none; }
@@ -58,6 +68,8 @@
         <div class="lab-panel-head" style="gap:14px;flex-wrap:wrap">
             <div class="sensor-tabs" id="sensor-tabs" role="tablist" aria-label="Sensor"></div>
             <div class="flex items-center gap-2">
+                <button type="button" class="lab-full" id="stage-denoise" title="Toggle denoising for this plot" aria-pressed="false">Denoise</button>
+                <button type="button" class="lab-full" id="stage-help" title="How to read this plot" aria-expanded="false">?</button>
                 <span class="lab-rate stale" id="stage-rate">— Hz</span>
                 <button type="button" class="lab-full" id="stage-full" title="Fullscreen">⛶</button>
             </div>
@@ -92,8 +104,16 @@
         </div>
         <div class="stage-foot">
             <span id="stage-left">—</span>
-            <span id="stage-right">—</span>
+            <span class="flex items-center gap-3">
+                <label class="sens-control" id="stage-sens" title="Detection threshold — lower is more sensitive">
+                    threshold
+                    <input id="sens-slider" type="range" min="2" max="15" step="0.5" value="8" aria-label="Radar detection threshold (dB)">
+                    <span class="sens-val" id="sens-val">8.0 dB</span>
+                </label>
+                <span id="stage-right">—</span>
+            </span>
         </div>
+        <div class="help-panel" id="stage-help-panel"></div>
     </section>
 </div>
 {% endblock %}
@@ -148,6 +168,47 @@
     return c.off;
   }
 
+  // ---- denoising -----------------------------------------------------------
+  // Per-view on/off, persisted. Dense maps get a temporal EMA plus a floor
+  // gate; the sparse XY map drops stale decayed cells; CSI series get an EMA.
+  const DENOISE_KEY = 'lab-denoise';
+  let denoiseViews = {};
+  try { denoiseViews = JSON.parse(localStorage.getItem(DENOISE_KEY) || '{}') || {}; } catch (e) { denoiseViews = {}; }
+  function denoiseOn(viewId) { return !!denoiseViews[viewId]; }
+  function setDenoise(viewId, on) {
+    denoiseViews[viewId] = !!on;
+    try { localStorage.setItem(DENOISE_KEY, JSON.stringify(denoiseViews)); } catch (e) {}
+  }
+
+  const emaMaps = new Map(); // viewId -> {vals, out, stamp}
+  function denoiseDense(viewId, map, stamp) {
+    const n = map.values.length;
+    let entry = emaMaps.get(viewId);
+    if (entry && entry.stamp === stamp && entry.out && entry.out.length === n) {
+      return { rows: map.rows, columns: map.columns, values: entry.out, x: map.x, y: map.y };
+    }
+    const prev = entry && entry.vals && entry.vals.length === n ? entry.vals : null;
+    const vals = new Float32Array(n);
+    for (let i = 0; i < n; i++) { vals[i] = prev == null ? map.values[i] : prev[i] + 0.45 * (map.values[i] - prev[i]); }
+    // floor gate: drop cells below ~60th percentile of this frame
+    const sorted = Float32Array.from(vals).sort();
+    const floor = sorted[Math.floor(n * 0.6)] || 0;
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) out[i] = vals[i] <= floor ? 0 : Math.round(vals[i]);
+    emaMaps.set(viewId, { vals, out, stamp });
+    return { rows: map.rows, columns: map.columns, values: out, x: map.x, y: map.y };
+  }
+  function resetDenoise() { emaMaps.clear(); }
+
+  function emaSeries(pts, alpha) {
+    if (!pts.length) return pts;
+    const out = [[pts[0][0], pts[0][1]]];
+    for (let i = 1; i < pts.length; i++) {
+      out.push([pts[i][0], out[i - 1][1] + alpha * (pts[i][1] - out[i - 1][1])]);
+    }
+    return out;
+  }
+
   function drawAxes(ctx, w, h, pad, xAxis, yAxis, xLabel, yLabel) {
     ctx.strokeStyle = 'rgba(221,232,234,.8)'; ctx.lineWidth = 1.2;
     ctx.strokeRect(pad, pad, w - pad * 2, h - pad * 2);
@@ -194,16 +255,23 @@
   }
 
   // Native Example 2 sparse map {rows, columns, values_sparse, x_axis, y_axis}.
-  function drawExample2(canvas, map) {
+  // The GUI mirrors both axes for display, so the lateral tick labels are
+  // reversed to match the mirrored pixels.
+  function drawExample2(canvas, map, denoise) {
     const { ctx, w, h } = fitCanvas(canvas);
     ctx.clearRect(0, 0, w, h);
     const pad = 44;
     ctx.fillStyle = '#440154'; ctx.fillRect(pad, pad, w - pad * 2, h - pad * 2);
     if (map && map.rows && map.columns) {
+      // Denoise: cells hold decayed detection weights (0.8^age); dropping
+      // anything under ~0.45 removes stale trail noise, keeps fresh hits.
+      const gate = denoise ? 115 : 0;
       const img = heatImage('e2' + map.columns + 'x' + map.rows, map.rows, map.columns, (data) => {
         for (let i = 0; i < data.length; i += 4) { data[i] = 68; data[i + 1] = 1; data[i + 2] = 84; data[i + 3] = 255; }
         for (const cell of map.values_sparse || []) {
-          const src = +cell[0], v = +cell[1] / 255;
+          const src = +cell[0], raw = +cell[1];
+          if (raw <= gate) continue;
+          const v = raw / 255;
           const fwd = Math.floor(src / map.columns), lat = src % map.columns;
           const x = map.columns - 1 - lat, y = map.rows - 1 - fwd;
           if (x < 0 || x >= map.columns || y < 0 || y >= map.rows) continue;
@@ -213,7 +281,8 @@
       });
       ctx.save(); ctx.imageSmoothingEnabled = false;
       ctx.drawImage(img, pad, pad, w - pad * 2, h - pad * 2); ctx.restore();
-      drawAxes(ctx, w, h, pad, map.y_axis || [-5, 5], map.x_axis || [0, 5], 'Y / lateral (m)', 'X / forward (m)');
+      const yAxis = (map.y_axis || [-5, 5]).slice().reverse();
+      drawAxes(ctx, w, h, pad, yAxis, map.x_axis || [0, 5], 'Y / lateral (m)', 'X / forward (m)');
       return true;
     }
     return false;
@@ -223,6 +292,9 @@
   const SENSORS = [
     { id: 'radar', label: 'Radar', views: [
       { id: 'xy', label: 'X-Y Map' },
+      { id: 'xye', label: 'X-Y Energy' },
+      { id: 'traj', label: 'Target trail' },
+      { id: 'snr', label: 'Detection SNR' },
       { id: 'rd', label: 'Range–Doppler' },
       { id: 'ra', label: 'Range–Azimuth' },
       { id: 're', label: 'Range–Elevation' },
@@ -230,6 +302,7 @@
     { id: 'csi', label: 'WiFi CSI', views: [
       { id: 'amp', label: 'Amplitude' },
       { id: 'var', label: 'Rolling variance' },
+      { id: 'heat', label: 'Amplitude heatmap' },
     ]},
     { id: 'camera', label: 'Camera', views: [{ id: 'frame', label: 'Live frame' }] },
     { id: 'sensehat', label: 'Sense HAT', views: [{ id: 'env', label: 'Environment + IMU' }] },
@@ -253,9 +326,12 @@
     stageEmpty.style.display = 'flex';
   }
 
+  const offlineSensors = new Set();
   function renderTabs() {
-    $('sensor-tabs').innerHTML = SENSORS.map(s =>
-      `<button class="sensor-tab ${s.id === sensor ? 'active' : ''}" data-sensor="${s.id}" role="tab" aria-selected="${s.id === sensor}">${s.label}</button>`).join('');
+    $('sensor-tabs').innerHTML = SENSORS.map(s => {
+      const off = offlineSensors.has(s.id);
+      return `<button class="sensor-tab ${s.id === sensor ? 'active' : ''} ${off ? 'offline' : ''}" data-sensor="${s.id}" role="tab" aria-selected="${s.id === sensor}" ${off ? 'title="Not detected on this device"' : ''}>${s.label}</button>`;
+    }).join('');
     const def = SENSORS.find(s => s.id === sensor);
     $('view-tabs').innerHTML = def.views.map(v =>
       `<button class="view-tab ${v.id === view ? 'active' : ''}" data-view="${v.id}" role="tab" aria-selected="${v.id === view}">${v.label}</button>`).join('');
@@ -271,7 +347,7 @@
     const b = e.target.closest('[data-view]');
     if (!b || b.dataset.view === view) return;
     view = b.dataset.view;
-    renderTabs(); drawStage();
+    renderTabs(); syncControls(); drawStage();
   });
 
   function showStage(kind) {
@@ -283,25 +359,150 @@
 
   // ---- radar --------------------------------------------------------------
   let radarState = null;
+  const snrBuf = [];   // {t, snr, thr, detected}
+  const trailBuf = []; // {t, x, y, score}
+  let lastRadarStamp = 0;
+  function recordRadarHistory(body) {
+    const stamp = Number(body.updated_at || 0);
+    if (!stamp || stamp === lastRadarStamp) return;
+    lastRadarStamp = stamp;
+    const det = (body.intensity && body.intensity.example2_xy && body.intensity.example2_xy.detection) || {};
+    const snr = Number(det.snr_db), thr = Number(det.threshold_db ?? body.threshold_db);
+    if (isFinite(snr)) {
+      snrBuf.push({ t: Date.now(), snr, thr: isFinite(thr) ? thr : 8, detected: !!det.detected });
+      if (snrBuf.length > 900) snrBuf.shift();
+    }
+    const loc = body.intensity && body.intensity.example2_xy && body.intensity.example2_xy.location;
+    const score = Number(body.intensity && body.intensity.example2_xy && body.intensity.example2_xy.score);
+    if (Array.isArray(loc) && loc.length === 2 && loc.every(v => typeof v === 'number' && isFinite(v))) {
+      trailBuf.push({ t: Date.now(), x: loc[0], y: loc[1], score: isFinite(score) ? score : 1 });
+      if (trailBuf.length > 600) trailBuf.shift();
+    }
+  }
   async function pollRadar() {
     const body = await getJson(URLS.radar + '?t=' + Date.now());
     radarState = body;
+    recordRadarHistory(body);
     const hz = Number(body.sensor_hz || 0);
     setRate(body.stale ? 'stale' : hz.toFixed(1) + ' Hz', body.stale);
     const det = body.person_detected ? 'target detected' : 'listening';
     const staleNote = body.stale ? ` · ${String(body.stale_reason || 'stale').replace(/_/g, ' ')}` : '';
+    const detInfo = (body.intensity && body.intensity.example2_xy && body.intensity.example2_xy.detection) || {};
+    const snrNote = isFinite(Number(detInfo.snr_db)) ? ` · SNR ${Number(detInfo.snr_db).toFixed(1)} dB` : '';
     setFoot(
-      `${det} · frame ${Number(body.frame_index || 0) + 1} · ${Math.round(Number(body.age_seconds || 0) * 1000)}ms old${staleNote}`,
+      `${det}${snrNote} · frame ${Number(body.frame_index || 0) + 1} · ${Math.round(Number(body.age_seconds || 0) * 1000)}ms old${staleNote}`,
       `${Number(body.configured_hz || 0).toFixed(0)} Hz configured · ${body.target_count || 0} target(s)`
     );
   }
+  // Project the range–azimuth energy map onto the Example-2 XY grid. Unlike
+  // the binary X-Y Map this shows continuous energy, so weak returns that
+  // never passed the detection gate are still visible.
+  function xyEnergyMap(s) {
+    const ra = (s.maps || {}).range_azimuth;
+    const e2 = (s.intensity || {}).example2_xy || {};
+    if (!ra || !ra.values || !Array.isArray(ra.x) || !Array.isArray(ra.y)) return null;
+    const xAxis = e2.x_axis, yAxis = e2.y_axis;
+    if (!Array.isArray(xAxis) || !Array.isArray(yAxis) || !xAxis.length || !yAxis.length) return null;
+    const rows = xAxis.length, cols = yAxis.length;
+    const res = Math.abs(xAxis[1] - xAxis[0]) || 0.025;
+    const vals = new Array(rows * cols).fill(0);
+    for (let r = 0; r < ra.rows; r++) {
+      const range = +ra.y[r];
+      if (!isFinite(range)) continue;
+      for (let a = 0; a < ra.columns; a++) {
+        const ang = +ra.x[a] * Math.PI / 180;
+        if (!isFinite(ang)) continue;
+        const fwd = range * Math.cos(ang), lat = range * Math.sin(ang);
+        const row = Math.round(fwd / res), col = Math.round((lat - yAxis[0]) / res);
+        if (row < 0 || row >= rows || col < 0 || col >= cols) continue;
+        const idx = row * cols + col, v = +ra.values[r * ra.columns + a] || 0;
+        if (v > vals[idx]) vals[idx] = v;
+      }
+    }
+    return { rows, columns: cols, values_sparse: vals.flatMap((v, i) => v > 0 ? [[i, v]] : []), x_axis: xAxis, y_axis: yAxis };
+  }
+
+  function drawTrail(canvas) {
+    const { ctx, w, h } = fitCanvas(canvas);
+    ctx.clearRect(0, 0, w, h);
+    const pad = 44;
+    const e2 = (radarState && radarState.intensity && radarState.intensity.example2_xy) || {};
+    const xAxis = e2.x_axis || [0, 5], yAxis = e2.y_axis || [-5, 5];
+    if (!trailBuf.length) return false;
+    const x0 = xAxis[0], x1 = xAxis[xAxis.length - 1];
+    const y0 = yAxis[yAxis.length - 1], y1 = yAxis[0]; // mirrored lateral axis
+    const px = (lat) => pad + (lat - y0) / (y1 - y0 || 1) * (w - pad * 2);
+    const py = (fwd) => h - pad - (fwd - x0) / (x1 - x0 || 1) * (h - pad * 2);
+    ctx.strokeStyle = '#1b2a30';
+    ctx.strokeRect(pad, pad, w - pad * 2, h - pad * 2);
+    const now = Date.now();
+    for (const p of trailBuf) {
+      const age = Math.min(1, (now - p.t) / 30000);
+      const [r, g, b] = viridis(Math.max(0, Math.min(1, p.score)));
+      ctx.fillStyle = `rgba(${r},${g},${b},${(1 - age * 0.85).toFixed(2)})`;
+      ctx.beginPath();
+      ctx.arc(px(p.y), py(p.x), 3.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    drawAxes(ctx, w, h, pad, yAxis.slice().reverse(), xAxis, 'Y / lateral (m)', 'X / forward (m)');
+    ctx.fillStyle = '#7d979c'; ctx.font = '10px ui-monospace,monospace'; ctx.textAlign = 'left';
+    ctx.fillText(`${trailBuf.length} detections · fades over 30 s`, pad, pad - 12);
+    return true;
+  }
+
+  function drawSnr(canvas) {
+    const { ctx, w, h } = fitCanvas(canvas);
+    ctx.clearRect(0, 0, w, h);
+    const pad = 44;
+    if (snrBuf.length < 2) return false;
+    const tMax = snrBuf[snrBuf.length - 1].t, tMin = Math.max(snrBuf[0].t, tMax - 90000);
+    const pts = snrBuf.filter(p => p.t >= tMin);
+    let vMax = -Infinity, vMin = Infinity, thr = 8;
+    for (const p of pts) { vMax = Math.max(vMax, p.snr, p.thr); vMin = Math.min(vMin, p.snr, 0); thr = p.thr; }
+    const span = vMax - vMin || 1;
+    const px = (t) => pad + (t - tMin) / (tMax - tMin || 1) * (w - pad * 2);
+    const py = (v) => pad + (1 - (v - vMin) / span) * (h - pad * 2);
+    ctx.strokeStyle = '#1b2a30'; ctx.lineWidth = 1;
+    ctx.fillStyle = '#5c6f74'; ctx.font = '10px ui-monospace,monospace';
+    for (let i = 0; i <= 4; i++) {
+      const gy = pad + (h - pad * 2) * i / 4;
+      ctx.beginPath(); ctx.moveTo(pad, gy); ctx.lineTo(w - pad, gy); ctx.stroke();
+      ctx.textAlign = 'right'; ctx.fillText((vMax - span * i / 4).toFixed(1), pad - 6, gy + 3);
+    }
+    // threshold line
+    ctx.strokeStyle = '#f2a93b'; ctx.setLineDash([5, 4]);
+    ctx.beginPath(); ctx.moveTo(pad, py(thr)); ctx.lineTo(w - pad, py(thr)); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#f2a93b'; ctx.textAlign = 'left';
+    ctx.fillText(`threshold ${thr.toFixed(1)} dB`, pad + 6, py(thr) - 5);
+    // SNR trace
+    ctx.beginPath();
+    pts.forEach((p, i) => { i ? ctx.lineTo(px(p.t), py(p.snr)) : ctx.moveTo(px(p.t), py(p.snr)); });
+    ctx.strokeStyle = '#4fd5cd'; ctx.lineWidth = 1.4; ctx.stroke();
+    // detected markers
+    ctx.fillStyle = '#238653';
+    for (const p of pts) if (p.detected) { ctx.fillRect(px(p.t) - 1, h - pad - 4, 2, 4); }
+    ctx.fillStyle = '#7d979c'; ctx.textAlign = 'left';
+    ctx.fillText('peak SNR vs detection threshold · green ticks = detected frames', pad, pad - 12);
+    return true;
+  }
+
   function drawRadar() {
     showStage('canvas');
     const s = radarState || {};
     let ok = false;
     if (view === 'xy') {
-      ok = drawExample2(stageCanvas, s.intensity && s.intensity.example2_xy);
+      ok = drawExample2(stageCanvas, s.intensity && s.intensity.example2_xy, denoiseOn('xy'));
       if (!ok) showEmpty('Waiting for the native Example 2 map');
+    } else if (view === 'xye') {
+      ok = drawExample2(stageCanvas, xyEnergyMap(s), denoiseOn('xye'));
+      if (!ok) showEmpty('Waiting for range–azimuth energy — appears after the first processed frame');
+    } else if (view === 'traj') {
+      ok = drawTrail(stageCanvas);
+      if (!ok) showEmpty('No confirmed target locations yet — dots appear when the detector locks on');
+    } else if (view === 'snr') {
+      ok = drawSnr(stageCanvas);
+      if (!ok) showEmpty('Collecting SNR history — needs a few frames');
     } else {
       const key = { rd: 'range_doppler', ra: 'range_azimuth', re: 'range_elevation' }[view];
       const labels = {
@@ -309,7 +510,9 @@
         ra: ['Azimuth (°)', 'Range (m)'],
         re: ['Elevation (°)', 'Range (m)'],
       }[view];
-      ok = drawDenseMap(stageCanvas, (s.maps || {})[key], labels[0], labels[1]);
+      let map = (s.maps || {})[key];
+      if (map && denoiseOn(view)) map = denoiseDense(view, map, s.updated_at);
+      ok = drawDenseMap(stageCanvas, map, labels[0], labels[1]);
       if (!ok) showEmpty('Waiting for radar maps — appear after the first processed frame');
     }
     if (ok) stageEmpty.style.display = 'none';
@@ -332,10 +535,10 @@
     setFoot(`${csiBuf.length} samples in window`, body.truncated ? 'catching up…' : 'live');
     drawStage();
   }
-  let csiSeriesCache = { key: '', view: '', series: [] };
+  let csiSeriesCache = { key: '', view: '', denoise: false, series: [] };
   function csiSeries() {
     const key = csiBuf.length + ':' + (csiBuf.length ? csiBuf[csiBuf.length - 1][0] : 0);
-    if (csiSeriesCache.key === key && csiSeriesCache.view === view) return csiSeriesCache.series;
+    if (csiSeriesCache.key === key && csiSeriesCache.view === view && csiSeriesCache.denoise === denoiseOn(view)) return csiSeriesCache.series;
     const rxColors = ['#4fd5cd', '#f2a93b', '#a78bfa', '#f472b6'];
     let series;
     if (view === 'var') {
@@ -361,8 +564,58 @@
       for (const s of csiBuf) { if (!byRx.has(s[1])) byRx.set(s[1], []); byRx.get(s[1]).push([s[0], s[2]]); }
       series = [...byRx.entries()].map(([rx, pts]) => ({ rx, pts }));
     }
-    csiSeriesCache = { key, view, series };
+    if (denoiseOn(view)) {
+      series = series.map(s => ({ rx: s.rx, pts: emaSeries(s.pts, 0.3) }));
+    }
+    csiSeriesCache = { key, view, denoise: denoiseOn(view), series };
     return series;
+  }
+
+  function drawCsiHeat() {
+    showStage('canvas');
+    if (!csiBuf.length) { showEmpty('Waiting for CSI packets'); return false; }
+    stageEmpty.style.display = 'none';
+    const { ctx, w, h } = fitCanvas(stageCanvas);
+    ctx.clearRect(0, 0, w, h);
+    const pad = 44;
+    const tMax = csiBuf[csiBuf.length - 1][0], tMin = tMax - CSI_WINDOW_S * 1e9;
+    const rxIds = [...new Set(csiBuf.map(s => s[1]))].sort((a, b) => a - b);
+    const cols = 160, rows = Math.max(1, rxIds.length);
+    let vMin = Infinity, vMax = -Infinity;
+    for (const s of csiBuf) { vMin = Math.min(vMin, s[2]); vMax = Math.max(vMax, s[2]); }
+    const span = vMax - vMin || 1;
+    const grid = new Float32Array(rows * cols), cnt = new Float32Array(rows * cols);
+    for (const s of csiBuf) {
+      const c = Math.min(cols - 1, Math.max(0, Math.floor((s[0] - tMin) / (tMax - tMin || 1) * cols)));
+      const r = rxIds.indexOf(s[1]);
+      grid[r * cols + c] += s[2]; cnt[r * cols + c]++;
+    }
+    const img = heatImage('csiheat' + cols + 'x' + rows, rows, cols, (data) => {
+      for (let i = 0; i < rows * cols; i++) {
+        const v = cnt[i] ? (grid[i] / cnt[i] - vMin) / span : 0;
+        const [r, g, b] = viridis(cnt[i] ? v : 0);
+        const p = ((rows - 1 - Math.floor(i / cols)) * cols + i % cols) * 4;
+        data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = cnt[i] ? 255 : 40;
+      }
+    });
+    ctx.save(); ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(img, pad, pad, w - pad * 2, h - pad * 2); ctx.restore();
+    ctx.strokeStyle = 'rgba(221,232,234,.8)'; ctx.lineWidth = 1.2;
+    ctx.strokeRect(pad, pad, w - pad * 2, h - pad * 2);
+    ctx.fillStyle = '#aebdc1'; ctx.font = '11px ui-monospace,monospace';
+    ctx.textAlign = 'center';
+    for (let i = 0; i <= 5; i++) {
+      const x = pad + (w - pad * 2) * i / 5;
+      ctx.fillText(((tMin + (tMax - tMin) * i / 5) / 1e9).toFixed(1) + 's', x, h - pad + 16);
+    }
+    ctx.textAlign = 'right';
+    rxIds.forEach((rx, i) => {
+      const y = pad + (h - pad * 2) * (1 - (i + 0.5) / rows);
+      ctx.fillText('rx' + rx, pad - 8, y + 4);
+    });
+    ctx.fillStyle = '#7d979c'; ctx.textAlign = 'left';
+    ctx.fillText(`amplitude ${vMin.toFixed(1)}–${vMax.toFixed(1)} · time × receiver`, pad, pad - 12);
+    return true;
   }
 
   function drawCsi() {
@@ -463,7 +716,7 @@
   // ---- dispatcher ----------------------------------------------------------
   function drawStage() {
     if (sensor === 'radar') drawRadar();
-    else if (sensor === 'csi') drawCsi();
+    else if (sensor === 'csi') { view === 'heat' ? drawCsiHeat() : drawCsi(); }
     else if (sensor === 'camera') showStage('img');
     else showStage('tiles');
   }
@@ -484,18 +737,21 @@
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
     stageImg.src = '';
     radarState = null; csiBuf = []; csiCursor = ''; csiHz = 0;
+    snrBuf.length = 0; trailBuf.length = 0; lastRadarStamp = 0;
+    resetDenoise();
     setRate('— Hz', true); setFoot('—', '—');
     showEmpty('Waiting for data');
+    syncControls();
     drawStage();
     const run = async (fn, ms) => {
       if (pollTimer === null) return;
       try { await fn(); } catch (e) { /* keep stale state */ }
       pollTimer = setTimeout(() => run(fn, ms), document.hidden ? ms * 4 : ms);
     };
-    if (sensor === 'radar') { pollTimer = 1; run(pollRadar, 110); }
-    else if (sensor === 'csi') { pollTimer = 1; run(pollCsi, 80); }
+    if (sensor === 'radar') { pollTimer = 1; run(pollRadar, 90); }
+    else if (sensor === 'csi') { pollTimer = 1; run(pollCsi, 60); }
     else if (sensor === 'camera') { pollTimer = 1; startCamera(); }
-    else { pollTimer = 1; run(pollSense, 1000); }
+    else { pollTimer = 1; run(pollSense, 800); }
   }
 
   // ---- verdict strip --------------------------------------------------------
@@ -517,7 +773,66 @@
         }).join('');
       }
     } catch (e) { /* keep last */ }
-    setTimeout(verdictLoop, document.hidden ? 8000 : 2000);
+    setTimeout(verdictLoop, document.hidden ? 6000 : 1200);
+  })();
+
+  // ---- per-view controls ----------------------------------------------------
+  const DENOISE_VIEWS = new Set(['xy', 'xye', 'rd', 'ra', 're', 'amp', 'var']);
+  const HELP = {
+    xy: '<b>X-Y Map</b> — top-down view of the room. A bright blob is a confirmed detection: the pipeline only marks a cell when a peak stays above the SNR threshold for consecutive frames. Color shows how fresh the detection is (yellow = now, fading to purple over ~1 s). Forward = distance from the radar, lateral = left/right. No blob usually means the peak SNR is under the threshold — check Detection SNR.',
+    xye: '<b>X-Y Energy</b> — the raw beam-formed energy projected onto the room grid, before the detection gate. Bright regions are strong reflectors (walls, furniture, people). A person is a compact bright spot that moves; static clutter stays fixed. Use this to see weak returns the binary X-Y Map gates out.',
+    traj: '<b>Target trail</b> — confirmed target positions over the last 30 s. Each dot is one detection; color is the decayed confidence score, and dots fade with age. A person walking shows a moving trail; a stationary sitter shows a tight cluster.',
+    snr: '<b>Detection SNR</b> — the strongest peak\'s margin above the frame noise floor, per frame. The dashed line is the detection threshold: a frame only counts as a detection when the trace crosses it and stays coherent for 2+ frames. If the trace hovers just under the line, lower the threshold to make the sensor more sensitive.',
+    rd: '<b>Range–Doppler</b> — distance (vertical) vs radial velocity (horizontal). A moving person is a bright blob away from the 0 m/s column; the faster they move toward/away, the further left/right. Static objects pile up at 0 m/s.',
+    ra: '<b>Range–Azimuth</b> — distance (vertical) vs angle (horizontal). A bright spot is reflected energy at that range and bearing; a person is a localized blob, walls are long horizontal bands.',
+    re: '<b>Range–Elevation</b> — distance (vertical) vs up/down angle (horizontal). Separates floor-level returns from ceiling and standing-height returns.',
+    amp: '<b>CSI Amplitude</b> — mean WiFi subcarrier amplitude per receiver over the last 6 s. Motion near the link path makes the traces wobble; a flat line means a static room (or a stalled feed).',
+    var: '<b>CSI Rolling variance</b> — 0.5 s rolling standard deviation per receiver. Sustained elevation = ongoing motion; brief spikes = transient disturbances.',
+    heat: '<b>CSI Amplitude heatmap</b> — time (horizontal) × receiver (vertical), color = amplitude. Vertical streaks are momentary disturbances; horizontal bands are persistent per-receiver offsets.',
+    frame: '<b>Camera</b> — live frame from the capture camera, refreshed as fast as frames are produced.',
+    env: '<b>Sense HAT</b> — temperature, humidity, pressure and IMU magnitudes at 1 Hz, with a temperature sparkline for the current minute.',
+  };
+  const denoiseBtn = $('stage-denoise'), helpBtn = $('stage-help'), helpPanel = $('stage-help-panel'), sensCtl = $('stage-sens'), sensSlider = $('sens-slider'), sensVal = $('sens-val');
+  function syncControls() {
+    const canDenoise = DENOISE_VIEWS.has(view);
+    denoiseBtn.disabled = !canDenoise;
+    denoiseBtn.classList.toggle('active', canDenoise && denoiseOn(view));
+    denoiseBtn.setAttribute('aria-pressed', String(canDenoise && denoiseOn(view)));
+    sensCtl.style.display = sensor === 'radar' ? 'inline-flex' : 'none';
+    helpPanel.innerHTML = HELP[view] || '';
+  }
+  denoiseBtn.addEventListener('click', () => {
+    if (!DENOISE_VIEWS.has(view)) return;
+    setDenoise(view, !denoiseOn(view));
+    syncControls();
+    drawStage();
+  });
+  helpBtn.addEventListener('click', () => {
+    const open = helpPanel.classList.toggle('open');
+    helpBtn.classList.toggle('active', open);
+    helpBtn.setAttribute('aria-expanded', String(open));
+  });
+  // Detection threshold → capture settings. The collector re-reads settings at
+  // every chunk boundary, so a change takes effect within ~1 s.
+  let sensSaveTimer = null;
+  sensSlider.addEventListener('input', () => {
+    sensVal.textContent = Number(sensSlider.value).toFixed(1) + ' dB';
+    clearTimeout(sensSaveTimer);
+    sensSaveTimer = setTimeout(async () => {
+      try {
+        await fetch('/api/capture-settings', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ radar_detection_threshold_db: Number(sensSlider.value) }),
+        });
+      } catch (e) { /* keep last */ }
+    }, 350);
+  });
+  (async function loadSens() {
+    try {
+      const body = await getJson('/api/capture-settings');
+      const v = Number(body.capture_settings && body.capture_settings.radar_detection_threshold_db);
+      if (isFinite(v)) { sensSlider.value = v; sensVal.textContent = v.toFixed(1) + ' dB'; }
+    } catch (e) { /* default 8 dB */ }
   })();
 
   $('stage-full').addEventListener('click', () => {
@@ -528,6 +843,35 @@
   document.addEventListener('fullscreenchange', drawStage);
 
   window.addEventListener('resize', drawStage);
+
+  // Grey out tabs for sensors this device does not have. Detection is
+  // hardware-based on the backend; a fetch failure fails open (all online).
+  // Re-checked periodically so a sensor that comes online un-greys.
+  const SENSOR_KEY = { radar: 'dreamhat_radar', csi: 'esp32_csi', camera: 'usb_camera', sensehat: 'sense_hat' };
+  function sensorDetected(key, s) {
+    if (!s) return false;
+    // spidev nodes and the collector service exist on every installed Pi —
+    // only recent radar samples prove the HAT is really attached.
+    if (key === 'dreamhat_radar') return !!(s.chip_online || s.online);
+    if (key === 'esp32_csi') return !!(s.online || (s.devices || []).length);
+    return !!(s.online || s.available);
+  }
+  async function refreshInventory() {
+    try {
+      const body = await getJson('/api/sensors');
+      const inventory = {};
+      for (const s of body.sensors || []) inventory[s.key] = s;
+      if (!Object.keys(inventory).length) return;
+      offlineSensors.clear();
+      for (const t of SENSORS) {
+        if (!sensorDetected(SENSOR_KEY[t.id], inventory[SENSOR_KEY[t.id]])) offlineSensors.add(t.id);
+      }
+      renderTabs();
+    } catch (e) { /* fail open */ }
+  }
+  refreshInventory();
+  window.setInterval(() => { if (!document.hidden) refreshInventory(); }, 30000);
+
   renderTabs();
   startPolling();
   startRenderLoop();

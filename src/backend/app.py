@@ -81,7 +81,13 @@ from backend.capture_container import (
     read_camera_frame,
     read_capture_metadata,
 )
-from backend.model_runtime import ModelRegistry, ModelValidationError
+from backend.model_runtime import (
+    ModelRegistry,
+    ModelValidationError,
+    NEGATIVE_CLASS_LABELS,
+    POSITIVE_CLASS_LABELS,
+    occupancy_probability,
+)
 
 THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / 'WS' / 'MMW-HAT' / 'MMW-HAT-Release'
@@ -1464,16 +1470,7 @@ def status():
                             username=session.get('username'),
                             capture_overview={'minute_count': len(minutes)},
                             minutes=minutes,
-                            active_minute=active_minute.name if active_minute else None,
-                            pairing_state={
-                                key: auth_manager.pairing_session.get(key)
-                                for key in ('code', 'device_id', 'expires_at')
-                            } if auth_manager.pairing_session else None,
-                            hub_paired=(
-                                auth_manager.is_authenticated()
-                                and not device_manager.pairing_required
-                            ),
-                            pairing_required=device_manager.pairing_required)
+                            active_minute=active_minute.name if active_minute else None)
 
     except Exception as e:
         logger.error(f"Error in status route: {str(e)}", exc_info=True)
@@ -1868,6 +1865,15 @@ def settings():
         device_settings=device_manager.get_device_settings(),
         home_assistant=load_home_assistant_config(),
         csi_devices=next((sensor.get('devices', []) for sensor in detect_sensor_inventory() if sensor.get('key') == 'esp32_csi'), []),
+        pairing_state={
+            key: auth_manager.pairing_session.get(key)
+            for key in ('code', 'device_id', 'expires_at')
+        } if auth_manager.pairing_session else None,
+        hub_paired=(
+            auth_manager.is_authenticated()
+            and not device_manager.pairing_required
+        ),
+        pairing_required=device_manager.pairing_required,
     )
 
 
@@ -2101,14 +2107,63 @@ def _read_timeline_manifest_summary(path: Path) -> Optional[Dict[str, Any]]:
         manifest = None
     if isinstance(manifest, dict) and manifest.get('schema') == 'thoth-minute-manifest/v7':
         latest_results = []
+        chunk_votes: Dict[int, List[bool]] = {}
+        window_votes: Dict[int, List[bool]] = {}
         for model in manifest.get('model_predictions') or []:
-            if isinstance(model, dict) and isinstance(model.get('timeline'), list) and model['timeline']:
-                latest_results.append(model['timeline'][-1])
+            if not isinstance(model, dict) or not isinstance(model.get('timeline'), list):
+                continue
+            timeline = model['timeline']
+            if not timeline:
+                continue
+            latest = timeline[-1]
+            latest_results.append(latest)
+            for item in timeline:
+                if not isinstance(item, dict) or item.get('status') != 'ok':
+                    continue
+                if str(item.get('scope') or 'chunk') != 'chunk':
+                    continue
+                index = item.get('chunk_index')
+                if not isinstance(index, int) or index < 0:
+                    continue
+                cls = str(item.get('class') or '').strip().lower()
+                if cls in POSITIVE_CLASS_LABELS or cls in NEGATIVE_CLASS_LABELS:
+                    chunk_votes.setdefault(index, []).append(cls in POSITIVE_CLASS_LABELS)
+                else:
+                    chunk_votes.setdefault(index, []).append(
+                        occupancy_probability(item) >= 0.5
+                    )
+            # Minute/partial-minute scopes carry per-window votes — each
+            # 50-frame window is one timeline slice. Only the latest entry is
+            # complete; earlier partials would double-count the same windows.
+            if isinstance(latest, dict) and latest.get('status') == 'ok':
+                probabilities = latest.get('window_probabilities')
+                if isinstance(probabilities, list):
+                    try:
+                        cut = float(latest.get('threshold'))
+                    except (TypeError, ValueError):
+                        cut = 0.5
+                    for w_index, probability in enumerate(probabilities):
+                        try:
+                            p = float(probability)
+                        except (TypeError, ValueError):
+                            continue
+                        window_votes.setdefault(w_index, []).append(p >= cut)
         revision = f"{path.stat().st_mtime_ns}:{path.stat().st_size}"
+        # Chunk predictions are the natural slices; minute-model windows are
+        # the fallback when no chunk-scope model ran.
+        votes = chunk_votes or window_votes
+        chunk_states: List[Optional[bool]] = []
+        if votes:
+            size = max(votes) + 1
+            chunk_states = [None] * size
+            for index, ballot in votes.items():
+                positive = sum(1 for vote in ballot if vote)
+                chunk_states[index] = positive * 2 >= len(ballot)
         return {
             'state': 'captured',
             'labels': manifest.get('labels') or [],
             'model_results': latest_results,
+            'chunk_states': chunk_states,
             'expected_chunks': manifest.get('expected_chunks'),
             'chunk_seconds': manifest.get('chunk_seconds'),
             'capture_finished': manifest.get('capture_finished'),
@@ -2144,11 +2199,18 @@ def _read_timeline_manifest_summary(path: Path) -> Optional[Dict[str, Any]]:
         index = None
     if state not in {'occupied', 'empty'}:
         return None
+    legacy_states: List[Optional[bool]] = []
+    if chunk_matches:
+        size = max(int(item[0]) for item in chunk_matches) + 1
+        legacy_states = [None] * size
+        for raw_index, raw_state in chunk_matches:
+            legacy_states[int(raw_index)] = raw_state == 'occupied'
     return {
         'index': index,
         'state': state,
         'classification': 'green' if state == 'occupied' else 'red',
         'prediction': state,
+        'chunk_states': legacy_states,
         'labels': manifest.get('labels') or [] if isinstance(manifest, dict) else [],
         'revision': f"{path.stat().st_mtime_ns}:{path.stat().st_size}",
     }

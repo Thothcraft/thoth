@@ -31,6 +31,8 @@ apt-get install -y -qq \
     libopencv-dev ffmpeg v4l-utils sox openssh-server avahi-daemon avahi-utils docker.io
 apt-get install -y -qq python3-picamera2 || true
 apt-get install -y -qq python3-rpi.gpio || true
+# Sense HAT support (optional — only present on some devices)
+apt-get install -y -qq python3-sense-hat || true
 
 log "Enabling SPI for the DreamHat radar"
 if command -v raspi-config >/dev/null 2>&1; then
@@ -40,6 +42,17 @@ else
     [ -f "$BOOT_CONFIG" ] || BOOT_CONFIG="/boot/config.txt"
     if [ -f "$BOOT_CONFIG" ] && ! grep -q '^dtparam=spi=on' "$BOOT_CONFIG"; then
         printf '\ndtparam=spi=on\n' >> "$BOOT_CONFIG"
+    fi
+fi
+
+log "Enabling I2C for the Sense HAT"
+if command -v raspi-config >/dev/null 2>&1; then
+    raspi-config nonint do_i2c 0
+else
+    BOOT_CONFIG="/boot/firmware/config.txt"
+    [ -f "$BOOT_CONFIG" ] || BOOT_CONFIG="/boot/config.txt"
+    if [ -f "$BOOT_CONFIG" ] && ! grep -q '^dtparam=i2c_arm=on' "$BOOT_CONFIG"; then
+        printf '\ndtparam=i2c_arm=on\n' >> "$BOOT_CONFIG"
     fi
 fi
 
@@ -132,16 +145,26 @@ systemctl daemon-reload
 systemctl enable avahi-daemon ssh thoth.service thoth-collector.service
 systemctl restart avahi-daemon ssh thoth.service thoth-collector.service
 
-hostnamectl set-hostname thoth || true
-if grep -q '^127.0.1.1' /etc/hosts; then
-    sed -i 's/^127.0.1.1.*/127.0.1.1\tthoth/' /etc/hosts
+# Unique hostname per device: thoth-<serial-suffix> avoids mDNS collisions
+# when several Thoth devices share a network. THOTH_HOSTNAME overrides.
+if [ -z "${THOTH_HOSTNAME:-}" ]; then
+    SERIAL="$(awk -F': ' '/^Serial/ {print $2}' /proc/cpuinfo 2>/dev/null | tr -d ' \t' | tail -c 7)"
+    DEVICE_HOSTNAME="thoth${SERIAL:+-$SERIAL}"
 else
-    printf '127.0.1.1\tthoth\n' >> /etc/hosts
+    DEVICE_HOSTNAME="$THOTH_HOSTNAME"
+fi
+DEVICE_HOSTNAME="$(echo "$DEVICE_HOSTNAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')"
+[ -n "$DEVICE_HOSTNAME" ] || DEVICE_HOSTNAME="thoth"
+hostnamectl set-hostname "$DEVICE_HOSTNAME" || true
+if grep -q '^127.0.1.1' /etc/hosts; then
+    sed -i "s/^127.0.1.1.*/127.0.1.1\t$DEVICE_HOSTNAME/" /etc/hosts
+else
+    printf '127.0.1.1\t%s\n' "$DEVICE_HOSTNAME" >> /etc/hosts
 fi
 
 touch /etc/thoth-first-boot-done
-log "Thoth installation complete: http://thoth.local:5000"
-log "Home Assistant onboarding: http://thoth.local:8123"
+log "Thoth installation complete: http://$DEVICE_HOSTNAME.local:5000"
+log "Home Assistant onboarding: http://$DEVICE_HOSTNAME.local:8123"
 if [ ! -e /dev/spidev0.0 ]; then
     log "Reboot once to activate the newly enabled SPI radar interface"
 fi
