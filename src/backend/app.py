@@ -1795,6 +1795,34 @@ def api_radar_live():
     return response
 
 
+@app.route('/api/radar/snr', methods=['GET'])
+def api_radar_snr():
+    """Per-frame detection scalars (SNR, peak/floor, detected).
+
+    Reads the collector's lightweight sidecar which updates every processed
+    frame — unlike /api/radar/live, whose ~140KB map payload is throttled."""
+    state = _read_json_file(RADAR_SNR_STATE, {'updated_at': 0})
+    try:
+        updated_at = float(state.get('updated_at') or 0)
+    except (TypeError, ValueError):
+        updated_at = 0.0
+    age_seconds = max(0.0, time.time() - updated_at) if updated_at else None
+    collection_paused = COLLECTOR_PAUSE_PATH.exists()
+    state['age_seconds'] = round(age_seconds, 3) if age_seconds is not None else None
+    state['collection_paused'] = collection_paused
+    state['stale'] = updated_at <= 0 or bool(
+        age_seconds is not None and age_seconds > RADAR_LIVE_STALE_SECONDS)
+    state['stale_reason'] = (
+        'collection_paused' if collection_paused
+        else 'waiting_for_first_frame' if updated_at <= 0
+        else 'frame_timeout' if state['stale']
+        else None
+    )
+    response = jsonify(state)
+    response.headers['Cache-Control'] = 'no-store, max-age=0'
+    return response
+
+
 @app.route('/api/radar/room', methods=['GET', 'POST'])
 def api_radar_room():
     room = _read_json_file(RADAR_ROOM_CONFIG, {})
