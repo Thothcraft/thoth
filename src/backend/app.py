@@ -59,7 +59,7 @@ from backend.auth_manager import AuthManager
 from backend.radar_analysis import create_example2_processor, serialize_example2_plot
 from backend.terminal_manager import SSHTerminalManager
 from backend.sensor_detection import detect_sensor_inventory
-from backend.home_assistant import get_home_assistant_publisher, load_home_assistant_config, load_last_links, load_last_publish, save_home_assistant_config, test_home_assistant_connection
+from backend.home_assistant import get_home_assistant_publisher, load_home_assistant_config, load_last_links, load_last_publish, publish_model_occupancy, save_home_assistant_config, test_home_assistant_connection
 from backend.capture_manager import (
     list_minutes,
     list_minute_folders,
@@ -2049,6 +2049,39 @@ def api_internal_capture_chunk():
         return jsonify({'success': False, 'message': 'minute is required'}), 400
     ok = device_manager.publish_capture_chunk(payload)
     return jsonify({'success': ok}), (200 if ok else 202)
+
+
+@app.route('/api/internal/prediction', methods=['POST'])
+def api_internal_prediction():
+    """Inject a model-style prediction and run the same Home Assistant
+    publish + linked-actuator path as a real model verdict.
+
+    Local-only by convention (like capture-chunk): the SDK calls this to
+    drive actuators — e.g. ``{"class": "occupied"}`` turns the linked light
+    on, ``{"class": "empty"}`` turns it off. ``second_index=None`` makes it
+    a minute-level verdict so light control engages.
+    """
+    payload = request.get_json(silent=True) or {}
+    label = str(payload.get('class') or payload.get('label') or '').strip().lower()
+    if not label:
+        return jsonify({'success': False, 'message': 'class is required'}), 400
+    try:
+        confidence = float(payload.get('confidence', 1.0))
+    except (TypeError, ValueError):
+        confidence = 1.0
+    model_result = {
+        'class': label,
+        'confidence': confidence,
+        'model_id': str(payload.get('model_id') or 'sdk-injection'),
+        'model_name': str(payload.get('model_name') or 'SDK injection'),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+    }
+    if isinstance(payload.get('scores'), dict):
+        model_result['scores'] = payload['scores']
+    active = current_minute()
+    minute = active.name if active else datetime.utcnow().strftime('%Y%m%d_%H%M')
+    result = publish_model_occupancy(model_result, minute, second_index=None)
+    return jsonify({'success': bool(result.get('success')), 'ha': result})
 
 
 @app.route('/api/internal/home-assistant/publish', methods=['POST'])
