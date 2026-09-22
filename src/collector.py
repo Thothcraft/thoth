@@ -33,7 +33,13 @@ PAUSE_PATH = Path(os.environ.get("THOTH_COLLECTOR_PAUSE", THOTH_ROOT / "config" 
 # live-streaming child so the selected sensor gets the full device.
 LIVE_SESSION_PATH = Path(os.environ.get("THOTH_LIVE_SESSION", THOTH_ROOT / "config" / "live_session.json"))
 LIVE_SESSION_TTL_SECONDS = 15.0
-active_captures: list[subprocess.Popen] = []
+# Each entry is (process, monotonic start time). A minute collector should
+# finish within ~CAPTURE_DURATION_SECONDS; one that far overruns is stuck and
+# must not be allowed to pile up — on a slow board, unbounded overlapping
+# collectors saturate the CPU until the app and even SSH stop responding.
+active_captures: list[tuple[subprocess.Popen, float]] = []
+MAX_CONCURRENT_CAPTURES = 2
+MAX_CAPTURE_AGE_SECONDS = 150.0
 live_capture: subprocess.Popen | None = None
 live_capture_started_at = 0.0
 LIVE_RESTART_MIN_SECONDS = 5.0
@@ -134,11 +140,11 @@ def load_capture_settings() -> dict:
 
 
 def terminate_captures() -> None:
-    for capture in list(active_captures):
+    for capture, _started in list(active_captures):
         if capture.poll() is None:
             capture.terminate()
     deadline = time.monotonic() + 10
-    for capture in list(active_captures):
+    for capture, _started in list(active_captures):
         if capture.poll() is not None:
             continue
         try:
@@ -173,13 +179,32 @@ def start_live_capture(python: str, capture_script: str) -> subprocess.Popen:
 
 
 def reap_captures() -> None:
-    for capture in list(active_captures):
+    for entry in list(active_captures):
+        capture, _started = entry
         result = capture.poll()
         if result is None:
             continue
-        active_captures.remove(capture)
+        active_captures.remove(entry)
         if result != 0:
             print(f"Capture exited with code {result}", file=sys.stderr)
+
+
+def kill_overrunning_captures() -> None:
+    """Terminate minute collectors that have far overrun their minute.
+
+    A stuck collector would otherwise run forever while new ones keep spawning,
+    saturating the CPU. Anything older than MAX_CAPTURE_AGE_SECONDS is killed.
+    """
+    now = time.monotonic()
+    for capture, started in list(active_captures):
+        if capture.poll() is not None:
+            continue
+        if now - started > MAX_CAPTURE_AGE_SECONDS:
+            print(
+                f"Capture overran {MAX_CAPTURE_AGE_SECONDS:.0f}s - terminating stuck collector",
+                file=sys.stderr, flush=True,
+            )
+            capture.terminate()
 
 
 def start_capture(python: str, capture_script: str, target: datetime) -> subprocess.Popen:
@@ -209,7 +234,7 @@ def start_capture(python: str, capture_script: str, target: datetime) -> subproc
         flush=True,
     )
     capture = subprocess.Popen(command, start_new_session=True)
-    active_captures.append(capture)
+    active_captures.append((capture, time.monotonic()))
     return capture
 
 
@@ -273,6 +298,7 @@ def main() -> int:
         # its explicit target. At most two children coexist for a few seconds:
         # one finishing the prior minute and one waiting for the next boundary.
         reap_captures()
+        kill_overrunning_captures()
         cleanup_old_minutes(max_disk_percent=args.max_disk_percent)
         if disk_percent_used() >= args.max_disk_percent:
             # Stop collection rather than fill the card. The cleanup above only
@@ -282,6 +308,14 @@ def main() -> int:
             print(
                 f"Disk usage >= {args.max_disk_percent:.1f}% - skipping capture for "
                 f"{target.isoformat(timespec='seconds')} (free space or raise --max-disk-percent)",
+                flush=True,
+            )
+        elif len(active_captures) >= MAX_CONCURRENT_CAPTURES:
+            # A previous minute is still running. Spawning another would pile up
+            # collectors and saturate a slow board — skip this minute instead.
+            print(
+                f"Skipping capture for {target.isoformat(timespec='seconds')}: "
+                f"{len(active_captures)} collector(s) still running",
                 flush=True,
             )
         else:
