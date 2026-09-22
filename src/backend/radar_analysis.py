@@ -721,11 +721,16 @@ class StreamingChunkAnalyzer:
             self.invalid_frames += 1
             return False
         seq, frame = decoded
-        native_plot = _update_example2_xy_plot(
-            self.processor,
-            frame,
-            self.radar_detection_threshold_db,
-        )
+        if self.live_example2_only:
+            # Light path: run the DSP and read detection scalars directly.
+            # The ~140KB map serialization is deferred to the ~1 Hz publish.
+            native_plot = self._example2_frame_light(frame)
+        else:
+            native_plot = _update_example2_xy_plot(
+                self.processor,
+                frame,
+                self.radar_detection_threshold_db,
+            )
         update_advanced = (
             not self.native_processor_available
             or not native_plot
@@ -744,12 +749,9 @@ class StreamingChunkAnalyzer:
         else:
             targets = []
             advanced_detection = {}
-        if self.live_example2_only:
-            # Maps reuse the intermediates the native Example-2 update already
-            # computed this frame — no second pipeline run.
-            self.last_maps = _live_map_payloads(
-                self.processor, self.radar_config
-            ) or self.last_maps
+        # NOTE: _live_map_payloads is intentionally NOT computed here — it
+        # costs more CPU than the DSP itself and is only consumed by the
+        # ~1 Hz _write_live_state publish, which computes it on demand.
         native_detection = native_plot.get("detection") if isinstance(native_plot.get("detection"), dict) else {}
         detection = dict(native_detection or advanced_detection)
         shadow = dict(self.processor.last_motion_shadow or {}) if update_advanced else {}
@@ -848,6 +850,62 @@ class StreamingChunkAnalyzer:
         })
         return True
 
+    def _example2_frame_light(self, frame: np.ndarray) -> Dict[str, Any]:
+        """Run Example-2 DSP without serializing the map.
+
+        Stashes (final_map, location, score) so _write_live_state can
+        serialize the full payload later at publish cadence."""
+        exact = _example2_processor(self.processor)
+        if exact is None:
+            return {}
+        exact.detection_threshold_db = min(
+            30.0, max(0.0, float(self.radar_detection_threshold_db)))
+        try:
+            location, score, gui_plot = exact.update(frame)
+        except Exception:
+            return {}
+        self._pending_example2_map = (
+            gui_plot.get("map"), location, score,
+            dict(getattr(exact, "last_detection", {}) or {}),
+        )
+        return {
+            "detection": dict(getattr(exact, "last_detection", {}) or {}),
+            "location": location,
+            "score": score,
+        }
+
+    def _serialize_pending_example2(self) -> None:
+        """Serialize the stashed Example-2 map at publish cadence."""
+        pending = getattr(self, "_pending_example2_map", None)
+        if not pending:
+            return
+        final_map, location, score, detection = pending
+        exact = _example2_processor(self.processor)
+        if exact is None or final_map is None:
+            return
+        payload = serialize_example2_plot(
+            self.processor,
+            {"map": final_map, "x_axis": exact.x_bin, "y_axis": exact.y_bin},
+            location,
+            score,
+            detection,
+        )
+        if not payload:
+            return
+        payload.update({
+            "buffer_len": int(exact.xy_map_buffer.maxlen or 0),
+            "buffer_decay": float(exact.buffer_decay),
+            "marker_half_width_m": float(
+                exact.xy_marker_half_width_cells
+                * exact.processing_config["spatial_resolution"]
+            ),
+            "source": "example_2_track/location_gui.py",
+            "native_pipeline": True,
+            "processing_source": "example_2_track/signal_proc.py::SigProc.target_detection",
+            "display_source": "example_2_track/signal_proc.py::serialize_xy_plot",
+        })
+        setattr(self.processor, "_thoth_example2_xy_payload", payload)
+
     def _write_snr_state(self, detection: Dict[str, Any]) -> None:
         """Publish just the detection scalars every processed frame (~300B).
 
@@ -898,6 +956,13 @@ class StreamingChunkAnalyzer:
         if not self._live_publish_due():
             return
         self.last_live_publish = time.monotonic()
+        if self.live_example2_only:
+            # Serialize the stashed map + refresh map payloads only at
+            # publish cadence — per-frame this work costs more than the DSP.
+            self._serialize_pending_example2()
+            self.last_maps = _live_map_payloads(
+                self.processor, self.radar_config
+            ) or self.last_maps
         measured_hz = 0.0
         if len(self.frame_times) > 1:
             elapsed = self.frame_times[-1] - self.frame_times[0]
