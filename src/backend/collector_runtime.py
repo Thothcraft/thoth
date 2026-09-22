@@ -35,7 +35,7 @@ if __package__ in (None, ""):
     from backend.live_features import compute_live_features  # type: ignore
     from backend.capture_hardware import (  # type: ignore
         RADAR_CFG,
-        RADAR_FRAMES_PER_CHUNK,
+        RADAR_FRAMES_PER_SECOND,
         _minute_csi_samples,
         _minute_radar_frames,
         acquire_radar_lock,
@@ -79,7 +79,7 @@ else:
     from .live_features import compute_live_features
     from .capture_hardware import (
         RADAR_CFG,
-        RADAR_FRAMES_PER_CHUNK,
+        RADAR_FRAMES_PER_SECOND,
         _minute_csi_samples,
         _minute_radar_frames,
         acquire_radar_lock,
@@ -123,9 +123,9 @@ CSI_HEADER = "type,seq,mac,rssi,rate,noise_floor,fft_gain,agc_gain,channel,local
 # A minute contains at most about sixty 10-frame chunks. The dedicated live
 # worker now owns freshness, so archival jobs can be buffered for the whole
 # minute instead of discarding a valid saved chunk during a transient CPU spike.
-MAX_PENDING_ANALYSIS_CHUNKS = 64
+MAX_PENDING_ANALYSIS_SECONDS = 64
 LIVE_VISUALIZATION_INTERVAL_SECONDS = 0.05
-MAX_PENDING_ANALYSIS_FRAMES_PER_CHUNK = 1
+MAX_PENDING_ANALYSIS_FRAMES_PER_SECOND = 1
 
 sys.path.insert(0, str(MMW_RELEASE))
 
@@ -149,7 +149,7 @@ class CollectorContext:
         except (FileNotFoundError, OSError, ValueError):
             pass
         self.chunk_seconds = 1.0
-        self.expected_chunks = max(1, int(math.floor(float(args.duration))))
+        self.expected_seconds = max(1, int(math.floor(float(args.duration))))
         self.target_start = minute_start(args.start_now, args.scheduled_start)
         if self.live_only:
             self.folder_name = "live"
@@ -169,8 +169,8 @@ class CollectorContext:
             "scheduled_start": self.target_start.isoformat(timespec="seconds"),
             "duration_seconds": args.duration,
             "chunk_seconds": self.chunk_seconds,
-            "chunk_frames": RADAR_FRAMES_PER_CHUNK,
-            "expected_chunks": self.expected_chunks,
+            "chunk_frames": RADAR_FRAMES_PER_SECOND,
+            "expected_seconds": self.expected_seconds,
             "preset_labels": self.preset_labels,
             "labels": self.preset_labels or ["collecting"],
             "device_id": self.device_identity.get("device_id"),
@@ -231,13 +231,13 @@ class CollectorContext:
         self.live_features_thread: threading.Thread | None = None
 
         # Queues + shared buffers.
-        self.analysis_queue: queue.Queue[Any] = queue.Queue(maxsize=MAX_PENDING_ANALYSIS_CHUNKS)
+        self.analysis_queue: queue.Queue[Any] = queue.Queue(maxsize=MAX_PENDING_ANALYSIS_SECONDS)
         self.live_analysis_queue: queue.Queue[Any] = queue.Queue(maxsize=1)
         self.live_queue_key: dict[str, Any] = {"stream": self.folder_name}
         self.upload_queue: queue.Queue[Any] = queue.Queue()
         self.model_queue: queue.Queue[Any] = queue.Queue()
         self.partial_minute_queue: queue.Queue[Any] = queue.Queue(maxsize=1)
-        self.radar_chunk_results: list[dict[str, Any]] = []
+        self.radar_second_results: list[dict[str, Any]] = []
         self.radar_frame_count = 0
         self.radar_first_frame_at: float | None = None
         self.radar_last_frame_at: float | None = None
@@ -268,7 +268,7 @@ def enqueue_latest_chunk_frame(
             and item[0] == "frame"
             and item[1] is entry
         ]
-        if len(matching_indexes) >= MAX_PENDING_ANALYSIS_FRAMES_PER_CHUNK:
+        if len(matching_indexes) >= MAX_PENDING_ANALYSIS_FRAMES_PER_SECOND:
             del analysis_queue.queue[matching_indexes[0]]
             analysis_queue.unfinished_tasks = max(0, analysis_queue.unfinished_tasks - 1)
             analysis_queue.not_full.notify()
@@ -277,14 +277,14 @@ def enqueue_latest_chunk_frame(
     return replaced
 
 
-def enqueue_analysis_chunk(
+def enqueue_analysis_second(
     analysis_queue: queue.Queue[Any],
     job: tuple[Any, ...],
 ) -> list[dict[str, Any]]:
     """Queue one exact 10-frame archival job."""
-    if len(job) < 4 or job[0] != "chunk" or len(job[3]) != RADAR_FRAMES_PER_CHUNK:
+    if len(job) < 4 or job[0] != "second" or len(job[3]) != RADAR_FRAMES_PER_SECOND:
         raise ValueError(
-            f"radar analysis chunks require exactly {RADAR_FRAMES_PER_CHUNK} frames"
+            f"radar analysis chunks require exactly {RADAR_FRAMES_PER_SECOND} frames"
         )
     dropped: list[dict[str, Any]] = []
     while True:
@@ -300,7 +300,7 @@ def enqueue_analysis_chunk(
                 if (
                     isinstance(stale, tuple)
                     and len(stale) >= 2
-                    and stale[0] == "chunk"
+                    and stale[0] == "second"
                     and isinstance(stale[1], dict)
                 ):
                     dropped.append(stale[1])
@@ -308,7 +308,7 @@ def enqueue_analysis_chunk(
                 analysis_queue.task_done()
 
 
-def live_chunk_statistics(analyzer: StreamingChunkAnalyzer) -> dict[str, Any]:
+def live_second_statistics(analyzer: StreamingChunkAnalyzer) -> dict[str, Any]:
     """Build the partial chunk result published while analysis is running."""
     evaluated = analyzer.evaluated_frames
     detected = analyzer.detected_frames
@@ -369,7 +369,7 @@ def fire_model_device_links(ctx: CollectorContext, results: list[dict[str, Any]]
                 ha_link,
                 ctx.folder_name,
                 scope=scope,
-                chunk_index=prediction.get("chunk_index"),
+                second_index=prediction.get("second_index"),
             )
         except Exception as exc:
             logging.getLogger(__name__).error("Linked device control failed: %s", exc)
@@ -400,12 +400,12 @@ def merge_home_assistant_status(ctx: CollectorContext) -> None:
         statuses = json.loads(status_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError, OSError):
         return
-    chunks = (((ctx.manifest.get("outputs") or {}).get("radar") or {}).get("chunks") or [])
+    seconds = (((ctx.manifest.get("outputs") or {}).get("radar") or {}).get("seconds") or [])
     minute_status = statuses.get("minute") if isinstance(statuses, dict) else None
     if isinstance(minute_status, dict):
         ctx.manifest["home_assistant"] = minute_status
-    for entry in chunks:
-        status = statuses.get(str(entry.get("chunk_index"))) if isinstance(statuses, dict) else None
+    for entry in seconds:
+        status = statuses.get(str(entry.get("second_index"))) if isinstance(statuses, dict) else None
         if isinstance(status, dict):
             entry["home_assistant"] = status
 
@@ -414,8 +414,8 @@ def write_live_manifest(ctx: CollectorContext) -> None:
     refresh_manifest_labels(ctx)
     merge_home_assistant_status(ctx)
     assets: list[dict[str, Any]] = []
-    for entry in ctx.radar_chunk_results:
-        index = int(entry.get("chunk_index") or 0)
+    for entry in ctx.radar_second_results:
+        index = int(entry.get("second_index") or 0)
         result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
         occupancy = result.get("occupancy") if isinstance(result.get("occupancy"), dict) else {}
         common = {
@@ -476,12 +476,12 @@ def write_live_manifest(ctx: CollectorContext) -> None:
     ctx.manifest["assets"] = assets
     # Per-minute progress is expressed in seconds, not chunks: each radar batch
     # maps to one synchronized second.
-    captured_seconds = len(ctx.radar_chunk_results)
+    captured_seconds = len(ctx.radar_second_results)
     ctx.manifest["progress"] = {
         "unit": "second",
         "captured_seconds": captured_seconds,
-        "total_seconds": ctx.expected_chunks,
-        "percent": round(100.0 * captured_seconds / max(1, ctx.expected_chunks), 1),
+        "total_seconds": ctx.expected_seconds,
+        "percent": round(100.0 * captured_seconds / max(1, ctx.expected_seconds), 1),
     }
     snapshot = dict(ctx.manifest)
     snapshot["capture_started"] = ctx.capture_started
@@ -490,9 +490,9 @@ def write_live_manifest(ctx: CollectorContext) -> None:
     radar_output = outputs.get("radar")
     if isinstance(radar_output, dict):
         radar_snapshot = dict(radar_output)
-        radar_snapshot["chunks"] = [
+        radar_snapshot["seconds"] = [
             {key: value for key, value in entry.items() if key != "result"}
-            for entry in (radar_output.get("chunks") or [])
+            for entry in (radar_output.get("seconds") or [])
         ]
         outputs["radar"] = radar_snapshot
     snapshot["outputs"] = outputs
@@ -504,7 +504,7 @@ def publish_radar_results(ctx: CollectorContext) -> None:
     return
 
 
-def upload_live_chunk(ctx: CollectorContext, index: int) -> None:
+def upload_live_second(ctx: CollectorContext, index: int) -> None:
     # Live chunk API carried heuristic occupancy fields; model timelines are
     # persisted locally and uploaded with the completed manifest.
     return
@@ -521,7 +521,7 @@ def run_model_worker(ctx: CollectorContext) -> None:
         try:
             if job is None:
                 return
-            chunk_index, frames, timestamp = job
+            second_index, frames, timestamp = job
             try:
                 results = ctx.windowed_analyzer.push(frames, current_csi_samples(ctx), timestamp)
             except Exception as exc:
@@ -532,7 +532,7 @@ def run_model_worker(ctx: CollectorContext) -> None:
                 occupancy_results = [item for item in results if item.get("status") == "ok" and is_occupancy_result(item)]
                 if occupancy_results:
                     selected = max(occupancy_results, key=lambda item: float(item.get("confidence") or 0.0))
-                    publish_model_occupancy(selected, ctx.folder_name, chunk_index=chunk_index)
+                    publish_model_occupancy(selected, ctx.folder_name, second_index=second_index)
                 with ctx.publish_lock:
                     timelines = ctx.manifest.setdefault("model_predictions", [])
                     by_id = {str(item.get("model_id")): item for item in timelines if isinstance(item, dict)}
@@ -575,7 +575,7 @@ def run_partial_minute_worker(ctx: CollectorContext) -> None:
             if pocc:
                 selected = dict(max(pocc, key=lambda item: float(item.get("confidence") or 0.0)))
                 selected["scope"] = "partial_minute"
-                publish_model_occupancy(selected, ctx.folder_name, chunk_index=None)
+                publish_model_occupancy(selected, ctx.folder_name, second_index=None)
             if presults:
                 with ctx.publish_lock:
                     timelines = ctx.manifest.setdefault("model_predictions", [])
@@ -603,7 +603,7 @@ def run_upload_worker(ctx: CollectorContext) -> None:
         try:
             if index is None:
                 return
-            upload_live_chunk(ctx, int(index))
+            upload_live_second(ctx, int(index))
         finally:
             ctx.upload_queue.task_done()
 
@@ -639,7 +639,7 @@ def run_camera_worker(ctx: CollectorContext) -> None:
             complete = files[:-1] if len(files) > 1 else []
             for idx in range(seen, len(complete)):
                 image_path = complete[idx]
-                second_index = min(ctx.expected_chunks - 1, int(idx / ctx.camera_fps))
+                second_index = min(ctx.expected_seconds - 1, int(idx / ctx.camera_fps))
                 frame = {
                     "second_index": second_index,
                     "frame_index": idx,
@@ -649,8 +649,8 @@ def run_camera_worker(ctx: CollectorContext) -> None:
                 }
                 with ctx.publish_lock:
                     ctx.camera_frames.append(frame)
-                    if second_index < len(ctx.radar_chunk_results):
-                        ctx.radar_chunk_results[second_index].update({
+                    if second_index < len(ctx.radar_second_results):
+                        ctx.radar_second_results[second_index].update({
                             "camera_path": str(image_path),
                             "camera_captured_at": frame["captured_at"],
                             "camera_monotonic_ns": frame["monotonic_ns"],
@@ -673,7 +673,7 @@ def run_camera_worker(ctx: CollectorContext) -> None:
         files = sorted(ctx.output_dir.glob("camera_*.jpg"))
         for idx in range(seen, len(files)):
             image_path = files[idx]
-            second_index = min(ctx.expected_chunks - 1, int(idx / ctx.camera_fps))
+            second_index = min(ctx.expected_seconds - 1, int(idx / ctx.camera_fps))
             ctx.camera_frames.append({
                 "second_index": second_index,
                 "frame_index": idx,
@@ -724,7 +724,7 @@ def run_analysis_worker(ctx: CollectorContext) -> None:
             analyzer = StreamingChunkAnalyzer(
                 processor,
                 None,
-                int(entry["chunk_index"]),
+                int(entry["second_index"]),
                 float(entry["chunk_seconds"]),
                 ctx.room_config,
                 0.45,
@@ -750,19 +750,19 @@ def run_analysis_worker(ctx: CollectorContext) -> None:
             result["camera_path"] = entry.get("camera_path")
             # Frame offsets follow the captured 10-frame bins, even when a
             # stale analysis job was deferred to keep the live view current.
-            previous_frames = int(entry["chunk_index"]) * RADAR_FRAMES_PER_CHUNK
+            previous_frames = int(entry["second_index"]) * RADAR_FRAMES_PER_SECOND
             chunk_labels = normalize_labels(settings_snapshot.get("labels")) or ctx.preset_labels
             annotate_chunk_result(
                 result, settings_snapshot, ctx.room_config, chunk_labels,
-                ctx.folder_name, ctx.expected_chunks, previous_frames,
+                ctx.folder_name, ctx.expected_seconds, previous_frames,
             )
             entry["result"] = result
             occupancy = result.get("occupancy", {})
             label = occupancy.get("label") or "empty"
-            if int(occupancy.get("evaluated_frames") or 0) != RADAR_FRAMES_PER_CHUNK:
+            if int(occupancy.get("evaluated_frames") or 0) != RADAR_FRAMES_PER_SECOND:
                 raise RuntimeError(
                     f"analyzed {occupancy.get('evaluated_frames', 0)} of "
-                    f"{RADAR_FRAMES_PER_CHUNK} radar frames"
+                    f"{RADAR_FRAMES_PER_SECOND} radar frames"
                 )
             entry.update({
                 "status": label,
@@ -785,7 +785,7 @@ def run_analysis_worker(ctx: CollectorContext) -> None:
                 ctx.manifest["auto_occupancy_label"] = occupancy
             publish_radar_results(ctx)
             enqueue_home_assistant(ctx, entry, occupancy, result)
-            ctx.upload_queue.put(int(entry["chunk_index"]))
+            ctx.upload_queue.put(int(entry["second_index"]))
         except Exception as exc:
             if entry is not None:
                 entry["error"] = str(exc)
@@ -798,7 +798,7 @@ def run_analysis_worker(ctx: CollectorContext) -> None:
                 })
                 with ctx.publish_lock:
                     write_live_manifest(ctx)
-                ctx.upload_queue.put(int(entry["chunk_index"]))
+                ctx.upload_queue.put(int(entry["second_index"]))
             if analyzer is not None:
                 try:
                     analyzer.handle.close()
@@ -811,7 +811,7 @@ def run_analysis_worker(ctx: CollectorContext) -> None:
 def run_live_features_worker(ctx: CollectorContext) -> None:
     """Push per-second signal features (radar SNR, CSI amp/variance, STFT)
     to the local internal endpoint, which relays them to the brain's
-    live-chunks feed. ``chunk_index`` is reused as a per-second key so the
+    live-chunks feed. ``second_index`` is reused as a per-second key so the
     live view shows a per-second signal timeline rather than predictions.
     """
     second_index = 0
@@ -826,7 +826,7 @@ def run_live_features_worker(ctx: CollectorContext) -> None:
             if features:
                 payload = json.dumps({
                     "minute": ctx.folder_name,
-                    "chunk_index": second_index,
+                    "second_index": second_index,
                     "chunk_frames": len(radar_snapshot),
                     "status": "collecting",
                     "features": features,
@@ -861,7 +861,7 @@ def run_live_analysis_worker(ctx: CollectorContext) -> None:
                 ctx.live_analysis_queue.task_done()
 
     analyzer: StreamingChunkAnalyzer | None = None
-    analyzer_chunk_index: int | None = None
+    analyzer_second_index: int | None = None
     # Shared across per-chunk analyzer recreations so the published
     # sensor_hz measures the continuous live rate, not a per-chunk reset.
     live_frame_times: deque[float] = deque(maxlen=60)
@@ -871,9 +871,9 @@ def run_live_analysis_worker(ctx: CollectorContext) -> None:
             try:
                 if job is None:
                     return
-                _, _, frame, captured_at, chunk_index, settings_snapshot = job
-                chunk_index = int(chunk_index)
-                if analyzer is None or analyzer_chunk_index != chunk_index:
+                _, _, frame, captured_at, second_index, settings_snapshot = job
+                second_index = int(second_index)
+                if analyzer is None or analyzer_second_index != second_index:
                     if analyzer is not None:
                         analyzer.handle.close()
                     mode = str(settings_snapshot.get("system_mode") or "balanced")
@@ -882,7 +882,7 @@ def run_live_analysis_worker(ctx: CollectorContext) -> None:
                     analyzer = StreamingChunkAnalyzer(
                         processor,
                         None,
-                        chunk_index,
+                        second_index,
                         1.0,
                         ctx.room_config,
                         0.45,
@@ -896,7 +896,7 @@ def run_live_analysis_worker(ctx: CollectorContext) -> None:
                         live_example2_only=True,
                     )
                     analyzer.frame_times = live_frame_times
-                    analyzer_chunk_index = chunk_index
+                    analyzer_second_index = second_index
                 analyzer.max_queue_lag_ms = max(
                     0.0, (time.monotonic() - float(captured_at)) * 1000
                 )
@@ -930,7 +930,7 @@ def run_radar_reader(ctx: CollectorContext) -> None:
             for spec in (model.get("metadata") or {}).get("inputs", [])
             if spec.get("sensor") == "radar"
         ),
-        default=RADAR_FRAMES_PER_CHUNK,
+        default=RADAR_FRAMES_PER_SECOND,
     )
     while time.monotonic() < ctx.stop_at:
         remaining = ctx.stop_at - time.monotonic()
@@ -968,7 +968,7 @@ def run_radar_reader(ctx: CollectorContext) -> None:
                     ctx.live_queue_key,
                     full_frame,
                     captured_at,
-                    len(ctx.radar_chunk_results),
+                    len(ctx.radar_second_results),
                     live_settings,
                 )
                 last_live_enqueue = captured_at
@@ -1001,42 +1001,42 @@ def run_radar_reader(ctx: CollectorContext) -> None:
         if len(ctx.radar_model_history) > maximum_model_frames:
             del ctx.radar_model_history[:-maximum_model_frames]
         frame_times.append(captured_at)
-        if len(frames) < RADAR_FRAMES_PER_CHUNK:
+        if len(frames) < RADAR_FRAMES_PER_SECOND:
             continue
 
-        chunk_index = len(ctx.radar_chunk_results)
+        second_index = len(ctx.radar_second_results)
         timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-        radar_path = ctx.output_dir / f"radar_{chunk_index:03d}_{timestamp}.bin"
+        radar_path = ctx.output_dir / f"radar_{second_index:03d}_{timestamp}.bin"
         radar_path.write_bytes(b"".join(frames))
         duration = max(0.001, frame_times[-1] - frame_times[0])
         chunk_entry: dict[str, Any] = {
-            "chunk_index": chunk_index,
+            "second_index": second_index,
             "bin_path": str(radar_path),
             "started": dt.datetime.fromtimestamp(
                 time.time() - duration
             ).astimezone().isoformat(timespec="milliseconds"),
             "finished_capture": iso_now(),
             "chunk_seconds": duration,
-            "chunk_frames": RADAR_FRAMES_PER_CHUNK,
+            "chunk_frames": RADAR_FRAMES_PER_SECOND,
             "status": "stored",
             "frame_sequence_start": int.from_bytes(frames[0][4:8], "little"),
             "frame_sequence_end": int.from_bytes(frames[-1][4:8], "little"),
             "frame_monotonic_ns": [int(value * 1_000_000_000) for value in frame_times],
         }
-        ctx.radar_chunk_results.append(chunk_entry)
-        ctx.manifest["outputs"]["radar"]["chunks"].append(chunk_entry)
-        ctx.manifest["expected_chunks"] = max(ctx.expected_chunks, len(ctx.radar_chunk_results))
+        ctx.radar_second_results.append(chunk_entry)
+        ctx.manifest["outputs"]["radar"]["seconds"].append(chunk_entry)
+        ctx.manifest["expected_seconds"] = max(ctx.expected_seconds, len(ctx.radar_second_results))
         with ctx.publish_lock:
             write_live_manifest(ctx)
-        ctx.upload_queue.put(chunk_index)
+        ctx.upload_queue.put(second_index)
         # Feed only this chunk's new frames; the WindowedAnalyzer keeps the
         # full-minute buffer and gives each model its own trailing window.
-        ctx.model_queue.put((chunk_index, tuple(frames), iso_now()))
+        ctx.model_queue.put((second_index, tuple(frames), iso_now()))
         # Queue the chunk for XY localization / occupancy analysis so the
         # per-chunk location, targets and xy_map land in the collected data.
-        enqueue_analysis_chunk(
+        enqueue_analysis_second(
             ctx.analysis_queue,
-            ("chunk", chunk_entry, dict(ctx.initial_settings), tuple(frames), captured_at),
+            ("second", chunk_entry, dict(ctx.initial_settings), tuple(frames), captured_at),
         )
         frames = []
         frame_times = []
@@ -1044,7 +1044,7 @@ def run_radar_reader(ctx: CollectorContext) -> None:
     if frames:
         ctx.manifest["warnings"].append(
             f"Discarded {len(frames)} radar frames at the minute boundary; "
-            f"chunks require exactly {RADAR_FRAMES_PER_CHUNK} frames."
+            f"chunks require exactly {RADAR_FRAMES_PER_SECOND} frames."
         )
 
 
@@ -1187,8 +1187,8 @@ def run(ctx: CollectorContext) -> int:
             manifest["outputs"]["radar"] = {
                 "type": "chunked-bin",
                 "config_dir": str(RADAR_CFG),
-                "chunk_frames": RADAR_FRAMES_PER_CHUNK,
-                "chunks": [],
+                "chunk_frames": RADAR_FRAMES_PER_SECOND,
+                "seconds": [],
                 "note": "The hardware reader rotates one binary file for every 10 complete radar frames.",
             }
             with ctx.publish_lock:
@@ -1263,7 +1263,7 @@ def run(ctx: CollectorContext) -> int:
         if ctx.radar_upload_thread is not None:
             ctx.upload_queue.put(None)
             ctx.radar_upload_thread.join(timeout=15.0)
-        if not live_only and not ctx.radar_chunk_results and ctx.model_registry.list():
+        if not live_only and not ctx.radar_second_results and ctx.model_registry.list():
             # Make sensor outages visible in every enabled model timeline.
             try:
                 skipped = ctx.model_registry.run_enabled([], current_csi_samples(ctx), 0, iso_now())
@@ -1322,9 +1322,9 @@ def run(ctx: CollectorContext) -> int:
         camera_files = sorted(str(path) for path in output_dir.glob("camera_*.jpg"))
         if camera_files:
             manifest["outputs"].setdefault("camera", {})["files"] = camera_files
-        if ctx.camera is not None and len(camera_files) != ctx.expected_chunks:
+        if ctx.camera is not None and len(camera_files) != ctx.expected_seconds:
             manifest["warnings"].append(
-                f"Camera captured {len(camera_files)} of {ctx.expected_chunks} synchronized second images."
+                f"Camera captured {len(camera_files)} of {ctx.expected_seconds} synchronized second images."
             )
 
         wifi_csi = manifest["outputs"].get("wifi_csi")
@@ -1370,12 +1370,12 @@ def run(ctx: CollectorContext) -> int:
                 if isinstance(receiver, dict)
             },
         }
-        manifest["expected_chunks"] = len(ctx.radar_chunk_results)
+        manifest["expected_seconds"] = len(ctx.radar_second_results)
         manifest["progress"] = {
             "unit": "second",
-            "captured_seconds": len(ctx.radar_chunk_results),
-            "total_seconds": ctx.expected_chunks,
-            "percent": round(100.0 * len(ctx.radar_chunk_results) / max(1, ctx.expected_chunks), 1),
+            "captured_seconds": len(ctx.radar_second_results),
+            "total_seconds": ctx.expected_seconds,
+            "percent": round(100.0 * len(ctx.radar_second_results) / max(1, ctx.expected_seconds), 1),
         }
 
         # Surface silent capture loss: a healthy radar minute yields ~10 fps,
@@ -1419,7 +1419,7 @@ def run(ctx: CollectorContext) -> int:
             ]
             if occupancy_results:
                 selected = max(occupancy_results, key=lambda item: float(item.get("confidence") or 0.0))
-                publish_model_occupancy(selected, ctx.folder_name, chunk_index=None)
+                publish_model_occupancy(selected, ctx.folder_name, second_index=None)
             with ctx.publish_lock:
                 timelines = manifest.setdefault("model_predictions", [])
                 by_id = {str(item.get("model_id")): item for item in timelines if isinstance(item, dict)}
@@ -1449,7 +1449,7 @@ def run(ctx: CollectorContext) -> int:
             ]
             if occupancy_votes:
                 selected = max(occupancy_votes, key=lambda item: float(item.get("confidence") or 0.0))
-                publish_model_occupancy(selected, ctx.folder_name, chunk_index=None)
+                publish_model_occupancy(selected, ctx.folder_name, second_index=None)
 
         if live_only:
             manifest["container"] = {"skipped": "live-only mode"}

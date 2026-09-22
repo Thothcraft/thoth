@@ -19,10 +19,10 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from backend.config import Config  # type: ignore
-    from backend.capture_hardware import RADAR_FRAMES_PER_CHUNK  # type: ignore
+    from backend.capture_hardware import RADAR_FRAMES_PER_SECOND  # type: ignore
 else:
     from .config import Config
-    from .capture_hardware import RADAR_FRAMES_PER_CHUNK
+    from .capture_hardware import RADAR_FRAMES_PER_SECOND
 
 DATA_ROOT = Path(Config.CAPTURE_DATA_DIR).expanduser()
 CAPTURE_SETTINGS_PATH = Path(Config.CONFIG_DIR).expanduser() / "capture_settings.json"
@@ -117,7 +117,7 @@ def compact_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         compact_outputs["radar"] = {
             "sample_count": int(radar.get("sample_count") or 0),
             "average_sampling_rate_hz": float(radar.get("average_sampling_rate_hz") or 0.0),
-            "chunk_count": len(radar.get("chunks") or []),
+            "second_count": len(radar.get("seconds") or radar.get("chunks") or []),
         }
         if not manifest.get("container"):
             compact_outputs["radar"]["files"] = [Path(str(value)).name for value in (radar.get("files") or [])]
@@ -136,7 +136,7 @@ def compact_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     compact = {
         key: manifest[key] for key in (
             "folder_minute", "scheduled_start", "capture_started", "capture_finished",
-            "duration_seconds", "chunk_seconds", "expected_chunks", "status", "host",
+            "duration_seconds", "chunk_seconds", "expected_seconds", "status", "host",
             "labels", "sensors_enabled", "warnings", "errors",
             "device_id", "device_name", "container", "model_predictions",
             "progress",
@@ -189,7 +189,7 @@ def prediction_label_for(label: str, style: str) -> str:
 
 def annotate_chunk_result(
     result: dict[str, Any], settings: dict[str, Any], room: dict[str, Any],
-    preset_labels: list[str], minute: str, expected_chunks: int,
+    preset_labels: list[str], minute: str, expected_seconds: int,
     previous_frames: int,
 ) -> dict[str, Any]:
     occupancy = result.get("occupancy") or {}
@@ -271,7 +271,7 @@ def annotate_chunk_result(
         labels.append(f"people_count:{people_count}")
     labels.extend(activity_labels)
 
-    chunk_index = int(result.get("chunk_index") or 0)
+    second_index = int(result.get("second_index") or 0)
     result.update({
         "settings_revision": int(settings.get("revision") or 0),
         "settings_snapshot": {
@@ -280,7 +280,7 @@ def annotate_chunk_result(
             "radar_detection_threshold_db": float(
                 settings.get("radar_detection_threshold_db") or 8.0
             ),
-            "chunk_frames": RADAR_FRAMES_PER_CHUNK,
+            "chunk_frames": RADAR_FRAMES_PER_SECOND,
         },
         "labels": list(dict.fromkeys(labels)),
         "zones": occupied_zones,
@@ -296,12 +296,12 @@ def annotate_chunk_result(
         "join": {
             "schema_version": 2,
             "minute": minute,
-            "chunk_id": f"{minute}:{chunk_index:02d}",
-            "chunk_index": chunk_index,
-            "expected_chunks": expected_chunks,
-            "previous_chunk_id": f"{minute}:{chunk_index - 1:02d}" if chunk_index else None,
-            "next_chunk_id": f"{minute}:{chunk_index + 1:02d}" if chunk_index + 1 < expected_chunks else None,
-            "start_offset_seconds": round(chunk_index * float(result.get("chunk_seconds") or 0.0), 3),
+            "chunk_id": f"{minute}:{second_index:02d}",
+            "second_index": second_index,
+            "expected_seconds": expected_seconds,
+            "previous_chunk_id": f"{minute}:{second_index - 1:02d}" if second_index else None,
+            "next_chunk_id": f"{minute}:{second_index + 1:02d}" if second_index + 1 < expected_seconds else None,
+            "start_offset_seconds": round(second_index * float(result.get("chunk_seconds") or 0.0), 3),
             "duration_seconds": float(result.get("chunk_seconds") or 0.0),
             "frame_start": previous_frames,
             "frame_count": evaluated_frames,

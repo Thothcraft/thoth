@@ -262,7 +262,7 @@ def build_capture_container(
     for fallback_index, chunk in enumerate(chunks):
         if not isinstance(chunk, dict):
             continue
-        chunk_index = int(chunk.get("chunk_index") or fallback_index)
+        second_index = int(chunk.get("second_index") or fallback_index)
         path = _path_for(minute_dir, chunk.get("bin_path"))
         if path is None:
             continue
@@ -277,10 +277,10 @@ def build_capture_container(
             if len(packets) > 1 and finish_unix > start_unix:
                 unix_ns = start_unix + ((finish_unix - start_unix) * frame_index // (len(packets) - 1))
             else:
-                unix_ns = start_unix or origin_unix_ns + chunk_index * NANOSECONDS
+                unix_ns = start_unix or origin_unix_ns + second_index * NANOSECONDS
             second = _second_index(
                 mono_ns, unix_ns, origin_monotonic_ns, origin_unix_ns,
-                chunk_index, second_count,
+                second_index, second_count,
             )
             radar_payloads.append(packet)
             radar_unix.append(unix_ns)
@@ -297,7 +297,7 @@ def build_capture_container(
                 "path": chunk.get("camera_path"),
                 "captured_at": chunk.get("camera_captured_at") or chunk.get("started"),
                 "monotonic_ns": chunk.get("camera_monotonic_ns"),
-                "second_index": chunk.get("chunk_index"),
+                "second_index": chunk.get("second_index"),
             }
             for chunk in chunks if isinstance(chunk, dict) and chunk.get("camera_path")
         ]

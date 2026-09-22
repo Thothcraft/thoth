@@ -542,7 +542,7 @@ class ModelRegistry:
         item: dict[str, Any],
         radar_frames: Sequence[bytes],
         csi_samples: Sequence[str | tuple[int, str]],
-        chunk_index: int,
+        second_index: int,
         timestamp: str,
     ) -> dict[str, Any]:
         """Run one chunk-execution model on the provided window of samples.
@@ -553,7 +553,7 @@ class ModelRegistry:
         """
         torch = _torch()
         metadata = item.get("metadata") or {}
-        base = {"model_id": item.get("id"), "model_name": metadata.get("name"), "model_version": metadata.get("version"), "chunk_index": int(chunk_index), "timestamp": timestamp}
+        base = {"model_id": item.get("id"), "model_name": metadata.get("name"), "model_version": metadata.get("version"), "second_index": int(second_index), "timestamp": timestamp}
         try:
             tensors = []
             missing = []
@@ -591,7 +591,7 @@ class ModelRegistry:
             self._set_last_error(str(item.get("id")), message)
             return {**base, "status": "error", "error": message}
 
-    def run_enabled(self, radar_frames: Sequence[bytes], csi_samples: Sequence[str | tuple[int, str]], chunk_index: int, timestamp: str) -> list[dict[str, Any]]:
+    def run_enabled(self, radar_frames: Sequence[bytes], csi_samples: Sequence[str | tuple[int, str]], second_index: int, timestamp: str) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for item in self.list():
             if not item.get("enabled"):
@@ -599,7 +599,7 @@ class ModelRegistry:
             metadata = item.get("metadata") or {}
             if str(metadata.get("execution") or "chunk") == "minute":
                 continue  # minute-level models run once via run_minute()
-            results.append(self.run_model(item, radar_frames, csi_samples, chunk_index, timestamp))
+            results.append(self.run_model(item, radar_frames, csi_samples, second_index, timestamp))
         return results
 
     def run_minute(
@@ -630,7 +630,7 @@ class ModelRegistry:
                 "model_id": item.get("id"),
                 "model_name": metadata.get("name"),
                 "model_version": metadata.get("version"),
-                "chunk_index": -1,
+                "second_index": -1,
                 "scope": "minute",
                 "timestamp": timestamp,
             }

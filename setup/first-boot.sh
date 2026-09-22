@@ -175,22 +175,12 @@ systemctl daemon-reload
 systemctl enable avahi-daemon ssh thoth.service thoth-collector.service
 systemctl restart avahi-daemon ssh thoth.service thoth-collector.service
 
-# Unique hostname per device: thoth-<serial-suffix> avoids mDNS collisions
-# when several Thoth devices share a network. THOTH_HOSTNAME overrides.
-if [ -z "${THOTH_HOSTNAME:-}" ]; then
-    SERIAL="$(awk -F': ' '/^Serial/ {print $2}' /proc/cpuinfo 2>/dev/null | tr -d ' \t' | tail -c 7)"
-    DEVICE_HOSTNAME="thoth${SERIAL:+-$SERIAL}"
-else
-    DEVICE_HOSTNAME="$THOTH_HOSTNAME"
-fi
-DEVICE_HOSTNAME="$(echo "$DEVICE_HOSTNAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')"
-[ -n "$DEVICE_HOSTNAME" ] || DEVICE_HOSTNAME="thoth"
-hostnamectl set-hostname "$DEVICE_HOSTNAME" || true
-if grep -q '^127.0.1.1' /etc/hosts; then
-    sed -i "s/^127.0.1.1.*/127.0.1.1\t$DEVICE_HOSTNAME/" /etc/hosts
-else
-    printf '127.0.1.1\t%s\n' "$DEVICE_HOSTNAME" >> /etc/hosts
-fi
+# Friendly per-device hostname: thoth-<name>.local where <name> is a random
+# month, person, or city name. THOTH_HOSTNAME overrides for a fixed name.
+# Shared logic lives in setup/device-hostname.sh so existing devices can be
+# renamed with the same scheme.
+bash "$SCRIPT_DIR/device-hostname.sh"
+DEVICE_HOSTNAME="$(hostname)"
 
 touch /etc/thoth-first-boot-done
 log "Thoth installation complete: http://$DEVICE_HOSTNAME.local:5000"

@@ -631,7 +631,7 @@ class StreamingChunkAnalyzer:
     """Incrementally analyze live frames while retaining one tracker across chunks."""
 
     FIELDNAMES = [
-        "chunk_index", "frame_index", "seq", "detected", "target_count", "occupied",
+        "second_index", "frame_index", "seq", "detected", "target_count", "occupied",
         "primary_target_id", "x_m", "y_m", "z_m", "width_m", "depth_m", "height_m",
         "pose", "snr_db", "score", "noise_floor_db", "threshold_normalized", "peak_power_db",
         "motion_points", "targets_json", "shadow_points_json",
@@ -641,7 +641,7 @@ class StreamingChunkAnalyzer:
         self,
         processor: Any,
         csv_path: Optional[Path],
-        chunk_index: int,
+        second_index: int,
         chunk_seconds: float,
         room: Dict[str, Any],
         radar_detection_threshold_normalized: float,
@@ -663,7 +663,7 @@ class StreamingChunkAnalyzer:
         self.radar_config = getattr(processor, "radar_config", None) or load_radar_config()
         self.csv_path = csv_path
         self.csv_temporary = csv_path.with_suffix(f"{csv_path.suffix}.tmp") if csv_path else None
-        self.chunk_index = chunk_index
+        self.second_index = second_index
         self.chunk_seconds = chunk_seconds
         self.room = room
         self.occupancy_threshold_percent = min(100.0, max(0.0, float(occupancy_threshold_percent)))
@@ -794,9 +794,9 @@ class StreamingChunkAnalyzer:
         playback_score = float(native_score) if native_score is not None else self.last_score
         self.playback_frames.append({
             **(_example2_playback_frame(native_plot) or _xy_intensity_frame(self.processor, self.room)),
-            "name": f"chunk-{self.chunk_index:02d}-frame-{frame_index:04d}",
+            "name": f"chunk-{self.second_index:02d}-frame-{frame_index:04d}",
             "index": frame_index,
-            "chunk_index": self.chunk_index,
+            "second_index": self.second_index,
             "seq": seq,
             "location": playback_location,
             "score": playback_score,
@@ -814,7 +814,7 @@ class StreamingChunkAnalyzer:
         self.max_processing_seconds = max(self.max_processing_seconds, elapsed)
         self._write_live_state(world_points)
         self.writer.writerow({
-            "chunk_index": self.chunk_index,
+            "second_index": self.second_index,
             "frame_index": frame_index,
             "seq": seq,
             "detected": bool(detection.get("detected")),
@@ -902,7 +902,7 @@ class StreamingChunkAnalyzer:
                     "vertical_deg": cone.get("vertical_deg", 65.0),
                     "range_m": cone.get("range_m", 15.0),
                 },
-                "chunk_index": self.chunk_index,
+                "second_index": self.second_index,
                 "frame_index": self.evaluated_frames - 1,
                 "sensor_hz": round(measured_hz, 2),
                 "configured_hz": self.configured_frame_rate_hz,
@@ -946,7 +946,7 @@ class StreamingChunkAnalyzer:
         classification = "green" if label == "occupied" else "red"
         primary = self.last_targets[0] if self.last_targets else None
         frame = {
-            "name": f"chunk-{self.chunk_index:02d}", "index": self.chunk_index,
+            "name": f"chunk-{self.second_index:02d}", "index": self.second_index,
             "x": x_axis, "y": y_axis, "z": z, "location": self.last_position,
             "score": self.last_score, "detected": label == "occupied",
             "snr_db": float(self.last_detection.get("snr_db") or (primary.get("snr_db") if primary else 0.0)),
@@ -970,7 +970,7 @@ class StreamingChunkAnalyzer:
             "location": self.last_position, "score": self.last_score, "detected": label == "occupied",
             "snr_db": frame["snr_db"], "threshold_normalized": frame["threshold_normalized"], "peak_power_db": frame["peak_power_db"],
             "noise_floor_db": frame["noise_floor_db"], "targets": self.last_targets,
-            "motion_points": frame["motion_points"], "chunk_index": self.chunk_index,
+            "motion_points": frame["motion_points"], "second_index": self.second_index,
             "chunk_seconds": self.chunk_seconds, "room": self.room,
             "xy_map": getattr(self.processor, "_thoth_example2_xy_payload", {}) or {},
             "coordinate_space": "example2_sensor_local",
@@ -1123,7 +1123,7 @@ def _serialize_target(target: Dict[str, Any], room: Dict[str, Any]) -> Dict[str,
 def analyze_radar_chunk(
     bin_path: Path,
     csv_path: Path,
-    chunk_index: int,
+    second_index: int,
     chunk_seconds: float,
     room: Optional[Dict[str, Any]] = None,
     *,
@@ -1149,7 +1149,7 @@ def analyze_radar_chunk(
     frame_period_s = float(getattr(proc, "frame_period_s", 0.0) or 0.0)
 
     fieldnames = [
-        "chunk_index",
+        "second_index",
         "frame_index",
         "seq",
         "detected",
@@ -1237,7 +1237,7 @@ def analyze_radar_chunk(
 
             row_targets = last_targets or []
             row = {
-                "chunk_index": chunk_index,
+                "second_index": second_index,
                 "frame_index": frame_index,
                 "seq": seq,
                 "detected": bool(detection.get("detected")),
@@ -1320,8 +1320,8 @@ def analyze_radar_chunk(
         "y": y_axis,
         "z": z,
         "frames": [{
-            "name": f"chunk-{chunk_index:02d}",
-            "index": chunk_index,
+            "name": f"chunk-{second_index:02d}",
+            "index": second_index,
             "x": x_axis,
             "y": y_axis,
             "z": z,
@@ -1365,7 +1365,7 @@ def analyze_radar_chunk(
         "noise_floor_db": last_detection.get("noise_floor_db"),
         "targets": last_targets,
         "motion_points": int(last_detection.get("motion_points") or 0),
-        "chunk_index": chunk_index,
+        "second_index": second_index,
         "chunk_seconds": float(chunk_seconds),
         "frame_rows": frame_rows,
         "frame_payloads": frame_payloads,
@@ -1459,7 +1459,7 @@ def compile_minute_xy_payload(chunk_payloads: List[Dict[str, Any]]) -> Dict[str,
         "noise_floor_db": latest.get("noise_floor_db"),
         "targets": latest.get("targets") or [],
         "motion_points": int(latest.get("motion_points") or 0),
-        "chunk_count": len(chunk_payloads),
+        "second_count": len(chunk_payloads),
         "room": room,
         "coordinate_space": "example2_sensor_local",
         "native_pipeline": True,

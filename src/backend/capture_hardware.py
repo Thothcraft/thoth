@@ -41,7 +41,7 @@ RADAR_GPIO_SETTLE_SECONDS = 0.5
 # The BGT60TR13C driver delivers radar frames in 10-frame batches. This is a
 # hardware/driver detail, not a user-facing "chunk" — the minute is the atomic
 # unit and per-frame timestamps carry the real timing.
-RADAR_FRAMES_PER_CHUNK = 10
+RADAR_FRAMES_PER_SECOND = 10
 
 
 def iso_now() -> str:

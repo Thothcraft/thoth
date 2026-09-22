@@ -13,6 +13,7 @@ import queue
 import subprocess
 import tempfile
 import threading
+import time
 import zipfile
 from collections import deque
 from dataclasses import dataclass
@@ -36,6 +37,59 @@ def _capture_root() -> Path:
     root = Path(Config.CAPTURE_DATA_DIR).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def disk_percent_used(root: Optional[Path] = None) -> float:
+    """Percent of the capture filesystem currently in use (0-100)."""
+    usage = shutil.disk_usage(root or _capture_root())
+    return (usage.used / usage.total * 100.0) if usage.total else 0.0
+
+
+def _tree_size(path: Path) -> int:
+    """Total bytes of all files under ``path`` (best-effort, ignores errors)."""
+    total = 0
+    try:
+        for entry in path.rglob("*"):
+            try:
+                if entry.is_file():
+                    total += entry.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return total
+
+
+def capture_storage_bytes() -> int:
+    """Total bytes used by stored minute captures (excludes config/live/tmp)."""
+    return sum(_tree_size(d) for d in list_minute_folders())
+
+
+def cleanup_live_dir(max_age_seconds: float = 900.0) -> Dict[str, Any]:
+    """Remove stale files from the transient live-capture dir (``data/live``).
+
+    During an active Sensor Lab session the collector prunes camera frames to
+    the newest few, so every live file is only seconds old. But an orphaned or
+    killed writer can leave a huge backlog behind that nothing reclaims — this
+    is what filled the disk. Anything older than ``max_age_seconds`` is stale
+    and safe to drop; an active session never keeps files that old.
+    """
+    live_dir = _capture_root() / "live"
+    if not live_dir.is_dir():
+        return {"removed": 0, "freed_bytes": 0}
+    cutoff = time.time() - max_age_seconds
+    removed = 0
+    freed = 0
+    for entry in live_dir.iterdir():
+        try:
+            if not entry.is_file() or entry.stat().st_mtime >= cutoff:
+                continue
+            freed += entry.stat().st_size
+            entry.unlink(missing_ok=True)
+            removed += 1
+        except OSError:
+            continue
+    return {"removed": removed, "freed_bytes": freed}
 
 
 def _label_for_minute_dir(minute_dir: Path) -> Optional[str]:
@@ -111,11 +165,11 @@ def _manifest_chunk_seconds(manifest: Optional[Dict[str, object]]) -> Optional[f
         return None
 
 
-def _manifest_expected_chunks(manifest: Optional[Dict[str, object]], seconds_recorded: Optional[float]) -> Optional[int]:
+def _manifest_expected_seconds(manifest: Optional[Dict[str, object]], seconds_recorded: Optional[float]) -> Optional[int]:
     if not isinstance(manifest, dict):
         return None
     try:
-        value = int(manifest.get("expected_chunks") or 0)
+        value = int(manifest.get("expected_seconds") or manifest.get("expected_chunks") or 0)
         if value > 0:
             return value
     except Exception:
@@ -459,50 +513,50 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
     if predictions_path and predictions_path.exists():
         predictions = read_prediction_file(predictions_path.parent)
 
-    expected_chunks = _manifest_expected_chunks(manifest, seconds_recorded)
-    if not expected_chunks:
-        expected_chunks = max(len(radar_bins), len(radar_csvs), len((predictions or {}).get("timeline") or []), 6)
-    expected_chunks = max(1, expected_chunks)
+    expected_seconds = _manifest_expected_seconds(manifest, seconds_recorded)
+    if not expected_seconds:
+        expected_seconds = max(len(radar_bins), len(radar_csvs), len((predictions or {}).get("timeline") or []), 6)
+    expected_seconds = max(1, expected_seconds)
 
     container_present = bool(files.get("container") and files["container"].exists())
     prediction_entries = {
-        int(entry.get("chunk_index")): entry
+        int(entry.get("second_index") or entry.get("chunk_index")): entry
         for entry in ((predictions or {}).get("timeline") or [])
-        if isinstance(entry, dict) and str(entry.get("chunk_index", "")).isdigit()
+        if isinstance(entry, dict) and str(entry.get("second_index", entry.get("chunk_index", ""))).isdigit()
     }
-    manifest_chunks = {}
+    manifest_seconds = {}
     if isinstance(manifest, dict):
         radar_output = (manifest.get("outputs") or {}).get("radar") if isinstance(manifest.get("outputs"), dict) else None
         if isinstance(radar_output, dict):
-            manifest_chunks = {
-                int(entry.get("chunk_index")): entry
-                for entry in (radar_output.get("chunks") or [])
-                if isinstance(entry, dict) and str(entry.get("chunk_index", "")).isdigit()
+            manifest_seconds = {
+                int(entry.get("second_index") or entry.get("chunk_index")): entry
+                for entry in (radar_output.get("seconds") or radar_output.get("chunks") or [])
+                if isinstance(entry, dict) and str(entry.get("second_index", entry.get("chunk_index", ""))).isdigit()
             }
-    stored_chunks = len(radar_bins)
+    stored_seconds = len(radar_bins)
     if container_present:
-        stored_chunks = sum(
+        stored_seconds = sum(
             int(entry.get("chunk_frames") or entry.get("sample_count") or 0) > 0
-            for entry in manifest_chunks.values()
+            for entry in manifest_seconds.values()
         )
-        if not manifest_chunks:
+        if not manifest_seconds:
             container_info = manifest.get("container") if isinstance(manifest, dict) else None
             if isinstance(container_info, dict) and int(container_info.get("radar_samples") or 0) > 0:
-                stored_chunks = int(container_info.get("second_count") or expected_chunks)
-    analyzed_chunks = sum(
+                stored_seconds = int(container_info.get("second_count") or expected_seconds)
+    analyzed_seconds = sum(
         str(entry.get("status") or "") in {"occupied", "empty"}
-        for entry in manifest_chunks.values()
+        for entry in manifest_seconds.values()
     )
-    chunks = []
-    for index in range(expected_chunks):
+    seconds = []
+    for index in range(expected_seconds):
         prediction = prediction_entries.get(index)
-        manifest_chunk = manifest_chunks.get(index) or {}
-        location = prediction.get("location") if prediction else manifest_chunk.get("location")
+        manifest_second = manifest_seconds.get(index) or {}
+        location = prediction.get("location") if prediction else manifest_second.get("location")
         if isinstance(location, (list, tuple)) and len(location) >= 2:
             location = {"x": location[0], "y": location[1]}
-        recorded = index < stored_chunks
+        recorded = index < stored_seconds
         state = "waiting"
-        manifest_status = str(manifest_chunk.get("status") or "")
+        manifest_status = str(manifest_second.get("status") or "")
         if manifest_status == "error":
             state = "error"
         elif prediction:
@@ -515,11 +569,11 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
             state = "stored"
         elif recorded:
             state = "analyzing"
-        if state == "collecting" and manifest_chunk.get("started"):
+        if state == "collecting" and manifest_second.get("started"):
             try:
-                started = datetime.fromisoformat(str(manifest_chunk["started"]))
+                started = datetime.fromisoformat(str(manifest_second["started"]))
                 now = datetime.now().astimezone() if started.tzinfo else datetime.now()
-                visual_progress = min(0.94, max(0.04, (now - started).total_seconds() / max(0.1, float(manifest_chunk.get("chunk_seconds") or 10.0))))
+                visual_progress = min(0.94, max(0.04, (now - started).total_seconds() / max(0.1, float(manifest_second.get("chunk_seconds") or 10.0))))
             except (TypeError, ValueError):
                 visual_progress = 0.35
         elif state in {"stored", "analyzing"}:
@@ -528,48 +582,48 @@ def _minute_progress(manifest: Optional[Dict[str, object]], files: Dict[str, Opt
             visual_progress = 1.0
         else:
             visual_progress = 0.0
-        chunks.append({
+        seconds.append({
             "index": index,
             "state": state,
             "stored": recorded,
             "analyzed": prediction is not None,
             "prediction": prediction.get("prediction") if prediction else None,
-            "occupied": prediction.get("occupied") if prediction else manifest_chunk.get("occupied"),
+            "occupied": prediction.get("occupied") if prediction else manifest_second.get("occupied"),
             "location": location,
-            "score": prediction.get("score") if prediction else manifest_chunk.get("score"),
-            "ratio": prediction.get("ratio") if prediction else manifest_chunk.get("ratio"),
-            "classification": prediction.get("classification") if prediction else manifest_chunk.get("classification"),
+            "score": prediction.get("score") if prediction else manifest_second.get("score"),
+            "ratio": prediction.get("ratio") if prediction else manifest_second.get("ratio"),
+            "classification": prediction.get("classification") if prediction else manifest_second.get("classification"),
             "progress": visual_progress,
-            "targets": prediction.get("targets") if prediction else manifest_chunk.get("targets", []),
-            "target_count": prediction.get("target_count") if prediction else len(manifest_chunk.get("targets") or []),
-            "people_count": (prediction.get("people_count") if prediction else manifest_chunk.get("people_count", 0)),
-            "labels": (prediction.get("labels") if prediction else manifest_chunk.get("labels", [])),
-            "activity_labels": (prediction.get("activity_labels") if prediction else manifest_chunk.get("activity_labels", [])),
-            "activity": (prediction.get("activity") if prediction else manifest_chunk.get("activity")),
-            "join": (prediction.get("join") if prediction else manifest_chunk.get("join")),
+            "targets": prediction.get("targets") if prediction else manifest_second.get("targets", []),
+            "target_count": prediction.get("target_count") if prediction else len(manifest_second.get("targets") or []),
+            "people_count": (prediction.get("people_count") if prediction else manifest_second.get("people_count", 0)),
+            "labels": (prediction.get("labels") if prediction else manifest_second.get("labels", [])),
+            "activity_labels": (prediction.get("activity_labels") if prediction else manifest_second.get("activity_labels", [])),
+            "activity": (prediction.get("activity") if prediction else manifest_second.get("activity")),
+            "join": (prediction.get("join") if prediction else manifest_second.get("join")),
             "detected_frames": (
                 prediction.get("detected_frames") if prediction
-                else manifest_chunk.get("detected_frames")
+                else manifest_second.get("detected_frames")
             ),
             "evaluated_frames": (
                 prediction.get("evaluated_frames") if prediction
-                else manifest_chunk.get("evaluated_frames")
+                else manifest_second.get("evaluated_frames")
             ),
-            "xy_map": ((manifest_chunk.get("analysis") or {}).get("xy_map") if isinstance(manifest_chunk.get("analysis"), dict) else None),
-            "camera_filename": Path(str(manifest_chunk.get("camera_path") or "")).name or None,
-            "error": manifest_chunk.get("error"),
+            "xy_map": ((manifest_second.get("analysis") or {}).get("xy_map") if isinstance(manifest_second.get("analysis"), dict) else None),
+            "camera_filename": Path(str(manifest_second.get("camera_path") or "")).name or None,
+            "error": manifest_second.get("error"),
         })
-    storage_percent = min(100.0, (stored_chunks / expected_chunks) * 100.0) if expected_chunks else 0.0
-    prediction_percent = min(100.0, (analyzed_chunks / expected_chunks) * 100.0) if expected_chunks else 0.0
+    storage_percent = min(100.0, (stored_seconds / expected_seconds) * 100.0) if expected_seconds else 0.0
+    prediction_percent = min(100.0, (analyzed_seconds / expected_seconds) * 100.0) if expected_seconds else 0.0
 
     return {
-        "expected_chunks": expected_chunks,
-        "stored_chunks": stored_chunks,
-        "analyzed_chunks": analyzed_chunks,
+        "expected_seconds": expected_seconds,
+        "stored_seconds": stored_seconds,
+        "analyzed_seconds": analyzed_seconds,
         "storage_percent": storage_percent,
         "prediction_percent": prediction_percent,
         "chunk_seconds": _manifest_chunk_seconds(manifest),
-        "chunks": chunks,
+        "seconds": seconds,
     }
 
 
@@ -604,12 +658,12 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
     if not labels and folder_label:
         labels = [folder_label]
     if not labels and (not isinstance(manifest, dict) or manifest.get("schema") != "thoth-minute-manifest/v7"):
-        completed_chunks = [
-            chunk for chunk in (progress.get("chunks") or [])
-            if chunk.get("state") in {"occupied", "empty"}
+        completed_seconds = [
+            second for second in (progress.get("seconds") or progress.get("chunks") or [])
+            if second.get("state") in {"occupied", "empty"}
         ]
-        if completed_chunks:
-            latest = completed_chunks[-1]
+        if completed_seconds:
+            latest = completed_seconds[-1]
             labels = list(latest.get("labels") or [])
             if not labels:
                 labels = [
@@ -632,7 +686,7 @@ def minute_summary(minute_dir: Path) -> Dict[str, object]:
         "capture_finished": manifest.get("capture_finished") if isinstance(manifest, dict) else None,
         "seconds_recorded": seconds_recorded,
         "chunk_seconds": progress.get("chunk_seconds"),
-        "expected_chunks": progress.get("expected_chunks"),
+        "expected_seconds": progress.get("expected_seconds"),
         "progress": progress,
         "labels": labels,
         "occupancy": None if isinstance(manifest, dict) and manifest.get("schema") == "thoth-minute-manifest/v7" else (((manifest.get("minute_summary") or {}).get("occupancy") or manifest.get("auto_occupancy_label")) if isinstance(manifest, dict) else None),
@@ -736,9 +790,9 @@ def minute_metrics(minute_dir: Path) -> Dict[str, object]:
             "effective_fps": radar_fps,
             "data_shape": radar_shape,
             "file_size": radar_path.stat().st_size if radar_path and radar_path.exists() else (container_path.stat().st_size if container_path and radar_frames else 0),
-            "chunk_count": len(radar_paths) or int(container_info.get("second_count") or 0),
+            "second_count": len(radar_paths) or int(container_info.get("second_count") or 0),
             "chunk_seconds": progress.get("chunk_seconds"),
-            "expected_chunks": progress.get("expected_chunks"),
+            "expected_seconds": progress.get("expected_seconds"),
             "storage_percent": progress.get("storage_percent"),
             "prediction_percent": progress.get("prediction_percent"),
         },
@@ -1033,12 +1087,21 @@ def cleanup_old_minutes(
 
     usage = shutil.disk_usage(root)
     percent_used = (usage.used / usage.total * 100.0) if usage.total else 0.0
-    while percent_used >= threshold and candidates:
-        minute_dir = candidates.pop(0)
-        shutil.rmtree(minute_dir, ignore_errors=True)
-        removed.append(minute_dir.name)
-        usage = shutil.disk_usage(root)
-        percent_used = (usage.used / usage.total * 100.0) if usage.total else 0.0
+    external_pressure = False
+    if percent_used >= threshold and candidates:
+        # Only sacrifice captures when reclaiming them can actually bring the
+        # disk under the limit. When the pressure is from non-capture data,
+        # deleting every minute would destroy history without freeing enough.
+        reclaimable = sum(_tree_size(d) for d in candidates)
+        if usage.total and (usage.used - reclaimable) / usage.total * 100.0 < threshold:
+            while percent_used >= threshold and candidates:
+                minute_dir = candidates.pop(0)
+                shutil.rmtree(minute_dir, ignore_errors=True)
+                removed.append(minute_dir.name)
+                usage = shutil.disk_usage(root)
+                percent_used = (usage.used / usage.total * 100.0) if usage.total else 0.0
+        else:
+            external_pressure = True
 
     return {
         "kept": max(0, len(folders) - len(removed)),
@@ -1046,4 +1109,5 @@ def cleanup_old_minutes(
         "max_disk_percent": threshold,
         "max_age_days": age_days,
         "disk_percent": round(percent_used, 2),
+        "external_pressure": external_pressure,
     }

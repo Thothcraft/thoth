@@ -136,7 +136,7 @@ def _occupancy_payload(
     occupancy: Dict[str, Any],
     minute: str,
     *,
-    chunk_index: Optional[int] = None,
+    second_index: Optional[int] = None,
     location: Any = None,
     confidence: Any = None,
     timestamp: Optional[str] = None,
@@ -157,7 +157,7 @@ def _occupancy_payload(
             "label": label,
             "classification": classification,
             "capture_minute": minute,
-            "chunk_index": chunk_index,
+            "second_index": second_index,
             "detected_frames": detected,
             "evaluated_frames": total,
             "ratio": ratio,
@@ -173,11 +173,11 @@ def _occupancy_payload(
     }
 
 
-def publish_model_occupancy(model_result: Dict[str, Any], minute: str, *, chunk_index: Optional[int] = None) -> Dict[str, Any]:
+def publish_model_occupancy(model_result: Dict[str, Any], minute: str, *, second_index: Optional[int] = None) -> Dict[str, Any]:
     """Publish a presence/absence state only when an enabled user model says so.
 
     The positive class is resolved from the model's own labels (occupied,
-    present, person, ...) rather than hard-coded, and ``chunk_index=None``
+    present, person, ...) rather than hard-coded, and ``second_index=None``
     marks a minute-level (majority of window votes) verdict.
     """
     label = str(model_result.get("class") or "").strip().lower()
@@ -203,7 +203,7 @@ def publish_model_occupancy(model_result: Dict[str, Any], minute: str, *, chunk_
         "model_name": model_result.get("model_name"),
         "model_version": model_result.get("model_version"),
         "capture_minute": minute,
-        "chunk_index": chunk_index,
+        "second_index": second_index,
         "timestamp": model_result.get("timestamp") or datetime.now(timezone.utc).isoformat(),
     }
     votes = model_result.get("window_votes")
@@ -258,11 +258,11 @@ def publish_model_occupancy(model_result: Dict[str, Any], minute: str, *, chunk_
 
     # Optional light brightness follows the occupancy probability: a confident
     # occupied room drives the light toward full brightness, empty toward off.
-    # The light is driven by the minute-level verdict only (chunk_index=None,
+    # The light is driven by the minute-level verdict only (second_index=None,
     # i.e. the majority of the minute's window/chunk predictions) so it does
     # not flicker on individual chunk predictions.
     light_entity = str(config.get("light_entity_id") or "").strip()
-    if chunk_index is None and config.get("light_control_enabled") and light_entity:
+    if second_index is None and config.get("light_control_enabled") and light_entity:
         try:
             if probability >= 0.5:
                 brightness = int(round(probability * 255))
@@ -291,7 +291,7 @@ def publish_model_occupancy(model_result: Dict[str, Any], minute: str, *, chunk_
             "label": label,
             "probability": probability,
             "minute": minute,
-            "scope": "minute" if chunk_index is None else "chunk",
+            "scope": "minute" if second_index is None else "chunk",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
     except Exception:
@@ -305,7 +305,7 @@ def publish_occupancy(
     occupancy: Dict[str, Any],
     minute: str,
     *,
-    chunk_index: Optional[int] = None,
+    second_index: Optional[int] = None,
     location: Any = None,
     confidence: Any = None,
     targets: Any = None,
@@ -324,7 +324,7 @@ def publish_occupancy(
         return _record_status({"success": False, "status": "not_configured"})
 
     payload = _occupancy_payload(
-        occupancy, minute, chunk_index=chunk_index, location=location,
+        occupancy, minute, second_index=second_index, location=location,
         confidence=confidence, timestamp=timestamp,
     )
     configured_entity_id = str(config["entity_id"])
@@ -363,7 +363,7 @@ def publish_occupancy(
                 'friendly_name': f'Thoth {scope.title()} Detection Region',
                 'ratio': payload['attributes']['ratio'],
                 'threshold_db': payload['attributes']['threshold_db'],
-                'capture_minute': minute, 'chunk_index': chunk_index, 'scope': scope,
+                'capture_minute': minute, 'second_index': second_index, 'scope': scope,
                 'timestamp': timestamp or datetime.now(timezone.utc).isoformat(),
             },
         },
@@ -373,7 +373,7 @@ def publish_occupancy(
                 'friendly_name': 'Thoth People Count',
                 'unit_of_measurement': 'people',
                 'capture_minute': minute,
-                'chunk_index': chunk_index,
+                'second_index': second_index,
                 'scope': scope,
                 'timestamp': timestamp or datetime.now(timezone.utc).isoformat(),
             },
@@ -384,7 +384,7 @@ def publish_occupancy(
                 'friendly_name': 'Thoth Target Coordinates',
                 'targets': target_tuples,
                 'capture_minute': minute,
-                'chunk_index': chunk_index,
+                'second_index': second_index,
                 'scope': scope,
                 'timestamp': timestamp or datetime.now(timezone.utc).isoformat(),
             },
@@ -395,7 +395,7 @@ def publish_occupancy(
                 'friendly_name': f'Thoth {scope.title()} Labels',
                 'labels': list(labels or []),
                 'capture_minute': minute,
-                'chunk_index': chunk_index,
+                'second_index': second_index,
                 'scope': scope,
                 'timestamp': timestamp or datetime.now(timezone.utc).isoformat(),
             },
@@ -406,7 +406,7 @@ def publish_occupancy(
                 'friendly_name': f'Thoth {scope.title()} Active Zones',
                 'active_zones': active_zones,
                 'capture_minute': minute,
-                'chunk_index': chunk_index,
+                'second_index': second_index,
                 'scope': scope,
                 'timestamp': timestamp or datetime.now(timezone.utc).isoformat(),
             },
@@ -418,7 +418,7 @@ def publish_occupancy(
                 'labels': list(activity_labels or []),
                 'zones': active_zones,
                 'capture_minute': minute,
-                'chunk_index': chunk_index,
+                'second_index': second_index,
                 'scope': scope,
                 **(activity if isinstance(activity, dict) else {}),
                 'timestamp': timestamp or datetime.now(timezone.utc).isoformat(),
@@ -454,7 +454,7 @@ def control_linked_device(
     minute: str,
     *,
     scope: str,
-    chunk_index: Optional[int] = None,
+    second_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Drive a per-model linked Home Assistant entity from one prediction.
 

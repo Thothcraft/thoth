@@ -69,6 +69,8 @@ from backend.capture_manager import (
     minute_summary,
     minute_metrics,
     cleanup_old_minutes,
+    cleanup_live_dir,
+    capture_storage_bytes,
     zip_minute_folder,
     stream_minute_folders,
     update_minute_labels,
@@ -1298,8 +1300,14 @@ device_scheduler.add_job(
     id='device_registration',
     replace_existing=True
 )
+def _capture_housekeeping() -> None:
+    """Reclaim disk: prune old minute captures + sweep stale live-capture files."""
+    cleanup_old_minutes(max_disk_percent=Config.CAPTURE_MAX_DISK_PERCENT)
+    cleanup_live_dir()
+
+
 device_scheduler.add_job(
-    lambda: cleanup_old_minutes(max_disk_percent=Config.CAPTURE_MAX_DISK_PERCENT),
+    _capture_housekeeping,
     'interval',
     minutes=10,
     id='capture_cleanup',
@@ -1309,7 +1317,7 @@ device_scheduler.start()
 
 # Load registration info if available
 device_manager.load_registration_info()
-cleanup_old_minutes(max_disk_percent=Config.CAPTURE_MAX_DISK_PERCENT)
+_capture_housekeeping()
 if not auth_manager.is_authenticated() and not getattr(Config, 'BRAIN_AUTH_TOKEN', None):
     try:
         device_manager.mark_device_offline()
@@ -2054,9 +2062,9 @@ def api_internal_home_assistant_publish():
     occupancy = payload.get('occupancy') if isinstance(payload.get('occupancy'), dict) else {}
     scope = 'minute' if payload.get('scope') == 'minute' else 'chunk'
     try:
-        chunk_index = int(payload.get('chunk_index')) if scope == 'chunk' else None
+        second_index = int(payload.get('second_index', payload.get('chunk_index'))) if scope == 'chunk' else None
     except (TypeError, ValueError):
-        return jsonify({'success': False, 'message': 'A valid chunk_index is required'}), 400
+        return jsonify({'success': False, 'message': 'A valid second_index is required'}), 400
 
     def record_result(result: Dict[str, Any]) -> None:
         minute_dir = get_minute(minute)
@@ -2066,7 +2074,7 @@ def api_internal_home_assistant_publish():
         with _home_assistant_manifest_lock:
             status_path = minute_dir / '.home_assistant_status.json'
             statuses = _read_json_file(status_path, {})
-            status_key = str(chunk_index) if chunk_index is not None else 'minute'
+            status_key = str(second_index) if second_index is not None else 'minute'
             statuses[status_key] = {**result, 'updated_at': datetime.now(timezone.utc).isoformat()}
             _write_json_file(status_path, statuses)
             manifest = _read_json_file(manifest_path, {})
@@ -2075,11 +2083,11 @@ def api_internal_home_assistant_publish():
             # cross-process lost-update race on the live manifest.
             if not manifest.get('folder_minute') or not manifest.get('capture_finished'):
                 return
-            if chunk_index is None:
+            if second_index is None:
                 manifest['home_assistant'] = statuses[status_key]
-            chunks = (((manifest.get('outputs') or {}).get('radar') or {}).get('chunks') or [])
-            for chunk in chunks:
-                if chunk_index is not None and isinstance(chunk, dict) and int(chunk.get('chunk_index', -1)) == chunk_index:
+            seconds = (((manifest.get('outputs') or {}).get('radar') or {}).get('seconds') or (manifest.get('outputs') or {}).get('radar', {}).get('chunks') or [])
+            for chunk in seconds:
+                if second_index is not None and isinstance(chunk, dict) and int(chunk.get('second_index', chunk.get('chunk_index', -1))) == second_index:
                     chunk['home_assistant'] = statuses[status_key]
                     break
             _write_json_file(manifest_path, manifest)
@@ -2088,7 +2096,7 @@ def api_internal_home_assistant_publish():
         occupancy,
         minute,
         callback=record_result,
-        chunk_index=chunk_index,
+        second_index=second_index,
         location=payload.get('location'),
         confidence=payload.get('confidence'),
         targets=payload.get('targets'),
@@ -2176,7 +2184,7 @@ def _read_timeline_manifest_summary(path: Path) -> Optional[Dict[str, Any]]:
                     continue
                 if str(item.get('scope') or 'chunk') != 'chunk':
                     continue
-                index = item.get('chunk_index')
+                index = item.get('second_index')
                 if not isinstance(index, int) or index < 0:
                     continue
                 cls = str(item.get('class') or '').strip().lower()
@@ -2218,7 +2226,7 @@ def _read_timeline_manifest_summary(path: Path) -> Optional[Dict[str, Any]]:
             'labels': manifest.get('labels') or [],
             'model_results': latest_results,
             'chunk_states': chunk_states,
-            'expected_chunks': manifest.get('expected_chunks'),
+            'expected_seconds': manifest.get('expected_seconds'),
             'chunk_seconds': manifest.get('chunk_seconds'),
             'capture_finished': manifest.get('capture_finished'),
             'degraded': bool(manifest.get('degraded')),
@@ -2240,15 +2248,15 @@ def _read_timeline_manifest_summary(path: Path) -> Optional[Dict[str, Any]]:
     )
     state = minute_match.group(1) if minute_match else None
     chunk_matches = re.findall(
-        r'"chunk_index"\s*:\s*(\d+)(?:(?!"chunk_index").){0,6000}?'
+        r'"second_index"\s*:\s*(\d+)(?:(?!"second_index").){0,6000}?'
         r'"status"\s*:\s*"(occupied|empty)"',
         tail,
         flags=re.DOTALL,
     )
     if chunk_matches:
-        chunk_index, chunk_state = max(chunk_matches, key=lambda item: int(item[0]))
+        second_index, chunk_state = max(chunk_matches, key=lambda item: int(item[0]))
         state = chunk_state
-        index = int(chunk_index)
+        index = int(second_index)
     else:
         index = None
     if state not in {'occupied', 'empty'}:
@@ -2342,7 +2350,7 @@ def capture_detail(minute):
 
     files = capture_files(minute_dir)
     detail = minute_summary(minute_dir)
-    for chunk in (detail.get("progress") or {}).get("chunks", []):
+    for chunk in (detail.get("progress") or {}).get("seconds", (detail.get("progress") or {}).get("chunks", [])):
         chunk.pop("xy_map", None)
     metrics = minute_metrics(minute_dir)
     video_preview = f"/api/captures/{minute}/file/video" if files.get("video") else None
@@ -2521,7 +2529,7 @@ def api_capture_detail(minute):
 
     files = capture_files(minute_dir)
     detail = minute_summary(minute_dir)
-    for chunk in (detail.get('progress') or {}).get('chunks', []):
+    for chunk in (detail.get('progress') or {}).get('seconds', (detail.get('progress') or {}).get('chunks', [])):
         chunk.pop('xy_map', None)
     if request.args.get('compact') in {'1', 'true', 'yes'}:
         outputs = (detail.get('manifest') or {}).get('outputs') if isinstance(detail.get('manifest'), dict) else None
@@ -2807,10 +2815,10 @@ def api_capture_radar_data(minute, plot):
     requested_chunk = request.args.get('chunk')
     if requested_chunk is not None:
         try:
-            chunk_index = int(requested_chunk)
+            second_index = int(requested_chunk)
         except (TypeError, ValueError):
             return jsonify({'status': 'error', 'message': 'chunk must be a non-negative integer'}), 400
-        if chunk_index < 0:
+        if second_index < 0:
             return jsonify({'status': 'error', 'message': 'chunk must be a non-negative integer'}), 400
 
         frames = []
@@ -2818,25 +2826,25 @@ def api_capture_radar_data(minute, plot):
             if not isinstance(frame, dict):
                 continue
             try:
-                frame_chunk_index = int(frame.get('chunk_index', -1))
+                frame_second_index = int(frame.get('second_index', -1))
             except (TypeError, ValueError):
                 continue
-            if frame_chunk_index == chunk_index:
+            if frame_second_index == second_index:
                 frames.append(frame)
         if not frames:
             radar_bins = files.get('radar_bins') or []
-            if chunk_index < len(radar_bins):
+            if second_index < len(radar_bins):
                 try:
-                    chunk_payload = _radar_plot_payload(radar_bins[chunk_index], plot)
+                    chunk_payload = _radar_plot_payload(radar_bins[second_index], plot)
                     frames = list((chunk_payload or {}).get('frames') or [])
                     payload = chunk_payload if isinstance(chunk_payload, dict) else payload
                 except Exception as exc:
-                    logger.debug('Chunk %s is not ready for playback: %s', chunk_index, exc)
+                    logger.debug('Chunk %s is not ready for playback: %s', second_index, exc)
 
         chunk_payload = dict(payload)
         chunk_payload['frames'] = frames[:10]
         chunk_payload['z'] = [] if frames else chunk_payload.get('z', [])
-        chunk_payload['chunk_index'] = chunk_index
+        chunk_payload['second_index'] = second_index
         chunk_payload['frame_count'] = len(chunk_payload['frames'])
         chunk_payload['sample_count'] = len(chunk_payload['frames'])
         chunk_payload['expected_frame_count'] = 10
@@ -2927,11 +2935,11 @@ def api_capture_radar_frame(minute):
         return jsonify({'status': 'error', 'message': 'No radar chunks in this minute'}), 404
 
     try:
-        chunk_index = int(request.args.get('chunk', 0))
+        second_index = int(request.args.get('second', request.args.get('chunk', 0)))
         frame_index = int(request.args.get('frame', 0))
     except (TypeError, ValueError):
         return jsonify({'status': 'error', 'message': 'chunk and frame must be integers'}), 400
-    if chunk_index < 0 or chunk_index >= len(radar_bins):
+    if second_index < 0 or second_index >= len(radar_bins):
         return jsonify({'status': 'error', 'message': f'chunk must be 0..{len(radar_bins) - 1}'}), 400
 
     setting = _radar_setting()
@@ -2941,7 +2949,7 @@ def api_capture_radar_frame(minute):
 
     target = None
     frame_count = 0
-    for idx, (seq, raw_data) in enumerate(_iter_radar_frames(radar_bins[chunk_index])):
+    for idx, (seq, raw_data) in enumerate(_iter_radar_frames(radar_bins[second_index])):
         frame_count = idx + 1
         if idx == frame_index:
             target = (seq, raw_data)
@@ -3031,8 +3039,8 @@ def api_capture_radar_frame(minute):
     return jsonify({
         'status': 'success',
         'minute': minute,
-        'chunk': chunk_index,
-        'chunk_count': len(radar_bins),
+        'chunk': second_index,
+        'second_count': len(radar_bins),
         'frame': frame_index,
         'frame_count': frame_count,
         'seq': int(seq),
@@ -3151,12 +3159,12 @@ def _csi_rows(path, rx_index):
     return rows
 
 
-@app.route('/api/captures/<minute>/chunk/<int:chunk_index>')
-def api_capture_chunk(minute, chunk_index):
+@app.route('/api/captures/<minute>/chunk/<int:second_index>')
+def api_capture_chunk(minute, second_index):
     """Per-sensor frame data for one chunk so the minute page can play a single
     chunk the way the live page plays a sensor.
 
-    The minute is divided into ``chunk_count`` equal slices. Radar maps chunk n
+    The minute is divided into ``second_count`` equal slices. Radar maps chunk n
     to ``radar_bins[n]`` (10 frames each); camera/CSI/sense are continuous and
     are sliced by index fraction, which matches how they were captured.
     """
@@ -3166,7 +3174,7 @@ def api_capture_chunk(minute, chunk_index):
     files = capture_files(minute_dir)
     detail = minute_summary(minute_dir)
     progress = detail.get('progress') or {}
-    prog_chunks = progress.get('chunks') or []
+    prog_chunks = progress.get('seconds') or progress.get('chunks') or []
     manifest = detail.get('manifest') or {}
     try:
         chunk_seconds = float(manifest.get('chunk_seconds') or 10.0)
@@ -3183,20 +3191,20 @@ def api_capture_chunk(minute, chunk_index):
             csi_paths = [single]
 
     # Chunk count: prefer the manifest/progress model, fall back to data.
-    chunk_count = max(len(prog_chunks), len(radar_bins), 1)
-    if chunk_index < 0 or chunk_index >= chunk_count:
-        return jsonify({'status': 'error', 'message': f'chunk must be 0..{chunk_count - 1}', 'chunk_count': chunk_count}), 400
+    second_count = max(len(prog_chunks), len(radar_bins), 1)
+    if second_index < 0 or second_index >= second_count:
+        return jsonify({'status': 'error', 'message': f'chunk must be 0..{second_count - 1}', 'second_count': second_count}), 400
 
     def _slice(total):
-        per = int(math.ceil(total / float(chunk_count))) if chunk_count else total
-        start = min(total, chunk_index * per)
+        per = int(math.ceil(total / float(second_count))) if second_count else total
+        start = min(total, second_index * per)
         end = min(total, start + per)
         return start, end
 
     # Radar: chunk n -> radar_bins[n], count its frames.
     radar_frames = 0
-    if chunk_index < len(radar_bins):
-        for _seq, _raw in _iter_radar_frames(radar_bins[chunk_index]):
+    if second_index < len(radar_bins):
+        for _seq, _raw in _iter_radar_frames(radar_bins[second_index]):
             radar_frames += 1
 
     # Camera: even index slice across the minute.
@@ -3216,16 +3224,16 @@ def api_capture_chunk(minute, chunk_index):
     ss, se = _slice(len(sense_rows))
     sense = sense_rows[ss:se]
 
-    prog = prog_chunks[chunk_index] if chunk_index < len(prog_chunks) else {}
+    prog = prog_chunks[second_index] if second_index < len(prog_chunks) else {}
     return jsonify({
         'status': 'success',
         'minute': minute,
-        'chunk': chunk_index,
-        'chunk_count': chunk_count,
+        'chunk': second_index,
+        'second_count': second_count,
         'chunk_seconds': chunk_seconds,
         'state': prog.get('state'),
         'prediction': prog.get('prediction') or prog.get('classification'),
-        'radar': {'frames': radar_frames, 'available': chunk_index < len(radar_bins)},
+        'radar': {'frames': radar_frames, 'available': second_index < len(radar_bins)},
         'camera': camera,
         'csi': {'samples': csi_samples, 'receivers': len(csi_paths)},
         'sense': sense,
@@ -3614,10 +3622,16 @@ def api_health():
         revision = None
 
     usage = shutil.disk_usage(Config.CAPTURE_DATA_DIR)
+    capture_bytes = capture_storage_bytes()
     disk = {
         'total_gb': round(usage.total / 1e9, 1),
         'free_gb': round(usage.free / 1e9, 1),
         'percent_used': round(usage.used / usage.total * 100.0, 1) if usage.total else None,
+        # How much of the filesystem is actually stored minute captures. When
+        # this is ~0 but percent_used is high, the disk is full of non-capture
+        # data (OS, logs, other files) that minute cleanup cannot reclaim.
+        'capture_gb': round(capture_bytes / 1e9, 2),
+        'other_gb': round(max(0.0, usage.used - capture_bytes) / 1e9, 1),
     }
 
     sensors: Dict[str, Any] = {}

@@ -40,7 +40,7 @@ LIVE_RESTART_MIN_SECONDS = 5.0
 shutdown_requested = False
 
 sys.path.insert(0, str(THOTH_ROOT / "src"))
-from backend.capture_manager import cleanup_old_minutes
+from backend.capture_manager import cleanup_old_minutes, disk_percent_used
 
 
 DEFAULT_CAPTURE_SETTINGS = {
@@ -274,7 +274,18 @@ def main() -> int:
         # one finishing the prior minute and one waiting for the next boundary.
         reap_captures()
         cleanup_old_minutes(max_disk_percent=args.max_disk_percent)
-        start_capture(args.python, capture_script, target)
+        if disk_percent_used() >= args.max_disk_percent:
+            # Stop collection rather than fill the card. The cleanup above only
+            # reclaims capture folders; if the disk is still over the limit the
+            # pressure is from non-capture data and starting a new minute would
+            # just write into an already-full filesystem.
+            print(
+                f"Disk usage >= {args.max_disk_percent:.1f}% - skipping capture for "
+                f"{target.isoformat(timespec='seconds')} (free space or raise --max-disk-percent)",
+                flush=True,
+            )
+        else:
+            start_capture(args.python, capture_script, target)
         target += timedelta(minutes=1)
         if target.timestamp() + 5 < time.time():
             target = next_minute_boundary()

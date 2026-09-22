@@ -17,8 +17,12 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from backend.collector_runtime import CollectorContext, run  # type: ignore
+    from backend.capture_manager import disk_percent_used  # type: ignore
+    from backend.config import Config  # type: ignore
 else:
     from .collector_runtime import CollectorContext, run
+    from .capture_manager import disk_percent_used
+    from .config import Config
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,7 +83,17 @@ def iso_now() -> str:
 
 
 def main() -> int:
-    return run(CollectorContext(parse_args()))
+    args = parse_args()
+    # Refuse to write a new minute into an already-full filesystem. Live-only
+    # streaming is exempt: its frames are transient and pruned continuously.
+    if not args.live_only and disk_percent_used() >= Config.CAPTURE_MAX_DISK_PERCENT:
+        print(
+            f"Disk usage >= {Config.CAPTURE_MAX_DISK_PERCENT:.1f}% - skipping capture "
+            "(free space or raise CAPTURE_MAX_DISK_PERCENT)",
+            file=sys.stderr,
+        )
+        return 0
+    return run(CollectorContext(args))
 
 
 if __name__ == "__main__":
