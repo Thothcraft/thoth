@@ -15,7 +15,9 @@ import fcntl
 import glob
 import json
 import logging
+import multiprocessing
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -358,13 +360,14 @@ def capture_camera_image(camera: str, output_file: Path) -> None:
         raise RuntimeError(f"camera snapshot failed ({result.returncode}): {detail}")
 
 
-def start_radar_capture(output_prefix: Path | None = None) -> Any:
+def _open_radar_chip(output_prefix: Path | None = None) -> Any:
+    """Initialise the BGT60TR13C and start streaming (runs in the driver
+    process — see RadarProcess)."""
     if not Path("/dev/spidev0.0").exists():
         raise RuntimeError("/dev/spidev0.0 is missing; enable SPI and reboot the Raspberry Pi.")
 
     from utility.BGT60TR13C import BGT60TR13C, RET_VAL_OK
     from utility.helper import calculate_frame_size, find_register_config_in_directory, find_setting_in_directory
-
     bgt60tr13c = None
     try:
         deadline = time.monotonic() + RADAR_GPIO_RETRY_SECONDS
@@ -404,6 +407,84 @@ def start_radar_capture(output_prefix: Path | None = None) -> Any:
     except Exception:
         stop_radar_capture(bgt60tr13c)
         raise
+
+
+def _radar_driver_main(frame_queue: Any, control_queue: Any, output_prefix: Any) -> None:
+    """Dedicated-process entry: own the chip, forward frames to the parent.
+
+    The hardware FIFO must be drained within ~20-30 ms while chirps stream.
+    Inside the collector process, 60 ms+ GIL-holding analysis bursts starve
+    the drain thread and the FIFO overflows every frame. A dedicated process
+    has its own GIL, so SPI draining is never preempted by analysis work.
+    """
+    radar = None
+    try:
+        radar = _open_radar_chip(Path(output_prefix) if output_prefix else None)
+        control_queue.put(("ready", None))
+        while True:
+            frame = radar.frame_buffer.get()
+            try:
+                frame_queue.put_nowait(frame)
+            except queue.Full:
+                pass  # parent behind — drop oldest-style, keep newest flowing
+    except Exception as exc:
+        try:
+            control_queue.put(("error", str(exc)))
+        except Exception:
+            pass
+    finally:
+        stop_radar_capture(radar)
+
+
+class _FrameQueueProxy:
+    """Duck-types BGT60TR13C.frame_buffer for the reader loop."""
+
+    def __init__(self, source: Any) -> None:
+        self._source = source
+
+    def get(self, timeout: float | None = None) -> bytes:
+        return self._source.get(timeout=timeout)
+
+
+class RadarProcess:
+    """Radar driver running in its own process (own GIL → no SPI starvation).
+
+    Exposes the same surface the collector uses: ``frame_buffer`` queue and
+    ``stop()``. Init errors in the child are re-raised in the parent.
+    """
+
+    def __init__(self, output_prefix: Path | None = None) -> None:
+        self._frames: multiprocessing.Queue = multiprocessing.Queue(maxsize=256)
+        self._control: multiprocessing.Queue = multiprocessing.Queue()
+        self._proc = multiprocessing.Process(
+            target=_radar_driver_main,
+            args=(
+                self._frames,
+                self._control,
+                str(output_prefix) if output_prefix is not None else None,
+            ),
+            daemon=True,
+            name="RadarDriver",
+        )
+        self._proc.start()
+        try:
+            kind, payload = self._control.get(timeout=RADAR_GPIO_RETRY_SECONDS + 30.0)
+        except queue.Empty as exc:
+            self.stop()
+            raise RuntimeError("Radar driver process did not initialise in time") from exc
+        if kind != "ready":
+            self.stop()
+            raise RuntimeError(f"Radar driver failed to start: {payload}")
+        self.frame_buffer = _FrameQueueProxy(self._frames)
+
+    def stop(self) -> None:
+        if self._proc.is_alive():
+            self._proc.terminate()
+            self._proc.join(timeout=5.0)
+
+
+def start_radar_capture(output_prefix: Path | None = None) -> Any:
+    return RadarProcess(output_prefix)
 
 
 def stop_radar_capture(radar: Any | None) -> None:
