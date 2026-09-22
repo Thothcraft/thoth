@@ -102,17 +102,29 @@
                         <div class="imu-bar"><div id="imu-mag" style="width:0%"></div></div>
                     </div>
                 </div>
-                <canvas id="sense-spark" class="lab-canvas" height="72" style="height:72px"></canvas>
-                <div class="flex flex-wrap items-center gap-2 text-xs" style="color:#7d979c">
-                    <span class="font-semibold">LED matrix</span>
-                    <input id="matrix-color" type="color" value="#22d3ee" aria-label="Matrix color"
-                        class="h-7 w-10 cursor-pointer rounded border border-slate-600 bg-transparent">
-                    <button type="button" id="matrix-fill" class="lab-full">Fill</button>
-                    <button type="button" id="matrix-clear" class="lab-full">Clear</button>
-                    <input id="matrix-text" type="text" maxlength="64" placeholder="Scroll text…"
-                        class="rounded border border-slate-600 bg-transparent px-2 py-1 text-slate-200" style="min-width:140px">
-                    <button type="button" id="matrix-send" class="lab-full">Show</button>
-                    <label class="flex items-center gap-1"><input id="matrix-dim" type="checkbox"> dim</label>
+                <div class="grid gap-3" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))" id="sense-sparks">
+                    <div class="sense-tile"><div class="k">Temperature °C</div><canvas class="lab-canvas sense-spark" data-key="temperature_c" height="64" style="height:64px"></canvas></div>
+                    <div class="sense-tile"><div class="k">Humidity %</div><canvas class="lab-canvas sense-spark" data-key="humidity_percent" height="64" style="height:64px"></canvas></div>
+                    <div class="sense-tile"><div class="k">Pressure hPa</div><canvas class="lab-canvas sense-spark" data-key="pressure_mbar" height="64" style="height:64px"></canvas></div>
+                    <div class="sense-tile"><div class="k">Accel |g|</div><canvas class="lab-canvas sense-spark" data-key="accel_g" height="64" style="height:64px"></canvas></div>
+                    <div class="sense-tile"><div class="k">Gyro |rad/s|</div><canvas class="lab-canvas sense-spark" data-key="gyro_rads" height="64" style="height:64px"></canvas></div>
+                    <div class="sense-tile"><div class="k">Compass |µT|</div><canvas class="lab-canvas sense-spark" data-key="compass_ut" height="64" style="height:64px"></canvas></div>
+                </div>
+                <div class="flex flex-wrap items-start gap-4 text-xs" style="color:#7d979c">
+                    <div>
+                        <div class="font-semibold mb-1.5">LED matrix <span style="font-weight:400">— click/drag to paint, right-click erases</span></div>
+                        <div id="matrix-grid" style="display:grid;grid-template-columns:repeat(8,22px);grid-template-rows:repeat(8,22px);gap:2px;touch-action:none"></div>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2 pt-6">
+                        <input id="matrix-color" type="color" value="#22d3ee" aria-label="Matrix color"
+                            class="h-7 w-10 cursor-pointer rounded border border-slate-600 bg-transparent">
+                        <button type="button" id="matrix-fill" class="lab-full">Fill</button>
+                        <button type="button" id="matrix-clear" class="lab-full">Clear</button>
+                        <input id="matrix-text" type="text" maxlength="64" placeholder="Scroll text…"
+                            class="rounded border border-slate-600 bg-transparent px-2 py-1 text-slate-200" style="min-width:140px">
+                        <button type="button" id="matrix-send" class="lab-full">Show</button>
+                        <label class="flex items-center gap-1"><input id="matrix-dim" type="checkbox"> dim</label>
+                    </div>
                 </div>
             </div>
             <div class="lab-empty" id="stage-empty">Waiting for data</div>
@@ -396,9 +408,17 @@
 
   // ---- radar --------------------------------------------------------------
   let radarState = null;
-  const snrBuf = [];   // {t, snr, thr, detected}
-  const trailBuf = []; // {t, x, y, score}
+  const snrBuf = [];   // {t, snr, thr, detected} — only the viewed window
+  const trailBuf = []; // {t, x, y, score} — only the viewed window
   let lastRadarStamp = 0;
+  // Drop everything older than the viewed window — stale history only
+  // costs memory and draw time, it is never rendered.
+  function trimBuf(buf, maxAgeMs) {
+    const cutoff = Date.now() - maxAgeMs;
+    let drop = 0;
+    while (drop < buf.length && buf[drop].t < cutoff) drop++;
+    if (drop) buf.splice(0, drop);
+  }
   function recordRadarHistory(body) {
     const stamp = Number(body.updated_at || 0);
     if (!stamp || stamp === lastRadarStamp) return;
@@ -407,13 +427,13 @@
     const snr = Number(det.snr_db), thr = Number(det.threshold_db ?? body.threshold_db);
     if (isFinite(snr)) {
       snrBuf.push({ t: Date.now(), snr, thr: isFinite(thr) ? thr : 8, detected: !!det.detected });
-      if (snrBuf.length > 2400) snrBuf.shift();
+      trimBuf(snrBuf, windowSec * 1000);
     }
     const loc = body.intensity && body.intensity.example2_xy && body.intensity.example2_xy.location;
     const score = Number(body.intensity && body.intensity.example2_xy && body.intensity.example2_xy.score);
     if (Array.isArray(loc) && loc.length === 2 && loc.every(v => typeof v === 'number' && isFinite(v))) {
       trailBuf.push({ t: Date.now(), x: loc[0], y: loc[1], score: isFinite(score) ? score : 1 });
-      if (trailBuf.length > 600) trailBuf.shift();
+      trimBuf(trailBuf, 30000); // trail view fades dots over 30 s
     }
   }
   async function pollRadar() {
@@ -596,7 +616,6 @@
 
   // ---- CSI ----------------------------------------------------------------
   let csiCursor = '', csiBuf = [], csiHz = 0;
-  const CSI_WINDOW_S = 6; // fallback; live window is windowSec
   async function pollCsi() {
     const body = await getJson(URLS.csiTail + '?cursor=' + encodeURIComponent(csiCursor));
     if (body.status !== 'success') { setRate('no CSI', true); showEmpty('Waiting for CSI packets'); return; }
@@ -605,9 +624,10 @@
     const now = body.samples && body.samples.length ? body.samples[body.samples.length - 1][0] : 0;
     for (const s of body.samples || []) csiBuf.push(s);
     // Keep enough history for the larger of the display window and the
-    // rolling-variance window.
+    // rolling-variance window — nothing older is ever drawn.
     const keepS = Math.max(windowSec, rollingWin + 2, 8);
     if (now) csiBuf = csiBuf.filter(s => now - s[0] < keepS * 1e9);
+    if (csiBuf.length > 60000) csiBuf = csiBuf.slice(-60000); // hard cap
     // measured rate over the last second of sample time
     if (now) csiHz = csiBuf.filter(s => now - s[0] < 1e9).length;
     setRate(csiHz + ' Hz', csiHz === 0);
@@ -626,15 +646,19 @@
       const byRx = new Map();
       for (const s of csiBuf) { if (!byRx.has(s[1])) byRx.set(s[1], []); byRx.get(s[1]).push(s); }
       series = [...byRx.entries()].map(([rx, arr]) => {
+        // O(n) sliding window with running sum/sumsq — the previous
+        // shift()+reduce() version was O(n·window) and stalled the page.
         const out = [];
-        let lo = 0;
-        const vals = [];
+        let lo = 0, sum = 0, sumsq = 0;
         for (let i = 0; i < arr.length; i++) {
-          vals.push(arr[i][2]);
-          while (arr[i][0] - arr[lo][0] > WIN) { vals.shift(); lo++; }
-          const m = vals.reduce((a, b) => a + b, 0) / vals.length;
-          const v = Math.sqrt(vals.reduce((a, b) => a + (b - m) * (b - m), 0) / vals.length);
-          out.push([arr[i][0], v]);
+          const v = arr[i][2];
+          sum += v; sumsq += v * v;
+          while (arr[i][0] - arr[lo][0] > WIN) {
+            const old = arr[lo][2];
+            sum -= old; sumsq -= old * old; lo++;
+          }
+          const n = i - lo + 1, m = sum / n;
+          out.push([arr[i][0], Math.sqrt(Math.max(0, sumsq / n - m * m))]);
         }
         return { rx, pts: out };
       });
@@ -737,7 +761,7 @@
   }
 
   // ---- camera -------------------------------------------------------------
-  let camFrames = 0, camWindowStart = 0;
+  let camFrames = 0, camWindowStart = 0, camRetryTimer = null;
   stageImg.addEventListener('load', () => {
     stageEmpty.style.display = 'none';
     const now = performance.now();
@@ -749,16 +773,74 @@
     }
     if (sensor === 'camera') stageImg.src = URLS.cam + '?t=' + Date.now();
   });
-  stageImg.addEventListener('error', () => { if (sensor === 'camera') { setRate('no camera', true); showEmpty('No camera this minute'); } });
+  stageImg.addEventListener('error', () => {
+    if (sensor !== 'camera') return;
+    setRate('no camera', true);
+    showEmpty('Waiting for camera frames — retrying…');
+    // A 404 while the live collector is still starting must not kill the
+    // stream — keep retrying until frames arrive or the tab is switched.
+    clearTimeout(camRetryTimer);
+    camRetryTimer = setTimeout(() => {
+      if (sensor === 'camera') stageImg.src = URLS.cam + '?t=' + Date.now();
+    }, 1000);
+  });
   function startCamera() {
     showStage('img');
     camFrames = 0; camWindowStart = 0;
+    clearTimeout(camRetryTimer);
     setFoot('refreshing as fast as the camera produces frames', '');
     stageImg.src = URLS.cam + '?t=' + Date.now();
   }
 
   // ---- sense hat ----------------------------------------------------------
+  // Backend rows use acceleration/gyroscope/compass ({x,y,z} dicts); the
+  // series payload carries precomputed magnitudes (accel_g, gyro_rads,
+  // compass_ut). Older captures may use *_raw keys — accept both.
   const mag = (v) => v && typeof v === 'object' ? Math.hypot(+v.x || 0, +v.y || 0, +v.z || 0) : null;
+  const vec = (row, ...keys) => { for (const k of keys) { const m = mag(row && row[k]); if (m != null) return m; } return null; };
+  const senseBuf = []; // {t, temperature_c, humidity_percent, pressure_mbar, accel_g, gyro_rads, compass_ut}
+  let senseLastT = 0;
+  function recordSense(body) {
+    for (const s of body.series || []) {
+      const t = Number(s.t || 0);
+      if (t && t <= senseLastT) continue;
+      if (t) senseLastT = t;
+      senseBuf.push({
+        t: t || Date.now() * 1e6,
+        temperature_c: s.temperature_c, humidity_percent: s.humidity_percent,
+        pressure_mbar: s.pressure_mbar,
+        accel_g: s.accel_g != null ? s.accel_g : vec(s, 'acceleration', 'accelerometer_raw'),
+        gyro_rads: s.gyro_rads != null ? s.gyro_rads : vec(s, 'gyroscope', 'gyroscope_raw'),
+        compass_ut: s.compass_ut != null ? s.compass_ut : vec(s, 'compass', 'compass_raw'),
+      });
+    }
+    // Only the viewed window is kept — older samples are never drawn.
+    const cutoff = senseLastT - windowSec * 1e9;
+    let drop = 0;
+    while (drop < senseBuf.length && senseBuf[drop].t < cutoff) drop++;
+    if (drop) senseBuf.splice(0, drop);
+  }
+  function drawSenseSparks() {
+    document.querySelectorAll('.sense-spark').forEach((cv) => {
+      const key = cv.dataset.key;
+      const pts = senseBuf.map(s => [s.t, +s[key]]).filter(p => isFinite(p[1]));
+      const { ctx, w, h } = fitCanvas(cv);
+      ctx.clearRect(0, 0, w, h);
+      if (pts.length < 2) return;
+      let lo = Infinity, hi = -Infinity;
+      for (const p of pts) { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); }
+      const sp = hi - lo || 1;
+      const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
+      ctx.beginPath();
+      pts.forEach((p, i) => {
+        const x = (p[0] - t0) / (t1 - t0 || 1) * w, y = h - 6 - (p[1] - lo) / sp * (h - 12);
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      });
+      ctx.strokeStyle = '#4fd5cd'; ctx.lineWidth = 1.4; ctx.stroke();
+      ctx.fillStyle = '#5c6f74'; ctx.font = '9px ui-monospace,monospace'; ctx.textAlign = 'left';
+      ctx.fillText(`${lo.toFixed(1)}–${hi.toFixed(1)}`, 4, 10);
+    });
+  }
   async function pollSense() {
     const body = await getJson(URLS.sense + '?t=' + Date.now());
     if (body.status !== 'success' || !body.latest) {
@@ -770,26 +852,15 @@
     if (L.temperature_c != null) $('sense-temp').textContent = (+L.temperature_c).toFixed(1);
     if (L.humidity_percent != null) $('sense-hum').textContent = (+L.humidity_percent).toFixed(1);
     if (L.pressure_mbar != null) $('sense-pres').textContent = (+L.pressure_mbar).toFixed(1);
-    const acc = mag(L.accelerometer_raw), gyr = mag(L.gyroscope_raw), cmp = mag(L.compass_raw);
+    const acc = vec(L, 'acceleration', 'accelerometer_raw');
+    const gyr = vec(L, 'gyroscope', 'gyroscope_raw');
+    const cmp = vec(L, 'compass', 'compass_raw');
     if (acc != null) { $('imu-acc').style.width = Math.min(100, acc / 2 * 100) + '%'; $('imu-acc-v').textContent = acc.toFixed(2); }
     if (gyr != null) { $('imu-gyr').style.width = Math.min(100, gyr / 5 * 100) + '%'; $('imu-gyr-v').textContent = gyr.toFixed(2); }
     if (cmp != null) { $('imu-mag').style.width = Math.min(100, cmp / 80 * 100) + '%'; $('imu-mag-v').textContent = cmp.toFixed(1); }
     setFoot(`sample ${body.sample_count || '—'}`, body.minute || '');
-    const series = (body.series || []).map(s => +s.temperature_c).filter(v => !isNaN(v));
-    const spark = $('sense-spark');
-    if (series.length > 1) {
-      const { ctx, w, h } = fitCanvas(spark);
-      ctx.clearRect(0, 0, w, h);
-      const lo = Math.min(...series), hi = Math.max(...series), sp = hi - lo || 1;
-      ctx.beginPath();
-      series.forEach((v, i) => {
-        const x = i / (series.length - 1) * w, y = h - 6 - (v - lo) / sp * (h - 12);
-        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-      });
-      ctx.strokeStyle = '#f2a93b'; ctx.lineWidth = 1.4; ctx.stroke();
-      ctx.fillStyle = '#5c6f74'; ctx.font = '9px ui-monospace,monospace'; ctx.textAlign = 'left';
-      ctx.fillText(`temp ${lo.toFixed(1)}–${hi.toFixed(1)} °C`, 4, 10);
-    }
+    recordSense(body);
+    drawSenseSparks();
   }
 
   // ---- sense hat LED matrix -------------------------------------------------
@@ -805,9 +876,74 @@
       });
     } catch (e) { /* HAT absent */ }
   }
-  $('matrix-fill').addEventListener('click', () =>
-    matrixCmd({ color: hexToRgb($('matrix-color').value), low_light: $('matrix-dim').checked }));
-  $('matrix-clear').addEventListener('click', () => matrixCmd({ clear: true }));
+
+  // Interactive 8x8 editor: click/drag paints with the picked color,
+  // right-click erases. Edits are pushed to the HAT in small batches.
+  const matrixGrid = $('matrix-grid');
+  const matrixCells = [];
+  let matrixDirty = new Map();   // index -> [r,g,b] pending push
+  let matrixFlushTimer = null;
+  let painting = false, erasing = false;
+  for (let i = 0; i < 64; i++) {
+    const cell = document.createElement('div');
+    cell.dataset.i = i;
+    cell.style.cssText = 'background:#000;border-radius:3px;cursor:crosshair;border:1px solid #1e3138';
+    matrixGrid.appendChild(cell);
+    matrixCells.push([0, 0, 0]);
+  }
+  function paintCell(cell, erase) {
+    const i = +cell.dataset.i;
+    const rgb = erase ? [0, 0, 0] : hexToRgb($('matrix-color').value);
+    matrixCells[i] = rgb;
+    cell.style.background = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+    matrixDirty.set(i, rgb);
+    if (!matrixFlushTimer) {
+      matrixFlushTimer = setTimeout(() => {
+        matrixFlushTimer = null;
+        const pixels = [...matrixDirty.entries()].map(([idx, c]) => [idx % 8, Math.floor(idx / 8), ...c]);
+        matrixDirty = new Map();
+        if (pixels.length) matrixCmd({ pixels });
+      }, 120);
+    }
+  }
+  matrixGrid.addEventListener('pointerdown', (e) => {
+    const cell = e.target.closest('[data-i]');
+    if (!cell) return;
+    e.preventDefault();
+    painting = true; erasing = e.button === 2;
+    matrixGrid.setPointerCapture(e.pointerId);
+    paintCell(cell, erasing);
+  });
+  matrixGrid.addEventListener('pointermove', (e) => {
+    if (!painting) return;
+    const cell = document.elementFromPoint(e.clientX, e.clientY);
+    if (cell && cell.dataset && cell.dataset.i !== undefined) paintCell(cell, erasing);
+  });
+  window.addEventListener('pointerup', () => { painting = false; });
+  matrixGrid.addEventListener('contextmenu', (e) => e.preventDefault());
+  function matrixSetAll(pixels) {
+    for (let i = 0; i < 64; i++) {
+      const c = pixels && pixels[i] ? pixels[i] : [0, 0, 0];
+      matrixCells[i] = [+c[0] || 0, +c[1] || 0, +c[2] || 0];
+      matrixCells[i] = matrixCells[i].map(v => Math.max(0, Math.min(255, v)));
+      matrixGrid.children[i].style.background = `rgb(${matrixCells[i][0]},${matrixCells[i][1]},${matrixCells[i][2]})`;
+    }
+  }
+  async function matrixSyncFromDevice() {
+    try {
+      const body = await getJson('/api/sensehat/matrix');
+      if (body && body.success && Array.isArray(body.pixels)) {
+        matrixSetAll(body.pixels);
+        $('matrix-dim').checked = !!body.low_light;
+      }
+    } catch (e) { /* HAT absent */ }
+  }
+  $('matrix-fill').addEventListener('click', () => {
+    const rgb = hexToRgb($('matrix-color').value);
+    matrixSetAll(Array(64).fill(rgb));
+    matrixCmd({ color: rgb, low_light: $('matrix-dim').checked });
+  });
+  $('matrix-clear').addEventListener('click', () => { matrixSetAll(null); matrixCmd({ clear: true }); });
   $('matrix-send').addEventListener('click', () => {
     const text = $('matrix-text').value.trim();
     if (text) matrixCmd({ text, color: hexToRgb($('matrix-color').value), low_light: $('matrix-dim').checked });
@@ -837,9 +973,11 @@
 
   function startPolling() {
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    clearTimeout(camRetryTimer);
     stageImg.src = '';
     radarState = null; csiBuf = []; csiCursor = ''; csiHz = 0;
     snrBuf.length = 0; trailBuf.length = 0; lastRadarStamp = 0;
+    senseBuf.length = 0; senseLastT = 0;
     resetDenoise();
     setRate('— Hz', true); setFoot('—', '—');
     showEmpty('Waiting for data');
@@ -853,7 +991,7 @@
     if (sensor === 'radar') { pollTimer = 1; run(pollRadar, 90); }
     else if (sensor === 'csi') { pollTimer = 1; run(pollCsi, 60); }
     else if (sensor === 'camera') { pollTimer = 1; startCamera(); }
-    else { pollTimer = 1; run(pollSense, 800); }
+    else { pollTimer = 1; matrixSyncFromDevice(); run(pollSense, 800); }
   }
 
   // ---- verdict strip --------------------------------------------------------
@@ -891,12 +1029,12 @@
     amp: '<b>CSI Amplitude</b> — mean WiFi subcarrier amplitude per receiver over the last 6 s. Motion near the link path makes the traces wobble; a flat line means a static room (or a stalled feed).',
     var: '<b>CSI Rolling variance</b> — 0.5 s rolling standard deviation per receiver. Sustained elevation = ongoing motion; brief spikes = transient disturbances.',
     heat: '<b>CSI Amplitude heatmap</b> — time (horizontal) × receiver (vertical), color = amplitude. Vertical streaks are momentary disturbances; horizontal bands are persistent per-receiver offsets.',
-    frame: '<b>Camera</b> — live frame from the capture camera, refreshed as fast as frames are produced.',
-    env: '<b>Sense HAT</b> — temperature, humidity, pressure and IMU magnitudes at 1 Hz, with a temperature sparkline for the current minute.',
+    frame: '<b>Camera</b> — live frame from the capture camera, refreshed as fast as frames are produced. Retries automatically while the live collector warms up.',
+    env: '<b>Sense HAT</b> — temperature, humidity, pressure and IMU magnitudes (accelerometer, gyroscope, compass) at ~1 Hz, each with a labeled history plot over the selected window. Below, the 8×8 LED matrix editor mirrors the HAT: click or drag to paint pixels with the picked color, right-click erases, Fill/Clear/Show control the whole matrix.',
   };
   const denoiseBtn = $('stage-denoise'), helpBtn = $('stage-help'), helpPanel = $('stage-help-panel'), sensCtl = $('stage-sens'), sensSlider = $('sens-slider'), sensVal = $('sens-val');
   const winCtl = $('stage-window'), winSelect = $('window-select'), rollCtl = $('stage-roll'), rollSlider = $('roll-slider'), rollVal = $('roll-val');
-  const WINDOW_VIEWS = new Set(['snr', 'amp', 'var', 'heat']);
+  const WINDOW_VIEWS = new Set(['snr', 'amp', 'var', 'heat', 'env']);
   function syncControls() {
     const canDenoise = DENOISE_VIEWS.has(view);
     denoiseBtn.disabled = !canDenoise;

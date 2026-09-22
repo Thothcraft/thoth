@@ -42,6 +42,7 @@ MAX_CONCURRENT_CAPTURES = 2
 MAX_CAPTURE_AGE_SECONDS = 150.0
 live_capture: subprocess.Popen | None = None
 live_capture_started_at = 0.0
+live_capture_sensor = ""
 LIVE_RESTART_MIN_SECONDS = 5.0
 shutdown_requested = False
 
@@ -167,12 +168,33 @@ def terminate_live_capture() -> None:
     live_capture = None
 
 
+# Live-session sensor names → capture-settings keys. The Sensor Lab page
+# heartbeats which tab is open; live mode must stream that sensor even when
+# minute collection has it disabled (live frames are transient and pruned).
+LIVE_SENSOR_KEYS = {
+    "camera": "usb_camera",
+    "radar": "dreamhat_radar",
+    "csi": "esp32_csi",
+    "sensehat": "sense_hat",
+}
+
+
+def live_session_sensor() -> str:
+    """The sensor tab the Sensor Lab page is currently viewing."""
+    try:
+        data = json.loads(LIVE_SESSION_PATH.read_text(encoding="utf-8"))
+        return str(data.get("sensor") or "")
+    except Exception:
+        return ""
+
+
 def start_live_capture(python: str, capture_script: str) -> subprocess.Popen:
     """Spawn the dedicated live-streaming worker (no minute collection)."""
     settings = load_capture_settings()
+    wanted = LIVE_SENSOR_KEYS.get(live_session_sensor())
     command = [python, capture_script, "--live-only"]
     for sensor, flag in SENSOR_FLAGS.items():
-        if settings["sensors"].get(sensor) is False:
+        if settings["sensors"].get(sensor) is False and sensor != wanted:
             command.append(flag)
     print("Live session active: streaming sensors at full rate (collection paused)", flush=True)
     return subprocess.Popen(command, start_new_session=True)
@@ -239,7 +261,7 @@ def start_capture(python: str, capture_script: str, target: datetime) -> subproc
 
 
 def main() -> int:
-    global live_capture, live_capture_started_at
+    global live_capture, live_capture_started_at, live_capture_sensor
     args = parse_args()
     capture_script = str(Path(args.capture_script).expanduser())
     if not Path(capture_script).exists():
@@ -259,11 +281,19 @@ def main() -> int:
         if live_session_active():
             # Sensor Lab open: stop minute collection + models, stream sensors.
             terminate_captures()
+            wanted_sensor = live_session_sensor()
+            if live_capture is not None and live_capture.poll() is None \
+                    and wanted_sensor != live_capture_sensor \
+                    and time.monotonic() - live_capture_started_at >= LIVE_RESTART_MIN_SECONDS:
+                # Tab switched — restart so the newly viewed sensor is
+                # streamed even if capture settings disable it.
+                terminate_live_capture()
             if live_capture is None or live_capture.poll() is not None:
                 if time.monotonic() - live_capture_started_at >= LIVE_RESTART_MIN_SECONDS:
                     terminate_live_capture()
                     live_capture = start_live_capture(args.python, capture_script)
                     live_capture_started_at = time.monotonic()
+                    live_capture_sensor = wanted_sensor
             time.sleep(0.5)
             target = next_minute_boundary()
             if target.timestamp() - time.time() < PREPARE_LEAD_SECONDS:
@@ -273,6 +303,7 @@ def main() -> int:
             # Session ended — resume normal minute collection.
             print("Live session ended: resuming minute collection", flush=True)
             terminate_live_capture()
+            live_capture_sensor = ""
             target = next_minute_boundary()
             if target.timestamp() - time.time() < PREPARE_LEAD_SECONDS:
                 target += timedelta(minutes=1)

@@ -48,6 +48,7 @@ from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 import requests
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.exceptions import HTTPException
 
 # Add src directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -185,6 +186,9 @@ def inject_now():
 # Initialize scheduler
 device_scheduler = BackgroundScheduler()
 app.secret_key = Config.SECRET_KEY
+# Match Brain's SESSION_EXPIRE_DAYS so "Remember this device" sessions
+# on the dashboard live as long as thothHUB sessions.
+app.permanent_session_lifetime = timedelta(days=int(os.getenv('SESSION_EXPIRE_DAYS', '14')))
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # Disable caching for development
 CORS(app)
@@ -1423,6 +1427,9 @@ def login():
         username = request.form.get('username')
         password = request.form.get('password')
         next_page = request.form.get('next', '')
+        # "Remember this device" unchecked → session cookie dies with the
+        # browser; checked → permanent cookie for permanent_session_lifetime.
+        session.permanent = request.form.get('remember') == '1'
 
         if not username or not password:
             flash('Username and password are required', 'error')
@@ -3542,7 +3549,9 @@ def api_live_capture_video_frame():
         images = files.get('camera_images') or []
         container = files.get('container')
         if images:
-            jpeg_bytes = images[-1].read_bytes()
+            # ffmpeg may still be writing the newest file — serve the last
+            # completed frame instead of a truncated JPEG.
+            jpeg_bytes = (images[-2] if len(images) > 1 else images[-1]).read_bytes()
         elif container and container.exists():
             jpeg_bytes = first_camera_frame(container)
             if not jpeg_bytes:
@@ -3551,6 +3560,8 @@ def api_live_capture_video_frame():
             jpeg_bytes = _render_video_frame(video_path)
         else:
             abort(404, description='No live camera frame available')
+    except HTTPException:
+        raise  # abort(404) above must stay a 404, not become a 500
     except Exception as exc:
         logger.exception(f"Failed to render live video frame: {exc}")
         abort(500, description=str(exc))
@@ -3842,6 +3853,23 @@ def api_sensehat_now():
                     'sample_count': len(_sense_history)})
 
 
+@app.route('/api/sensehat/matrix', methods=['GET'])
+def api_sensehat_matrix_state():
+    """Current 8x8 LED matrix contents — lets the editor mirror the device."""
+    sense = _get_sense_hat()
+    if sense is None:
+        return jsonify({'success': False, 'error': 'Sense HAT not available'}), 503
+    try:
+        with _sense_hat_lock:
+            pixels = sense.get_pixels()
+            low_light = bool(getattr(sense, 'low_light', False))
+            rotation = int(getattr(sense, 'rotation', 0))
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 500
+    return jsonify({'success': True, 'pixels': pixels,
+                    'low_light': low_light, 'rotation': rotation})
+
+
 @app.route('/api/sensehat/matrix', methods=['POST'])
 def api_sensehat_matrix():
     """Control the Sense HAT 8x8 LED matrix.
@@ -3898,6 +3926,29 @@ def api_sensehat_matrix():
     return jsonify({'success': True})
 
 
+def _sense_series_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Compact series entry for the live page sparklines, incl. IMU mags."""
+    def _mag(key: str) -> Optional[float]:
+        vec = row.get(key)
+        if not isinstance(vec, dict):
+            return None
+        try:
+            return round(math.sqrt(sum(float(vec.get(axis) or 0) ** 2
+                                       for axis in ('x', 'y', 'z'))), 4)
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        't': row.get('monotonic_ns'),
+        'temperature_c': row.get('temperature_c'),
+        'humidity_percent': row.get('humidity_percent'),
+        'pressure_mbar': row.get('pressure_mbar'),
+        'accel_g': _mag('acceleration'),
+        'gyro_rads': _mag('gyroscope'),
+        'compass_ut': _mag('compass'),
+    }
+
+
 @app.route('/api/captures/live/sensehat')
 def api_live_capture_sensehat():
     """Latest Sense HAT readings plus a short trailing series for sparklines.
@@ -3910,15 +3961,7 @@ def api_live_capture_sensehat():
             'status': 'success',
             'minute': (current_minute().name if current_minute() else None),
             'latest': direct,
-            'series': [
-                {
-                    't': row.get('monotonic_ns'),
-                    'temperature_c': row.get('temperature_c'),
-                    'humidity_percent': row.get('humidity_percent'),
-                    'pressure_mbar': row.get('pressure_mbar'),
-                }
-                for row in list(_sense_history)[-120:]
-            ],
+            'series': [_sense_series_row(row) for row in list(_sense_history)[-120:]],
             'sample_count': len(_sense_history),
         })
 
@@ -3943,15 +3986,7 @@ def api_live_capture_sensehat():
         return jsonify({'status': 'error', 'error': str(exc)}), 500
 
     latest = rows[-1] if rows else None
-    series = [
-        {
-            't': row.get('monotonic_ns'),
-            'temperature_c': row.get('temperature_c'),
-            'humidity_percent': row.get('humidity_percent'),
-            'pressure_mbar': row.get('pressure_mbar'),
-        }
-        for row in rows[-120:]
-    ]
+    series = [_sense_series_row(row) for row in rows[-120:]]
     return jsonify({
         'status': 'success',
         'minute': minute_dir.name,
