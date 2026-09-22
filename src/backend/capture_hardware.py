@@ -392,7 +392,10 @@ def start_radar_capture(output_prefix: Path | None = None) -> Any:
             setting_data = json.load(fd)
 
         frame_size = calculate_frame_size(setting_data)
-        bgt60tr13c.set_fifo_parameters(frame_size, 4096, 2048)
+        # Use the full 8192-sample hardware FIFO with 4096-sample bursts:
+        # under CPU/IO contention the drain thread gets twice the slack
+        # before an overflow wedges the stream.
+        bgt60tr13c.set_fifo_parameters(frame_size, 8192, 4096)
         if bgt60tr13c.start() != RET_VAL_OK:
             raise RuntimeError("BGT60TR13C failed to start.")
 
