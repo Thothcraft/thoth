@@ -94,7 +94,9 @@ from backend.model_runtime import (
 
 THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / 'WS' / 'MMW-HAT' / 'MMW-HAT-Release'
-RADAR_OCCUPANCY_STATE = THOTH_ROOT / 'config' / 'radar_occupancy.json'
+# Must match radar_analysis.LIVE_OCCUPANCY_PATH (tmpfs when available).
+_LIVE_STATE_DIR = Path('/dev/shm/thoth') if Path('/dev/shm').is_dir() else THOTH_ROOT / 'config'
+RADAR_OCCUPANCY_STATE = _LIVE_STATE_DIR / 'radar_occupancy.json'
 RADAR_ROOM_CONFIG = MMW_RELEASE / 'example_2_advanced' / 'config' / 'room_config.json'
 RADAR_LIVE_STALE_SECONDS = max(
     5.0, float(os.getenv('THOTH_RADAR_LIVE_STALE_SECONDS', '12.0'))

@@ -28,7 +28,10 @@ EXAMPLE2_PROCESSING_CONFIG = MMW_RELEASE / "example_2_track" / "config" / "proce
 EXAMPLE2_SIGNAL_PROC = MMW_RELEASE / "example_2_track" / "signal_proc.py"
 RADAR_CONFIG_DIR = MMW_RELEASE / "radar_config" / "config_3rx_3m"
 TARGET_IDENTITY_PATH = THOTH_ROOT / "config" / "radar_target_identity.json"
-LIVE_OCCUPANCY_PATH = THOTH_ROOT / "config" / "radar_occupancy.json"
+# Live state is published up to ~10 Hz (~70KB per write). Keep it on tmpfs
+# when available so SD-card I/O never stalls the capture pipeline.
+_LIVE_STATE_DIR = Path("/dev/shm/thoth") if Path("/dev/shm").is_dir() else THOTH_ROOT / "config"
+LIVE_OCCUPANCY_PATH = _LIVE_STATE_DIR / "radar_occupancy.json"
 _EXAMPLE2_MODULE: Any = None
 
 for path in (MMW_RELEASE, TRACK_EXAMPLE_DIR):
