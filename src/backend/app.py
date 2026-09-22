@@ -3696,9 +3696,151 @@ def api_health():
     })
 
 
+_sense_hat_lock = threading.Lock()
+_sense_hat = None
+_sense_hat_failed_at = 0.0
+_SENSE_HAT_RETRY_S = 60.0
+_sense_history: deque = deque(maxlen=240)
+
+
+def _get_sense_hat():
+    """Lazy shared SenseHat handle — init is slow on a Pi 3, so keep one.
+    A failed init is retried after a minute so a hot-plugged HAT recovers."""
+    global _sense_hat, _sense_hat_failed_at
+    if _sense_hat is not None:
+        return _sense_hat
+    if _sense_hat_failed_at and time.monotonic() - _sense_hat_failed_at < _SENSE_HAT_RETRY_S:
+        return None
+    with _sense_hat_lock:
+        if _sense_hat is not None:
+            return _sense_hat
+        if _sense_hat_failed_at and time.monotonic() - _sense_hat_failed_at < _SENSE_HAT_RETRY_S:
+            return None
+        try:
+            from sense_hat import SenseHat
+            _sense_hat = SenseHat()
+            _sense_hat_failed_at = 0.0
+        except Exception as exc:
+            logger.debug("Sense HAT unavailable: %s", exc)
+            _sense_hat_failed_at = time.monotonic()
+    return _sense_hat
+
+
+def _sense_hat_reading() -> Optional[Dict[str, Any]]:
+    sense = _get_sense_hat()
+    if sense is None:
+        return None
+    try:
+        with _sense_hat_lock:
+            row = {
+                "host_timestamp": datetime.now().isoformat(),
+                "monotonic_ns": time.monotonic_ns(),
+                "temperature_c": sense.get_temperature(),
+                "humidity_percent": sense.get_humidity(),
+                "pressure_mbar": sense.get_pressure(),
+                "acceleration": sense.get_accelerometer_raw(),
+                "gyroscope": sense.get_gyroscope_raw(),
+                "compass": sense.get_compass_raw(),
+                "orientation": sense.get_orientation(),
+            }
+    except Exception as exc:
+        logger.debug("Sense HAT read failed: %s", exc)
+        return None
+    _sense_history.append(row)
+    return row
+
+
+@app.route('/api/sensehat', methods=['GET'])
+def api_sensehat_now():
+    """Direct Sense HAT read — works even while capture is paused."""
+    row = _sense_hat_reading()
+    if row is None:
+        return jsonify({'status': 'unavailable', 'latest': None, 'series': []})
+    return jsonify({'status': 'success', 'latest': row,
+                    'series': list(_sense_history)[-120:],
+                    'sample_count': len(_sense_history)})
+
+
+@app.route('/api/sensehat/matrix', methods=['POST'])
+def api_sensehat_matrix():
+    """Control the Sense HAT 8x8 LED matrix.
+
+    Body (any combination):
+      {"clear": true}                      — turn all pixels off
+      {"color": [r, g, b]}                 — fill the whole matrix
+      {"pixels": [[r,g,b] x64]}            — set every pixel
+      {"pixels": [[x, y, r, g, b], ...]}   — set individual pixels
+      {"text": "Hi", "color": [r,g,b], "speed": 0.1}  — scroll a message
+      {"low_light": true}                  — dim mode
+      {"rotation": 0|90|180|270}
+    """
+    sense = _get_sense_hat()
+    if sense is None:
+        return jsonify({'success': False, 'error': 'Sense HAT not available'}), 503
+    payload = request.get_json(silent=True) or {}
+    try:
+        with _sense_hat_lock:
+            if 'rotation' in payload:
+                sense.set_rotation(int(payload['rotation']) % 360 // 90 * 90)
+            if 'low_light' in payload:
+                sense.low_light = bool(payload['low_light'])
+            if payload.get('clear'):
+                sense.clear()
+            color = payload.get('color')
+            if isinstance(color, (list, tuple)) and len(color) == 3:
+                sense.clear(*[max(0, min(255, int(c))) for c in color])
+            pixels = payload.get('pixels')
+            if isinstance(pixels, list) and pixels:
+                if len(pixels) == 64 and all(isinstance(p, (list, tuple)) and len(p) == 3 for p in pixels):
+                    sense.set_pixels([[max(0, min(255, int(c))) for c in p] for p in pixels])
+                else:
+                    for p in pixels:
+                        if isinstance(p, (list, tuple)) and len(p) >= 5:
+                            x, y = int(p[0]), int(p[1])
+                            if 0 <= x < 8 and 0 <= y < 8:
+                                sense.set_pixel(x, y, *[max(0, min(255, int(c))) for c in p[2:5]])
+            text = payload.get('text')
+        # show_message blocks for the whole scroll — run it in a daemon thread
+        # so the request returns immediately and reads keep working.
+        if text:
+            colour = [max(0, min(255, int(c))) for c in (color or [255, 255, 255])][:3]
+            speed = max(0.02, min(1.0, float(payload.get('speed') or 0.1)))
+            def _scroll(msg=str(text)[:64], colour=colour, speed=speed):
+                try:
+                    with _sense_hat_lock:
+                        sense.show_message(msg, text_colour=colour, scroll_speed=speed)
+                except Exception as exc:
+                    logger.debug("Sense HAT show_message failed: %s", exc)
+            threading.Thread(target=_scroll, name="SenseHatScroll", daemon=True).start()
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 500
+    return jsonify({'success': True})
+
+
 @app.route('/api/captures/live/sensehat')
 def api_live_capture_sensehat():
-    """Latest Sense HAT readings plus a short trailing series for sparklines."""
+    """Latest Sense HAT readings plus a short trailing series for sparklines.
+
+    Prefers a direct HAT read so the live page works while collection is
+    paused; falls back to the current minute's sense_hat.jsonl otherwise."""
+    direct = _sense_hat_reading()
+    if direct is not None:
+        return jsonify({
+            'status': 'success',
+            'minute': (current_minute().name if current_minute() else None),
+            'latest': direct,
+            'series': [
+                {
+                    't': row.get('monotonic_ns'),
+                    'temperature_c': row.get('temperature_c'),
+                    'humidity_percent': row.get('humidity_percent'),
+                    'pressure_mbar': row.get('pressure_mbar'),
+                }
+                for row in list(_sense_history)[-120:]
+            ],
+            'sample_count': len(_sense_history),
+        })
+
     minute_dir, files = _best_live_minute_for_kind('sensehat')
     path = files.get('sense_hat') if files else None
     if not minute_dir or not path or not path.exists():
@@ -3741,7 +3883,10 @@ def api_live_capture_sensehat():
 @app.route('/api/captures/live/verdict')
 def api_live_capture_verdict():
     """Latest minute-level model verdict for the live page header strip."""
-    minute_dir = current_minute() or (get_minute(list_minutes()[0]['minute']) if list_minutes() else None)
+    # list_minute_folders() stats directory names only — list_minutes() builds
+    # a full summary of every capture and stalls this 1.2 s poll on a Pi 3.
+    folders = list_minute_folders()
+    minute_dir = current_minute() or (folders[0] if folders else None)
     if not minute_dir:
         return jsonify({'status': 'empty'})
     manifest: Dict[str, Any] = {}

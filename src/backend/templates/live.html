@@ -103,6 +103,17 @@
                     </div>
                 </div>
                 <canvas id="sense-spark" class="lab-canvas" height="72" style="height:72px"></canvas>
+                <div class="flex flex-wrap items-center gap-2 text-xs" style="color:#7d979c">
+                    <span class="font-semibold">LED matrix</span>
+                    <input id="matrix-color" type="color" value="#22d3ee" aria-label="Matrix color"
+                        class="h-7 w-10 cursor-pointer rounded border border-slate-600 bg-transparent">
+                    <button type="button" id="matrix-fill" class="lab-full">Fill</button>
+                    <button type="button" id="matrix-clear" class="lab-full">Clear</button>
+                    <input id="matrix-text" type="text" maxlength="64" placeholder="Scroll text…"
+                        class="rounded border border-slate-600 bg-transparent px-2 py-1 text-slate-200" style="min-width:140px">
+                    <button type="button" id="matrix-send" class="lab-full">Show</button>
+                    <label class="flex items-center gap-1"><input id="matrix-dim" type="checkbox"> dim</label>
+                </div>
             </div>
             <div class="lab-empty" id="stage-empty">Waiting for data</div>
         </div>
@@ -781,6 +792,29 @@
     }
   }
 
+  // ---- sense hat LED matrix -------------------------------------------------
+  const hexToRgb = (hex) => {
+    const n = parseInt(String(hex).replace('#', ''), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  async function matrixCmd(payload) {
+    try {
+      await fetch('/api/sensehat/matrix', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (e) { /* HAT absent */ }
+  }
+  $('matrix-fill').addEventListener('click', () =>
+    matrixCmd({ color: hexToRgb($('matrix-color').value), low_light: $('matrix-dim').checked }));
+  $('matrix-clear').addEventListener('click', () => matrixCmd({ clear: true }));
+  $('matrix-send').addEventListener('click', () => {
+    const text = $('matrix-text').value.trim();
+    if (text) matrixCmd({ text, color: hexToRgb($('matrix-color').value), low_light: $('matrix-dim').checked });
+  });
+  $('matrix-text').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('matrix-send').click(); });
+  $('matrix-dim').addEventListener('change', () => matrixCmd({ low_light: $('matrix-dim').checked }));
+
   // ---- dispatcher ----------------------------------------------------------
   function drawStage() {
     if (sensor === 'radar') drawRadar();
@@ -967,6 +1001,20 @@
       offlineSensors.clear();
       for (const t of SENSORS) {
         if (!sensorDetected(SENSOR_KEY[t.id], inventory[SENSOR_KEY[t.id]])) offlineSensors.add(t.id);
+      }
+      // Don't sit on a tab for hardware that isn't attached — jump to the
+      // first sensor that is actually online.
+      if (offlineSensors.has(sensor)) {
+        const next = SENSORS.find(t => !offlineSensors.has(t.id));
+        if (next) {
+          sensor = next.id;
+          view = next.views[0].id;
+          renderTabs();
+          startPolling();
+          return;
+        }
+        showEmpty('No sensors detected on this device');
+        setRate('no sensors', true);
       }
       renderTabs();
     } catch (e) { /* fail open */ }

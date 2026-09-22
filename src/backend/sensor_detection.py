@@ -134,13 +134,24 @@ def detect_usb_camera() -> Dict[str, Any]:
 def detect_sense_hat() -> Dict[str, Any]:
     online = False
     error = None
+    # The HAT's LED matrix registers an "RPi-Sense FB" framebuffer — a cheap
+    # sysfs read that avoids a second RTIMULib init (slow on a Pi 3 and races
+    # the shared handle used by the live API).
     try:
-        from sense_hat import SenseHat
+        for name_file in glob.glob("/sys/class/graphics/fb*/name"):
+            if "sense" in Path(name_file).read_text(encoding="utf-8", errors="replace").lower():
+                online = True
+                break
+    except OSError:
+        pass
+    if not online:
+        try:
+            from sense_hat import SenseHat
 
-        SenseHat()
-        online = True
-    except Exception as exc:
-        error = str(exc)
+            SenseHat()
+            online = True
+        except Exception as exc:
+            error = str(exc)
     return {
         "name": "Sense HAT",
         "key": "sense_hat",
@@ -189,11 +200,17 @@ def detect_dreamhat_radar() -> Dict[str, Any]:
     chip_online = False
     ever_seen = False
     try:
-        data_root = Path(Config.CAPTURE_DATA_DIR).expanduser()
-        manifests = sorted(data_root.rglob("manifest.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+        # list_minute_folders() only stats directory entries — a full rglob for
+        # manifest.json walks every camera frame on the SD card and stalls the
+        # API for seconds on a Pi 3.
+        from .capture_manager import list_minute_folders
+
         # Any manifest with radar samples — regardless of age — proves the
         # HAT was attached at some point; only the freshest proves it's live.
-        for candidate in manifests[:25]:
+        for minute_dir in list_minute_folders()[:15]:
+            candidate = minute_dir / "manifest.json"
+            if not candidate.exists():
+                continue
             try:
                 manifest = json.loads(candidate.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -235,10 +252,23 @@ def detect_dreamhat_radar() -> Dict[str, Any]:
     }
 
 
+_inventory_cache: List[Dict[str, Any]] = []
+_inventory_cache_at = 0.0
+_INVENTORY_TTL_S = 10.0
+
+
 def detect_sensor_inventory() -> List[Dict[str, Any]]:
-    return [
+    """Sensor inventory, cached briefly — probing (v4l2-ctl, manifest scans,
+    SenseHat init) is far too expensive to repeat on every dashboard poll."""
+    global _inventory_cache, _inventory_cache_at
+    now = time.monotonic()
+    if _inventory_cache and now - _inventory_cache_at < _INVENTORY_TTL_S:
+        return _inventory_cache
+    _inventory_cache = [
         detect_dreamhat_radar(),
         detect_usb_camera(),
         detect_esp32_csi(),
         detect_sense_hat(),
     ]
+    _inventory_cache_at = now
+    return _inventory_cache
