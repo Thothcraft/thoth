@@ -32,6 +32,9 @@ TARGET_IDENTITY_PATH = THOTH_ROOT / "config" / "radar_target_identity.json"
 # when available so SD-card I/O never stalls the capture pipeline.
 _LIVE_STATE_DIR = Path("/dev/shm/thoth") if Path("/dev/shm").is_dir() else THOTH_ROOT / "config"
 LIVE_OCCUPANCY_PATH = _LIVE_STATE_DIR / "radar_occupancy.json"
+# Tiny per-frame detection sidecar: written every processed frame so SNR
+# polling isn't gated by the ~140KB map publish.
+SNR_STATE_PATH = _LIVE_STATE_DIR / "radar_snr.json"
 _EXAMPLE2_MODULE: Any = None
 
 for path in (MMW_RELEASE, TRACK_EXAMPLE_DIR):
@@ -769,6 +772,7 @@ class StreamingChunkAnalyzer:
         if person_detected:
             self.detected_frames += 1
         self.last_detection = detection
+        self._write_snr_state(detection)
         if self.last_targets:
             lead = self.last_targets[0]
             self.last_position = [float(lead["position"][0]), float(lead["position"][1])]
@@ -844,12 +848,45 @@ class StreamingChunkAnalyzer:
         })
         return True
 
+    def _write_snr_state(self, detection: Dict[str, Any]) -> None:
+        """Publish just the detection scalars every processed frame (~300B).
+
+        The full map payload is throttled by _live_publish_due; SNR consumers
+        (SDK, automations) get per-frame freshness from this sidecar instead.
+        """
+        temporary = SNR_STATE_PATH.with_name(
+            f".{SNR_STATE_PATH.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            SNR_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps({
+                "updated_at": time.time(),
+                "snr_db": detection.get("snr_db"),
+                "peak_power_db": detection.get("peak_power_db"),
+                "noise_floor_db": detection.get("noise_floor_db"),
+                "threshold_db": detection.get("threshold_db", self.radar_detection_threshold_db),
+                "detected": bool(detection.get("detected")),
+                "second_index": self.second_index,
+                "frame_index": self.evaluated_frames - 1,
+            }, separators=(",", ":")), encoding="utf-8")
+            os.replace(temporary, SNR_STATE_PATH)
+        except OSError:
+            pass
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def _live_publish_due(self) -> bool:
-        """True when a live-state publish is due (~10 Hz cap)."""
+        """True when a full live-state publish is due (~1 Hz cap).
+
+        The map payload costs ~140KB of JSON per publish; SNR freshness lives
+        in the per-frame sidecar, so the heavy write only needs dashboard
+        cadence."""
         if self.live_state_path is None:
             return False
-        publish_interval = max(0.1, 0.75 / max(1.0, self.configured_frame_rate_hz))
-        return time.monotonic() - self.last_live_publish >= publish_interval
+        return time.monotonic() - self.last_live_publish >= 1.0
 
     def _write_live_state(self, world_points: np.ndarray) -> None:
         """Publish the analyzed frame without blocking capture or the dashboard."""

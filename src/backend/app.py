@@ -97,6 +97,7 @@ MMW_RELEASE = THOTH_ROOT / 'WS' / 'MMW-HAT' / 'MMW-HAT-Release'
 # Must match radar_analysis.LIVE_OCCUPANCY_PATH (tmpfs when available).
 _LIVE_STATE_DIR = Path('/dev/shm/thoth') if Path('/dev/shm').is_dir() else THOTH_ROOT / 'config'
 RADAR_OCCUPANCY_STATE = _LIVE_STATE_DIR / 'radar_occupancy.json'
+RADAR_SNR_STATE = _LIVE_STATE_DIR / 'radar_snr.json'
 RADAR_ROOM_CONFIG = MMW_RELEASE / 'example_2_advanced' / 'config' / 'room_config.json'
 RADAR_LIVE_STALE_SECONDS = max(
     5.0, float(os.getenv('THOTH_RADAR_LIVE_STALE_SECONDS', '12.0'))
@@ -4153,6 +4154,34 @@ def sync_files_to_cloud():
     """Sync local data files to the Brain server cloud storage."""
     if 'username' not in session:
         return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+
+    try:
+        uploaded, skipped, errors = device_manager.sync_files_to_cloud()
+        return jsonify({
+            'status': 'success',
+            'uploaded': uploaded,
+            'skipped': skipped,
+            'errors': errors,
+            'message': f'Synced {uploaded} files to cloud ({skipped} already synced)'
+        })
+    except Exception as e:
+        logger.error(f'Error syncing files: {str(e)}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+if __name__ == '__main__':
+    # Start the scheduler
+    if not device_scheduler.running:
+        device_scheduler.start()
+
+    # Run the application with threading mode (more compatible on Windows)
+    socketio.run(
+        app,
+        host=Config.HOST,
+        port=Config.PORT,
+        debug=Config.DEBUG,
+        use_reloader=False,
+        allow_unsafe_werkzeug=True
+    )
 
     try:
         uploaded, skipped, errors = device_manager.sync_files_to_cloud()
