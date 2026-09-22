@@ -443,14 +443,30 @@ def is_minute_folder(path: Path) -> bool:
     return path.is_dir() and MINUTE_DIR_RE.match(path.name) is not None and _parse_minute(path.name) is not None
 
 
+def _safe_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        # The collector rotates/deletes minute dirs — a vanished folder must
+        # not 500 the timeline.
+        return 0.0
+
+
 def list_minute_folders() -> List[Path]:
     root = _capture_root()
-    folders = [item for item in root.iterdir() if is_minute_folder(item)]
-    for label_dir in root.iterdir():
-        if not label_dir.is_dir() or is_minute_folder(label_dir):
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return []
+    folders = [item for item in entries if is_minute_folder(item)]
+    for label_dir in entries:
+        try:
+            if not label_dir.is_dir() or is_minute_folder(label_dir):
+                continue
+            folders.extend(item for item in label_dir.iterdir() if is_minute_folder(item))
+        except OSError:
             continue
-        folders.extend(item for item in label_dir.iterdir() if is_minute_folder(item))
-    folders.sort(key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+    folders.sort(key=lambda p: (_safe_mtime(p), p.name), reverse=True)
     return folders
 
 
@@ -727,9 +743,13 @@ def minute_metrics(minute_dir: Path) -> Dict[str, object]:
 
     video_meta = _probe_video_metadata(files.get("video"))
     csi_path = files.get("csi_timestamped") or files.get("csi_csv") or files.get("csi_serial")
-    csi_points = _parse_csi_average_series(csi_path) if csi_path and csi_path.exists() else (
-        _container_csi_average_series(container_path) if container_path and container_path.exists() else []
-    )
+    try:
+        csi_points = _parse_csi_average_series(csi_path) if csi_path and csi_path.exists() else (
+            _container_csi_average_series(container_path) if container_path and container_path.exists() else []
+        )
+    except Exception:
+        # A truncated container or half-written CSV must not 500 the page.
+        csi_points = []
     csi_width = _csi_subcarrier_count(csi_path) if csi_path and csi_path.exists() else None
     radar_path = files.get("radar")
     radar_frames = int(container_info.get("radar_samples") or 0)

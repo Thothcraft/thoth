@@ -2148,9 +2148,13 @@ def _capture_timeline_items(limit: Optional[int] = None) -> list[Dict[str, Any]]
             }
             _capture_manifest_cache[cache_key] = cached
         summary = cached['summary']
+        try:
+            modified = datetime.fromtimestamp(minute_dir.stat().st_mtime).isoformat()
+        except OSError:
+            continue  # folder vanished mid-scan
         compact.append({
             'minute': minute_dir.name,
-            'modified': datetime.fromtimestamp(minute_dir.stat().st_mtime).isoformat(),
+            'modified': modified,
             'latest_chunk': summary,
             'labels': (summary or {}).get('labels') or [],
             'manifest_revision': (summary or {}).get('revision'),
@@ -2349,10 +2353,23 @@ def capture_detail(minute):
         abort(404, description='Minute folder not found')
 
     files = capture_files(minute_dir)
-    detail = minute_summary(minute_dir)
+    try:
+        detail = minute_summary(minute_dir)
+    except Exception:
+        # One corrupt file in the folder must not 500 the whole minute page —
+        # log the traceback and render with a minimal summary instead.
+        logger.error("minute_summary failed for %s", minute_dir, exc_info=True)
+        detail = {
+            "minute": minute_dir.name, "progress": {}, "labels": [],
+            "model_predictions": [], "manifest": {}, "files": {}, "sizes": {},
+        }
     for chunk in (detail.get("progress") or {}).get("seconds", (detail.get("progress") or {}).get("chunks", [])):
         chunk.pop("xy_map", None)
-    metrics = minute_metrics(minute_dir)
+    try:
+        metrics = minute_metrics(minute_dir)
+    except Exception:
+        logger.error("minute_metrics failed for %s", minute_dir, exc_info=True)
+        metrics = {}
     video_preview = f"/api/captures/{minute}/file/video" if files.get("video") else None
     camera_preview = (
         f"/api/captures/{minute}/video/frame"
