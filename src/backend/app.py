@@ -4182,31 +4182,3 @@ if __name__ == '__main__':
         use_reloader=False,
         allow_unsafe_werkzeug=True
     )
-
-    try:
-        uploaded, skipped, errors = device_manager.sync_files_to_cloud()
-        return jsonify({
-            'status': 'success',
-            'uploaded': uploaded,
-            'skipped': skipped,
-            'errors': errors,
-            'message': f'Synced {uploaded} files to cloud ({skipped} already synced)'
-        })
-    except Exception as e:
-        logger.error(f'Error syncing files: {str(e)}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-if __name__ == '__main__':
-    # Start the scheduler
-    if not device_scheduler.running:
-        device_scheduler.start()
-
-    # Run the application with threading mode (more compatible on Windows)
-    socketio.run(
-        app,
-        host=Config.HOST,
-        port=Config.PORT,
-        debug=Config.DEBUG,
-        use_reloader=False,
-        allow_unsafe_werkzeug=True
-    )
