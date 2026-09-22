@@ -417,12 +417,26 @@ def _radar_driver_main(frame_queue: Any, control_queue: Any, output_prefix: Any)
     the drain thread and the FIFO overflows every frame. A dedicated process
     has its own GIL, so SPI draining is never preempted by analysis work.
     """
+    # Die with the parent: daemon-children only exit on a *clean* parent
+    # exit — a SIGKILLed collector would orphan us holding the radar GPIO.
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, 15)  # PR_SET_PDEATHSIG = SIGTERM
+    except Exception:
+        pass
     radar = None
     try:
         radar = _open_radar_chip(Path(output_prefix) if output_prefix else None)
         control_queue.put(("ready", None))
         while True:
-            frame = radar.frame_buffer.get()
+            try:
+                frame = radar.frame_buffer.get(timeout=1.0)
+            except queue.Empty:
+                frame = None
+            if os.getppid() == 1:
+                return  # parent died — release the radar for the next owner
+            if frame is None:
+                continue
             try:
                 frame_queue.put_nowait(frame)
             except queue.Full:
