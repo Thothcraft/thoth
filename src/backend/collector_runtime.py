@@ -817,7 +817,9 @@ def run_live_features_worker(ctx: CollectorContext) -> None:
     second_index = 0
     while not ctx.live_features_stop.is_set() and not ctx.csi_stop.is_set():
         try:
-            radar_snapshot = list(ctx.live_radar_buffer)
+            # Cap the radar window: each frame costs a uint12 decode + FFT,
+            # so 64 frames/sec of CPU was starving the live analyzer (GIL).
+            radar_snapshot = list(ctx.live_radar_buffer)[-10:]
             csi_lines = [line for _, line in current_csi_samples(ctx)[-256:]]
             features = compute_live_features(
                 radar_frames=radar_snapshot,
