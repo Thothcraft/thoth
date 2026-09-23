@@ -9,7 +9,7 @@ tmp_reg = Path(os.environ['TEMP']) / 'live_reg'
 shutil.copy(r'C:\Users\ggad\Desktop\radar\deploy\radar_occupancy_live.pt', tmp_reg / 'artifacts' / 'live.pt')
 reg = ModelRegistry(tmp_reg)
 reg.add(tmp_reg / 'artifacts' / 'live.pt', {
-    'schema': 'thoth-model/v1',
+    'schema': 'whispy-model/v1',
     'name': 'Radar Occupancy Live', 'version': 'live1',
     'inputs': [{'sensor': 'radar', 'representation': 'e2_maps', 'frames': 50, 'shape': [1, 50, 2, 24, 24], 'fit': 'left_pad_latest', 'normalization': {'kind': 'none'}}],
     'output': {'kind': 'logits'},

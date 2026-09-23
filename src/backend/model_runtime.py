@@ -1,7 +1,7 @@
 """User-managed TorchScript classification models for Thoth captures.
 
 The registry deliberately stores no executable Python.  Models must be self-contained
-TorchScript archives and every tensor transformation is described by thoth-model/v1
+TorchScript archives and every tensor transformation is described by whispy-model/v1
 metadata.  PyTorch is imported lazily so capture and dashboard features still start
 on systems where the optional runtime has not been installed yet.
 """
@@ -21,7 +21,11 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 
-MODEL_SCHEMA = "thoth-model/v1"
+MODEL_SCHEMA = "whispy-model/v1"
+# Pre-rename name for the same metadata schema; accepted on ingest and
+# normalized to MODEL_SCHEMA.
+LEGACY_MODEL_SCHEMA = "thoth-model/v1"
+SUPPORTED_MODEL_SCHEMAS = frozenset({MODEL_SCHEMA, LEGACY_MODEL_SCHEMA})
 MANIFEST_SCHEMA = "thoth-minute-manifest/v7"
 SUPPORTED_EXTENSIONS = {".pt", ".pth"}
 SUPPORTED_SENSORS = {"radar", "csi"}
@@ -149,8 +153,9 @@ def _positive_int(value: object, label: str) -> int:
 def normalize_metadata(metadata: object) -> dict[str, Any]:
     if not isinstance(metadata, dict):
         raise ModelValidationError("metadata must be a JSON object")
-    if metadata.get("schema") != MODEL_SCHEMA:
-        raise ModelValidationError(f"metadata.schema must be {MODEL_SCHEMA}")
+    if metadata.get("schema") not in SUPPORTED_MODEL_SCHEMAS:
+        raise ModelValidationError(
+            f"metadata.schema must be one of {sorted(SUPPORTED_MODEL_SCHEMAS)}")
     name = " ".join(str(metadata.get("name") or metadata.get("model_name") or "").split())
     version = " ".join(str(metadata.get("version") or "").split())
     if not name or not version:

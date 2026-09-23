@@ -25,9 +25,10 @@ class MultimodalClassifier(torch.nn.Module):
         return {"head": (torch.stack((radar.sum(), csi.sum())),)}
 
 
-def metadata(inputs, *, path=None, classes=None, output_kind="logits"):
+def metadata(inputs, *, path=None, classes=None, output_kind="logits",
+             schema="whispy-model/v1"):
     return {
-        "schema": "thoth-model/v1",
+        "schema": schema,
         "name": "test classifier",
         "version": "1.0",
         "inputs": inputs,
@@ -122,6 +123,17 @@ def test_invalid_artifact_dimension_and_malformed_input(tmp_path):
     registry.set_enabled(saved["id"], True)
     result = registry.run_enabled([b"", b""], [], 0, "now")[0]
     assert result["status"] == "error"
+
+
+def test_legacy_thoth_model_schema_accepted(tmp_path):
+    """Pre-rename ``thoth-model/v1`` metadata still validates and is
+    normalized to the canonical ``whispy-model/v1`` schema."""
+    artifact = tmp_path / "radar.pt"
+    save_radar_model(artifact)
+    registry = ModelRegistry(tmp_path / "models")
+    saved = registry.add(
+        artifact, metadata([radar_input()], schema="thoth-model/v1"))
+    assert saved["metadata"]["schema"] == "whispy-model/v1"
 
 
 def test_manifest_append_preserves_human_labels(tmp_path):

@@ -805,7 +805,7 @@ class DeviceManager:
             if not isinstance(metadata, dict):
                 metadata = config.get('metadata')
             if not isinstance(metadata, dict):
-                raise ValueError('Deployment is missing thoth-model/v1 metadata')
+                raise ValueError('Deployment is missing whispy-model/v1 metadata')
             with tempfile.NamedTemporaryFile(suffix='.pth', delete=False) as temporary:
                 temporary.write(raw)
                 temporary_path = Path(temporary.name)

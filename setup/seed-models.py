@@ -60,7 +60,7 @@ for filename, inputs in specs.items():
         continue
     embedded = _embedded_meta(artifact)
     metadata = {
-        "schema": "thoth-model/v1",
+        "schema": "whispy-model/v1",
         "name": artifact.stem.replace("_", " ").title(),
         "version": str(embedded.get("modality") or "e2"),
         "inputs": inputs,
