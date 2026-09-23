@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thoth-node"
+version = "0.1.0"
+description = "Thoth — the ThothCraft installable node application (daemon + CLI on Whispy)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "whispy>=0.1.0",
+    "click>=8.1",
+]
+
+[project.scripts]
+thoth = "thoth.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["thoth*"]
