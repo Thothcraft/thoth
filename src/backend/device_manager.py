@@ -624,6 +624,15 @@ class DeviceManager:
                     json={},
                     timeout=15,
                 )
+                if response.ok:
+                    self.status['collection_active'] = (action == 'start')
+                    # Immediately report updated collection status to Brain
+                    threading.Thread(
+                        target=self.update_status,
+                        args=({'collection_active': self.status['collection_active']},),
+                        name="ImmediateStatusUpdate",
+                        daemon=True
+                    ).start()
             elif name == 'label_current_chunk':
                 label = str(payload.get('label') or '').strip()
                 response = requests.put(
@@ -1337,6 +1346,35 @@ class DeviceManager:
             logger.error(f"Error sending status update: {str(e)}")
             return False
 
+    def is_collection_active(self) -> bool:
+        """True if minute collection is active and not paused."""
+        try:
+            config_dir = getattr(self.config, 'CONFIG_DIR', None)
+            pause_path = Path(config_dir) / 'collector.pause' if config_dir else Path(__file__).resolve().parent.parent.parent / 'config' / 'collector.pause'
+            if pause_path.exists():
+                return False
+            # Check systemd service if available
+            try:
+                res = subprocess.run(["systemctl", "is-active", "thoth-collector"],
+                                     capture_output=True, text=True, timeout=2)
+                if res.stdout.strip() == "active":
+                    return True
+            except Exception:
+                pass
+            # Fallback: check processes
+            try:
+                import psutil
+                for p in psutil.process_iter(['name', 'cmdline']):
+                    cmdline = p.info.get('cmdline') or []
+                    cmd_str = ' '.join(cmdline).lower()
+                    if 'collector.py' in cmd_str or 'minute_collector.py' in cmd_str:
+                        return True
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return bool(self.status.get('collection_active', False))
+
     def start_heartbeat(self, interval: int = 60) -> None:
         """Start periodic status updates to the Brain server.
 
@@ -1360,10 +1398,12 @@ class DeviceManager:
                     if self._device_name_sync_pending and self.registered and self.auth_token:
                         self.save_device_name(self.get_device_info()['device_name'])
                     # Update status with current system information
+                    is_collecting = self.is_collection_active()
+                    self.status['collection_active'] = is_collecting
                     self.update_status({
                         'battery_level': self.status.get('battery_level'),
                         'wifi_connected': self.status.get('wifi_connected', False),
-                        'collection_active': self.status.get('collection_active', False),
+                        'collection_active': is_collecting,
                         'online': True,
                         'hardware_info': self._build_hardware_info(
                             include_capture_settings=not self._settings_sync_pending
