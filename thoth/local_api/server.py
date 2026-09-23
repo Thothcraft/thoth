@@ -65,6 +65,16 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/sensors":
             sensors = d._device.sensors() if d._device else []
             return self._json(200, {"sensors": [s.to_dict() for s in sensors]})
+        if path.startswith("/api/sensors/") and path.endswith("/tail"):
+            sensor_id = path[len("/api/sensors/"):-len("/tail")]
+            try:
+                cursor = int(qs.get("cursor", [0])[0] or 0)
+            except (TypeError, ValueError):
+                cursor = 0
+            out = d.tail_sensor(sensor_id, cursor)
+            if out is None:
+                return self._json(404, {"error": f"unknown sensor {sensor_id}"})
+            return self._json(200, out)
         if path == "/api/predictions":
             limit = int(qs.get("limit", [50])[0])
             return self._json(200, {"predictions": d.recent_predictions(limit)})
@@ -85,7 +95,12 @@ class _Handler(BaseHTTPRequestHandler):
         body = self._body()
         d = self.daemon
         if path == "/api/captures/start":
-            rec = d.captures.start(d.device_id, body.get("sensors") or [])
+            try:
+                rec = d.captures.start(
+                    d.device_id, body.get("sensors"),
+                    available=list(d._streams))
+            except ValueError as exc:
+                return self._json(422, {"error": str(exc)})
             return self._json(201, rec)
         if path == "/api/captures/stop":
             rec = d.captures.stop(str(body.get("capture_id") or ""))

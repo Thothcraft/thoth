@@ -38,7 +38,7 @@ def test_deployment_state_machine(tmp_home):
     reg = ModelRegistry()
     dm = DeploymentManager(reg)
     dep = dm.process("dep-1", {
-        "manifest": {"format": "thoth-model/v1", "processor": "rule"},
+        "manifest": {"format": "whispy-model/v1", "processor": "rule"},
         "name": "occ", "processor": "rule",
         "config": {"rules": [{"when": "x > 0", "label": "y"}]},
     })
@@ -55,6 +55,172 @@ def test_deployment_rejects_bad_processor(tmp_home):
     rec = dm.validate("dep-2")
     assert rec["state"] == "failed"
     assert rec["failure"]["code"] == "manifest_invalid"
+
+
+def test_deployment_rejects_wrong_format(tmp_home):
+    reg = ModelRegistry()
+    dm = DeploymentManager(reg)
+    dm.receive("dep-fmt", {
+        "manifest": {"format": "thoth-model/v0", "processor": "rule"},
+        "processor": "rule"})
+    rec = dm.validate("dep-fmt")
+    assert rec["state"] == "failed"
+    assert rec["failure"]["code"] == "manifest_invalid"
+
+
+def test_deployment_accepts_legacy_format(tmp_home):
+    """Pre-rename ``thoth-model/v1`` manifests still deploy."""
+    reg = ModelRegistry()
+    dm = DeploymentManager(reg)
+    dep = dm.process("dep-legacy", {
+        "manifest": {"format": "thoth-model/v1", "processor": "rule"},
+        "name": "occ", "processor": "rule",
+        "config": {"rules": [{"when": "x > 0", "label": "y"}]},
+    })
+    assert dep["state"] == "acknowledged"
+
+
+def test_deployment_torchscript_requires_artifact(tmp_home):
+    reg = ModelRegistry()
+    dm = DeploymentManager(reg)
+    dm.receive("dep-ts", {
+        "manifest": {"format": "whispy-model/v1", "processor": "torchscript"},
+        "processor": "torchscript"})
+    rec = dm.validate("dep-ts")
+    assert rec["state"] == "failed"
+    assert rec["failure"]["code"] == "manifest_invalid"
+
+
+def test_deployment_artifact_hash_mismatch(tmp_home):
+    import base64
+    reg = ModelRegistry()
+    dm = DeploymentManager(reg)
+    blob = b"fake-torchscript-bytes"
+    dm.receive("dep-hash", {
+        "manifest": {
+            "format": "whispy-model/v1", "processor": "torchscript",
+            "artifact": {"sha256": "0" * 64},   # wrong hash
+        },
+        "processor": "torchscript",
+        "artifact": base64.b64encode(blob).decode()})
+    rec = dm.validate("dep-hash")
+    assert rec["state"] == "failed"
+    assert rec["failure"]["code"] == "manifest_invalid"
+
+
+def test_deployment_redelivery_is_idempotent(tmp_home):
+    """A lost ack must not reinstall a duplicate runtime model."""
+    reg = ModelRegistry()
+    dm = DeploymentManager(reg)
+    payload = {
+        "manifest": {"format": "whispy-model/v1", "processor": "rule"},
+        "name": "occ", "processor": "rule",
+        "config": {"rules": [{"when": "x > 0", "label": "y"}]},
+    }
+    first = dm.process("dep-idem", payload)
+    assert first["state"] == "acknowledged"
+    rmid = first["runtime_model_id"]
+    # Brain redelivers the same deployment_id after a lost ack.
+    second = dm.process("dep-idem", payload)
+    assert second["state"] == "acknowledged"
+    assert second["runtime_model_id"] == rmid
+    # Still exactly one runtime model installed.
+    assert len(reg.list()) == 1
+
+
+def test_capture_resolve_sensors(tmp_home):
+    from thoth.capture.manager import CaptureManager
+    available = ["system-0", "radar-0", "camera-0"]
+    # Omitted → all available sensors.
+    assert CaptureManager.resolve_sensors(None, available) == available
+    assert CaptureManager.resolve_sensors([], available) == available
+    # Explicit subset passes through.
+    assert CaptureManager.resolve_sensors(["radar-0"], available) == ["radar-0"]
+    # Unknown id is rejected, never silently recorded.
+    with pytest.raises(ValueError):
+        CaptureManager.resolve_sensors(["lidar-9"], available)
+
+
+def test_capture_start_rejects_unknown_sensor(tmp_home):
+    from thoth.capture.manager import CaptureManager
+    cm = CaptureManager(root=tmp_home / "caps")
+    with pytest.raises(ValueError):
+        cm.start("dev-1", ["nope-0"], available=["system-0"])
+    rec = cm.start("dev-1", None, available=["system-0", "radar-0"])
+    assert rec["sensors"] == ["system-0", "radar-0"]
+
+
+def _fake_stream(sensor_id="system-0"):
+    """A started SampleStream over an infinite fake source."""
+    import itertools
+    from whispy.contracts import SensorSample
+    from whispy.streams import SampleStream
+
+    def gen():
+        for i in itertools.count():
+            yield SensorSample.now("dev-1", sensor_id, "system",
+                                   {"x": i}, sequence=i)
+            time.sleep(0.005)
+    stream = SampleStream(gen(), name=sensor_id)
+    stream.start()
+    return stream
+
+
+def test_tail_sensor_cursor(tmp_home):
+    """LAN tail returns seq-filtered samples; cursor is per-client."""
+    pytest.importorskip("whispy")
+    from thoth.daemon import ThothDaemon
+
+    daemon = ThothDaemon(config=ConfigStore())
+    stream = _fake_stream("system-0")
+    daemon._streams["system-0"] = stream
+    try:
+        time.sleep(0.1)                       # let samples buffer
+        r1 = daemon.tail_sensor("system-0", 0)
+        assert r1["samples"], "expected buffered samples"
+        cur = r1["cursor"]
+        assert cur > 0
+        # A second read at the cursor yields only newer samples.
+        r2 = daemon.tail_sensor("system-0", cur)
+        assert all(s["sequence"] is not None for s in r2["samples"])
+        assert r2["cursor"] >= cur
+        # Unknown sensor → None (route maps to 404).
+        assert daemon.tail_sensor("nope-0", 0) is None
+    finally:
+        stream.close()
+
+
+def test_tail_endpoint_over_http(tmp_home):
+    """The authenticated /api/sensors/{id}/tail route serves samples."""
+    pytest.importorskip("whispy")
+    import json
+    import urllib.error
+    import urllib.request
+    from thoth.daemon import ThothDaemon
+
+    cfg = ConfigStore()
+    cfg.set("local_port", 5997)
+    daemon = ThothDaemon(config=cfg, window_seconds=0.5, tick_hz=4.0)
+    daemon.start()
+    try:
+        time.sleep(0.4)
+        sid = next(iter(daemon._streams))
+        url = f"http://127.0.0.1:5997/api/sensors/{sid}/tail?cursor=0"
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {cfg.local_token}"})
+        with urllib.request.urlopen(req, timeout=5) as res:
+            body = json.loads(res.read().decode())
+        assert body["sensor_id"] == sid
+        assert "cursor" in body and "samples" in body
+        # Unknown sensor → 404.
+        bad = urllib.request.Request(
+            "http://127.0.0.1:5997/api/sensors/nope-9/tail",
+            headers={"Authorization": f"Bearer {cfg.local_token}"})
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            urllib.request.urlopen(bad, timeout=5)
+        assert ei.value.code == 404
+    finally:
+        daemon.stop()
 
 
 def test_daemon_sma_loop(tmp_home):

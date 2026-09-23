@@ -25,14 +25,35 @@ class CaptureManager:
     def _dir(self, capture_id: str) -> Path:
         return self.root / capture_id
 
-    def start(self, device_id: str, sensors: List[str]) -> Dict[str, Any]:
+    @staticmethod
+    def resolve_sensors(sensors: Optional[List[str]],
+                        available: List[str]) -> List[str]:
+        """Resolve a requested sensor list against the available ids.
+
+        An omitted/empty request means "all available sensors" (the CLI's
+        documented default). An explicit id that is not available raises
+        ``ValueError`` so a typo never silently records nothing.
+        """
+        if not sensors:
+            return list(available)
+        unknown = [s for s in sensors if s not in available]
+        if unknown:
+            raise ValueError(
+                f"unknown sensor id(s) {unknown}; available: {available}")
+        return list(sensors)
+
+    def start(self, device_id: str, sensors: Optional[List[str]],
+              available: Optional[List[str]] = None) -> Dict[str, Any]:
+        if available is not None:
+            sensors = self.resolve_sensors(sensors, available)
+        sensors = list(sensors or [])
         capture_id = uuid.uuid4().hex[:12]
         rec = {
             "id": capture_id,
             "device_id": device_id,
             "started_at": time.time(),
             "state": "active",
-            "sensors": list(sensors),
+            "sensors": sensors,
             "sample_counts": {s: 0 for s in sensors},
         }
         self._dir(capture_id).mkdir(parents=True, exist_ok=True)

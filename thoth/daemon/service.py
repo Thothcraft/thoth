@@ -23,39 +23,9 @@ from ..capture import CaptureManager
 from ..deployment import DeploymentManager
 from ..models import ModelRegistry
 from ..settings import ConfigStore
+from .actions import ActionScheduler
 
 logger = logging.getLogger(__name__)
-
-
-class ActionDispatcher:
-    """Fires actuators for predictions with cooldown/debounce (§17)."""
-
-    def __init__(self) -> None:
-        self._last_fired: Dict[str, float] = {}
-        self.results: Deque[Dict[str, Any]] = deque(maxlen=200)
-
-    def dispatch(self, action_cfg: Dict[str, Any], prediction: Any) -> Optional[Dict[str, Any]]:
-        from whispy.contracts import Action
-        from whispy.actuators import create_actuator
-
-        action = Action.from_dict(action_cfg)
-        now = time.time()
-        key = action.type + ":" + str(action_cfg.get("name") or "")
-        last = self._last_fired.get(key, 0.0)
-        if action.cooldown_seconds and (now - last) < action.cooldown_seconds:
-            return None
-        try:
-            actuator = create_actuator(action)
-            result = actuator.trigger(action, prediction)
-        except Exception as exc:
-            from whispy.contracts import ActionResult, ActionStatus
-            result = ActionResult(status=ActionStatus.FAILED,
-                                  action_type=action.type, detail=str(exc))
-        self._last_fired[key] = now
-        rec = {"action": action.type, "result": result.to_dict(),
-               "prediction": prediction.label, "at": now}
-        self.results.append(rec)
-        return rec
 
 
 class ThothDaemon:
@@ -67,7 +37,7 @@ class ThothDaemon:
         self.registry = ModelRegistry()
         self.deployments = DeploymentManager(self.registry)
         self.captures = CaptureManager()
-        self.dispatcher = ActionDispatcher()
+        self.dispatcher = ActionScheduler()
         self.window_seconds = window_seconds
         self.tick_hz = tick_hz
 
@@ -78,12 +48,15 @@ class ThothDaemon:
         self._thread: Optional[threading.Thread] = None
         self._api = None
         self.predictions: Deque[Dict[str, Any]] = deque(maxlen=500)
+        self._cap_subs: Dict[str, Dict[str, Any]] = {}
         self._started_at: Optional[float] = None
 
     # -- lifecycle --------------------------------------------------------------
     def start(self) -> "ThothDaemon":
         import whispy
-        self._device = whispy.local()
+        # One installation identity: the persisted config device_id is the
+        # node's identity everywhere (pairing, captures, telemetry, Brain).
+        self._device = whispy.local(device_id=self.config.device_id)
         self._open_streams()
         from whispy.synchronization import WindowSynchronizer
         self._sync = WindowSynchronizer(
@@ -101,7 +74,7 @@ class ThothDaemon:
         from whispy.streams import SampleStream
         for sensor in self._device.sensors():
             try:
-                handle = self._device.sensor(sensor.id.split("-")[0])
+                handle = self._device.sensor(sensor.id)
                 stream = SampleStream(handle.stream(), maxlen=4096,
                                       name=sensor.id)
                 stream.start()
@@ -111,7 +84,9 @@ class ThothDaemon:
 
     def _start_api(self) -> None:
         from ..local_api import LocalAPIServer
-        self._api = LocalAPIServer(self, host="127.0.0.1",
+        # Loopback by default; set local_host=0.0.0.0 to opt into LAN access.
+        host = str(self.config.get("local_host", "127.0.0.1"))
+        self._api = LocalAPIServer(self, host=host,
                                    port=int(self.config.get("local_port", 5000)),
                                    token=self.config.local_token)
         self._api.start()
@@ -120,6 +95,19 @@ class ThothDaemon:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=3.0)
+        try:
+            self.dispatcher.stop()
+        except Exception:
+            pass
+        for cap_id, subs in self._cap_subs.items():
+            for sid, sub in subs.items():
+                stream = self._streams.get(sid)
+                if stream:
+                    try:
+                        stream.unsubscribe(sub)
+                    except Exception:
+                        pass
+        self._cap_subs.clear()
         for stream in self._streams.values():
             try:
                 stream.close()
@@ -164,16 +152,55 @@ class ThothDaemon:
 
     def _fire_actions(self, model: Any, prediction: Any) -> None:
         for action_cfg in model.config.get("actions") or []:
-            self.dispatcher.dispatch(action_cfg, prediction)
+            self.dispatcher.submit(action_cfg, prediction,
+                                   model_id=model.runtime_model_id)
 
     def _record_captures(self) -> None:
+        """Flush each capture's private subscription queue to disk.
+
+        Subscriptions are non-destructive: recording never removes samples
+        from the shared buffer the synchronizer reads, and concurrent
+        captures each receive their own copy of every sample.
+        """
+        active_ids = set(self.captures._active)
+        # Drop subscriptions for captures that have stopped.
+        for cap_id in [c for c in self._cap_subs if c not in active_ids]:
+            for sid, sub in self._cap_subs.pop(cap_id).items():
+                stream = self._streams.get(sid)
+                if stream:
+                    stream.unsubscribe(sub)
+
         for cap in self.captures._active.values():
+            subs = self._cap_subs.setdefault(cap["id"], {})
             for sid in cap["sensors"]:
                 stream = self._streams.get(sid)
                 if not stream:
                     continue
-                for sample in stream.drain():
+                sub = subs.get(sid)
+                if sub is None:
+                    sub = stream.subscribe(name=f"capture-{cap['id']}")
+                    subs[sid] = sub
+                for sample in sub.read():
                     self.captures.record(cap["id"], sample)
+
+    # -- LAN tail (§24) ---------------------------------------------------------
+    def tail_sensor(self, sensor_id: str, cursor: int = 0) -> Optional[Dict[str, Any]]:
+        """Return buffered samples newer than ``cursor`` for one sensor.
+
+        Reads the stream's ring buffer non-destructively (``snapshot``), so
+        tailing never disturbs inference or captures. Each sample's own
+        ``sequence`` is the ordering key, so a client's cursor is just the
+        last sequence it saw — stateless and safe for concurrent clients.
+        Returns ``None`` for unknown sensors.
+        """
+        stream = self._streams.get(sensor_id)
+        if stream is None:
+            return None
+        snap = stream.snapshot()
+        latest = max((s.sequence for s in snap), default=cursor)
+        samples = [s.to_dict() for s in snap if s.sequence > cursor]
+        return {"sensor_id": sensor_id, "cursor": latest,
+                "samples": samples}
 
     # -- introspection -------------------------------------------------------------
     @property
