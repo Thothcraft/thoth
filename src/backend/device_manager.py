@@ -305,6 +305,12 @@ class DeviceManager:
             'sleep_study_enabled',
             'csi_device_ids',
             'camera_fps',
+            'radar_detection_threshold_db',
+            'csi_rolling_window_s',
+            'calibrations',
+            'auto_occupancy_label_enabled',
+            'prediction_label_style',
+            'people_count_label_enabled',
         }
         capture_updates = {key: value for key, value in updates.items() if key in processing_keys}
         device_updates = {key: value for key, value in updates.items() if key not in processing_keys}
@@ -438,6 +444,9 @@ class DeviceManager:
             'radar_detection_threshold_db': 8.0,
             'csi_rolling_window_s': 0.5,
             'calibrations': {},
+            'auto_occupancy_label_enabled': True,
+            'prediction_label_style': 'occupancy',
+            'people_count_label_enabled': False,
             'revision': 0,
             'updated_at': None,
         }
@@ -489,6 +498,18 @@ class DeviceManager:
                 source.get('csi_rolling_window_s')
             ),
             'calibrations': source.get('calibrations') if isinstance(source.get('calibrations'), dict) else {},
+            'auto_occupancy_label_enabled': self._coerce_setting_value(
+                'auto_occupancy_label_enabled',
+                source.get('auto_occupancy_label_enabled', True)
+            ),
+            'prediction_label_style': (
+                str(source.get('prediction_label_style') or 'occupancy')
+                if str(source.get('prediction_label_style') or 'occupancy')
+                in {'occupancy', 'presence'} else 'occupancy'
+            ),
+            'people_count_label_enabled': bool(
+                source.get('people_count_label_enabled', False)
+            ),
             'revision': revision,
             'updated_at': str(updated_at) if updated_at else None,
         }
@@ -960,17 +981,21 @@ class DeviceManager:
 
         # Get device information
         try:
-            # Get OS information
-            with open('/etc/os-release', 'r') as f:
-                os_info = dict(
-                    line.strip().replace('"', '').split('=', 1)
-                    for line in f if '=' in line
-                )
-            os_name = os_info.get('PRETTY_NAME', 'Raspberry Pi OS')
-            os_version = os_info.get('VERSION_ID', '')
+            # Get OS information (/etc/os-release is Linux-only)
+            import platform
+            try:
+                with open('/etc/os-release', 'r') as f:
+                    os_info = dict(
+                        line.strip().replace('"', '').split('=', 1)
+                        for line in f if '=' in line
+                    )
+                os_name = os_info.get('PRETTY_NAME', 'Raspberry Pi OS')
+                os_version = os_info.get('VERSION_ID', '')
+            except (OSError, IOError):
+                os_name = platform.platform()
+                os_version = platform.version()
 
             # Get Python version
-            import platform
             python_version = platform.python_version()
             is_raspberry_pi = platform.system() == 'Linux' and (
                 'arm' in platform.machine().lower() or os.path.exists('/proc/device-tree/model')

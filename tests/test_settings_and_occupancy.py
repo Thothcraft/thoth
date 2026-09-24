@@ -41,19 +41,23 @@ from backend.radar_analysis import (
     occupancy_region,
 )
 from backend.calibration import derive_thresholds
-from backend.minute_collector import (
-    RADAR_FRAMES_PER_CHUNK,
-    annotate_chunk_result,
+from backend.capture_hardware import (
+    RADAR_FRAMES_PER_SECOND,
     csi_capture_stats,
-    compact_manifest,
-    enqueue_analysis_chunk,
-    enqueue_latest_chunk_frame,
-    live_chunk_statistics,
     find_csi_ports,
+)
+from backend.collector_manifest import (
+    annotate_chunk_result,
+    compact_manifest,
     load_processing_settings,
     minute_start,
     output_dir_for_minute,
     summarize_minute_results,
+)
+from backend.collector_runtime import (
+    enqueue_analysis_second,
+    enqueue_latest_chunk_frame,
+    live_second_statistics,
 )
 from collector import next_minute_boundary
 
@@ -104,12 +108,13 @@ class SettingsTests(unittest.TestCase):
             },
             "minute_summary": {"labels": ["baseline", "occupied"], "occupancy": {"label": "occupied"}},
         })
-        self.assertEqual(compact["schema"], "thoth-minute-manifest/v6")
+        self.assertEqual(compact["schema"], "thoth-minute-manifest/v7")
         self.assertEqual(compact["outputs"]["wifi_csi"]["display_name"], "csix2")
         self.assertEqual(compact["outputs"]["wifi_csi"]["receivers"][1]["average_sampling_rate_hz"], 18.0)
         self.assertEqual(compact["outputs"]["radar"]["average_sampling_rate_hz"], 10.0)
-        self.assertNotIn("settings", compact["outputs"]["radar"]["chunks"][0])
-        self.assertNotIn("analysis", compact["outputs"]["radar"]["chunks"][0])
+        # v7 keeps only a per-second count — no repeated chunk analysis.
+        self.assertEqual(compact["outputs"]["radar"]["second_count"], 1)
+        self.assertNotIn("chunks", compact["outputs"]["radar"])
 
     def test_retention_uses_disk_threshold_and_deletes_oldest_first(self):
         with tempfile.TemporaryDirectory() as root:
@@ -133,7 +138,7 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(folders[2].exists())
 
     def test_labels_are_manifest_metadata_and_never_change_minute_path(self):
-        with mock.patch("backend.minute_collector.DATA_ROOT", Path("/captures")):
+        with mock.patch("backend.collector_manifest.DATA_ROOT", Path("/captures")):
             self.assertEqual(
                 output_dir_for_minute("20260817_1200", ["participant-1", "baseline"]),
                 Path("/captures/20260817_1200"),
@@ -168,7 +173,7 @@ class SettingsTests(unittest.TestCase):
                 likely_csi_serial_candidates(),
                 ["/dev/ttyACM0", "/dev/ttyUSB0"],
             )
-        with mock.patch("backend.minute_collector.serial_candidates", return_value=["/dev/ttyACM0", "/dev/ttyACM1"]):
+        with mock.patch("backend.capture_hardware.serial_candidates", return_value=["/dev/ttyACM0", "/dev/ttyACM1"]):
             ports, candidates = find_csi_ports(None, 115200, 0)
         self.assertEqual(ports, ["/dev/ttyACM0", "/dev/ttyACM1"])
         self.assertEqual(candidates, ports)
@@ -275,24 +280,24 @@ class SettingsTests(unittest.TestCase):
     def test_analysis_queue_stays_current_and_requires_ten_frame_chunks(self):
         pending = queue.Queue(maxsize=2)
 
-        def job(index, frame_count=RADAR_FRAMES_PER_CHUNK):
+        def job(index, frame_count=RADAR_FRAMES_PER_SECOND):
             return (
-                "chunk",
-                {"chunk_index": index},
+                "second",
+                {"second_index": index},
                 {},
                 tuple(bytes([frame]) for frame in range(frame_count)),
                 float(index),
             )
 
-        self.assertEqual(enqueue_analysis_chunk(pending, job(0)), [])
-        self.assertEqual(enqueue_analysis_chunk(pending, job(1)), [])
-        dropped = enqueue_analysis_chunk(pending, job(2))
-        self.assertEqual([entry["chunk_index"] for entry in dropped], [0])
+        self.assertEqual(enqueue_analysis_second(pending, job(0)), [])
+        self.assertEqual(enqueue_analysis_second(pending, job(1)), [])
+        dropped = enqueue_analysis_second(pending, job(2))
+        self.assertEqual([entry["second_index"] for entry in dropped], [0])
         queued = list(pending.queue)
-        self.assertEqual([entry[1]["chunk_index"] for entry in queued], [1, 2])
-        self.assertTrue(all(len(entry[3]) == RADAR_FRAMES_PER_CHUNK for entry in queued))
+        self.assertEqual([entry[1]["second_index"] for entry in queued], [1, 2])
+        self.assertTrue(all(len(entry[3]) == RADAR_FRAMES_PER_SECOND for entry in queued))
         with self.assertRaisesRegex(ValueError, "exactly 10 frames"):
-            enqueue_analysis_chunk(pending, job(3, frame_count=9))
+            enqueue_analysis_second(pending, job(3, frame_count=9))
 
     def test_local_save_is_canonical_revisioned_and_survives_reload(self):
         with tempfile.TemporaryDirectory() as root:
@@ -477,7 +482,7 @@ class SettingsTests(unittest.TestCase):
                 json.dumps({"labels": ["cooking", "participant-4"]}),
                 encoding="utf-8",
             )
-            with mock.patch("backend.minute_collector.CAPTURE_SETTINGS_PATH", settings_path):
+            with mock.patch("backend.collector_manifest.CAPTURE_SETTINGS_PATH", settings_path):
                 settings = load_processing_settings()
         self.assertEqual(settings["labels"], ["cooking", "participant-4"])
 
@@ -606,7 +611,7 @@ class OccupancyTests(unittest.TestCase):
             last_targets=[{"id": 4}, {"id": 8}],
         )
 
-        statistics = live_chunk_statistics(analyzer)
+        statistics = live_second_statistics(analyzer)
 
         self.assertEqual(statistics["status"], "collecting")
         self.assertEqual(statistics["classification"], "green")
@@ -795,7 +800,7 @@ class OccupancyTests(unittest.TestCase):
         for index, label in enumerate(("occupied", "empty", "occupied")):
             tracked = {"id": 4, "position": [1.1, 1.1, 1]}
             frames = [{"targets": [tracked] if label == "occupied" and frame < 6 else []} for frame in range(10)]
-            result = {"chunk_index": index, "chunk_seconds": 10, "occupancy": {"label": label, "detected_frames": 8 if label == "occupied" else 1, "evaluated_frames": 10, "threshold_percent": 50}, "targets": [dict(tracked)] if label == "occupied" else [], "frames": frames, "bin_path": f"raw_{index}.bin", "csv_path": f"xy_{index}.csv"}
+            result = {"second_index": index, "chunk_seconds": 10, "occupancy": {"label": label, "detected_frames": 8 if label == "occupied" else 1, "evaluated_frames": 10, "threshold_percent": 50}, "targets": [dict(tracked)] if label == "occupied" else [], "frames": frames, "bin_path": f"raw_{index}.bin", "csv_path": f"xy_{index}.csv"}
             chunks.append(annotate_chunk_result(result, settings, room, ["care", "participant-1"], "20260713_1200", 3, index * 10))
         self.assertIn("present", chunks[0]["labels"])
         self.assertIn("people_count:1", chunks[0]["labels"])
@@ -823,14 +828,14 @@ class HomeAssistantTests(unittest.TestCase):
                 with mock.patch("backend.home_assistant.requests.post", return_value=response) as post:
                     result = home_assistant.publish_occupancy(
                         {"label": "occupied", "detected_frames": 8, "evaluated_frames": 10, "ratio": .8, "threshold_percent": 50},
-                        "20260713_1200", chunk_index=2, location=[1.2, 3.4], confidence=.9,
+                        "20260713_1200", second_index=2, location=[1.2, 3.4], confidence=.9,
                         targets=[{"id": 7, "position": [1.2, 3.4, 1.0], "position_error_m": .18}],
                     )
                 self.assertTrue(result["success"])
                 self.assertEqual(post.call_count, 7)
                 payload = post.call_args_list[0].kwargs["json"]
                 self.assertEqual(payload["state"], "on")
-                self.assertEqual(payload["attributes"]["chunk_index"], 2)
+                self.assertEqual(payload["attributes"]["second_index"], 2)
                 self.assertEqual(payload["attributes"]["coordinates"], {"x": 1.2, "y": 3.4})
                 self.assertEqual(post.call_args_list[1].kwargs["json"]["state"], "green")
                 self.assertEqual(post.call_args_list[2].kwargs["json"]["state"], 1)

@@ -157,6 +157,9 @@ def load_processing_settings() -> dict[str, Any]:
         "csi_device_ids": {},
         "camera_fps": 1.0,
         "radar_detection_threshold_db": 8.0,
+        "auto_occupancy_label_enabled": True,
+        "prediction_label_style": "occupancy",
+        "people_count_label_enabled": False,
         "revision": 0,
         "updated_at": None,
     }

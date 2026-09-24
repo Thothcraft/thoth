@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
-import fcntl
+try:
+    import fcntl  # Unix-only; Windows uses msvcrt.locking below
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
 import glob
 import json
 import logging
@@ -21,6 +24,7 @@ import queue
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -37,7 +41,7 @@ else:
 THOTH_ROOT = Path(__file__).resolve().parents[2]
 MMW_RELEASE = THOTH_ROOT / "WS" / "MMW-HAT" / "MMW-HAT-Release"
 RADAR_CFG = MMW_RELEASE / "radar_config" / "config_3rx_3m"
-RADAR_LOCK_PATH = Path("/tmp/thoth-radar-hardware.lock")
+RADAR_LOCK_PATH = Path(tempfile.gettempdir()) / "thoth-radar-hardware.lock"
 RADAR_GPIO_RETRY_SECONDS = 12.0
 RADAR_GPIO_SETTLE_SECONDS = 0.5
 # The BGT60TR13C driver delivers radar frames in 10-frame batches. This is a
@@ -524,7 +528,12 @@ def settle_radar_gpio() -> None:
 def acquire_radar_lock() -> Any:
     """Serialize physical radar ownership across overlapping minute workers."""
     handle = open(RADAR_LOCK_PATH, "a+", encoding="utf-8")
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    elif os.name == "nt":  # Windows: byte-range lock via msvcrt
+        import msvcrt
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
     return handle
 
 
@@ -532,7 +541,12 @@ def release_radar_lock(handle: Any | None) -> None:
     if handle is None:
         return
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        elif os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
     finally:
         handle.close()
 
