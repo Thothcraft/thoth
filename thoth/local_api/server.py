@@ -63,8 +63,19 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/device":
             return self._json(200, d._device.info.to_dict() if d._device else {})
         if path == "/api/sensors":
+            if qs.get("descriptors") and hasattr(d._device, "sensor_descriptors"):
+                try:
+                    descs = d._device.sensor_descriptors()
+                    return self._json(200, {"descriptors": [
+                        x.to_dict() for x in descs
+                        if d.sensor_exposed(x.id)]})
+                except Exception:
+                    pass
             sensors = d._device.sensors() if d._device else []
-            return self._json(200, {"sensors": [s.to_dict() for s in sensors]})
+            return self._json(200, {"sensors": [
+                s.to_dict() for s in sensors if d.sensor_exposed(s.id)]})
+        if path == "/api/actuators":
+            return self._json(200, {"actuators": d.actuators()})
         if path.startswith("/api/sensors/") and path.endswith("/tail"):
             sensor_id = path[len("/api/sensors/"):-len("/tail")]
             try:
@@ -120,6 +131,10 @@ class _Handler(BaseHTTPRequestHandler):
             dep = d.deployments.process(
                 str(body.get("deployment_id") or ""), body)
             return self._json(200, dep)
+        if path.startswith("/api/actuators/") and path.endswith("/actions"):
+            actuator_id = path[len("/api/actuators/"):-len("/actions")]
+            result = d.execute_actuator(actuator_id, body)
+            return self._json(200, result)
         if path == "/api/internal/prediction":
             # Inject a prediction — drives linked actuators (test hook).
             from whispy.contracts import Prediction

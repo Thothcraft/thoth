@@ -56,7 +56,9 @@ class ThothDaemon:
         import whispy
         # One installation identity: the persisted config device_id is the
         # node's identity everywhere (pairing, captures, telemetry, Brain).
-        self._device = whispy.local(device_id=self.config.device_id)
+        # A pre-set _device (tests, embedded hosts) is used as-is.
+        if self._device is None:
+            self._device = whispy.local(device_id=self.config.device_id)
         self._open_streams()
         from whispy.synchronization import WindowSynchronizer
         self._sync = WindowSynchronizer(
@@ -184,6 +186,24 @@ class ThothDaemon:
                     self.captures.record(cap["id"], sample)
 
     # -- LAN tail (§24) ---------------------------------------------------------
+    def _exposure(self) -> Dict[str, Any]:
+        """Capability exposure lists set by ``thoth expose``.
+
+        ``{"sensors": [...], "actuators": [...]}`` — empty/absent lists
+        mean "all". Permissions describe capabilities, not HTTP routes.
+        """
+        exp = self.config.get("exposed") or {}
+        return {"sensors": list(exp.get("sensors") or []),
+                "actuators": list(exp.get("actuators") or [])}
+
+    def sensor_exposed(self, sensor_id: str) -> bool:
+        allowed = self._exposure()["sensors"]
+        return not allowed or sensor_id in allowed
+
+    def actuator_exposed(self, actuator_id: str) -> bool:
+        allowed = self._exposure()["actuators"]
+        return not allowed or actuator_id in allowed
+
     def tail_sensor(self, sensor_id: str, cursor: int = 0) -> Optional[Dict[str, Any]]:
         """Return buffered samples newer than ``cursor`` for one sensor.
 
@@ -191,8 +211,10 @@ class ThothDaemon:
         tailing never disturbs inference or captures. Each sample's own
         ``sequence`` is the ordering key, so a client's cursor is just the
         last sequence it saw — stateless and safe for concurrent clients.
-        Returns ``None`` for unknown sensors.
+        Returns ``None`` for unknown or non-exposed sensors.
         """
+        if not self.sensor_exposed(sensor_id):
+            return None
         stream = self._streams.get(sensor_id)
         if stream is None:
             return None
@@ -201,6 +223,50 @@ class ThothDaemon:
         samples = [s.to_dict() for s in snap if s.sequence > cursor]
         return {"sensor_id": sensor_id, "cursor": latest,
                 "samples": samples}
+
+    # -- actuators ---------------------------------------------------------------
+    def actuators(self) -> List[Dict[str, Any]]:
+        """Actuator inventory as descriptor dicts (exposure-filtered)."""
+        if self._device is None:
+            return []
+        try:
+            descriptors = self._device.actuators()
+        except Exception:
+            return []
+        return [d.to_dict() for d in descriptors
+                if self.actuator_exposed(d.id)]
+
+    def execute_actuator(self, actuator_id: str,
+                         command: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute an ActuatorCommand on a local actuator by id/kind.
+
+        Returns an ActionResult dict — explicit outcomes only (§7.6).
+        """
+        from whispy.contracts import (
+            ActionResult, ActionStatus, ActuatorCommand)
+        if not self.actuator_exposed(actuator_id):
+            return ActionResult(
+                status=ActionStatus.UNSUPPORTED,
+                action_type="actuator",
+                detail=f"actuator {actuator_id!r} is not exposed").to_dict()
+        if self._device is None:
+            return ActionResult(status=ActionStatus.FAILED,
+                                action_type="actuator",
+                                detail="device not started").to_dict()
+        try:
+            handle = self._device.actuator(actuator_id)
+        except KeyError:
+            return ActionResult(
+                status=ActionStatus.UNSUPPORTED, action_type="actuator",
+                detail=f"unknown actuator {actuator_id!r}").to_dict()
+        try:
+            result = handle.execute(ActuatorCommand.from_dict(command))
+            return result.to_dict() if hasattr(result, "to_dict") \
+                else dict(result)
+        except Exception as exc:
+            return ActionResult(status=ActionStatus.FAILED,
+                                action_type="actuator",
+                                detail=str(exc)).to_dict()
 
     # -- introspection -------------------------------------------------------------
     @property
@@ -212,7 +278,9 @@ class ThothDaemon:
             "device_id": self.device_id,
             "device_name": self.config.device_name,
             "uptime_s": (time.time() - self._started_at) if self._started_at else 0,
-            "sensors": [s.to_dict() for s in (self._device.sensors() if self._device else [])],
+            "sensors": [s.to_dict() for s in (self._device.sensors() if self._device else [])
+                        if self.sensor_exposed(s.id)],
+            "actuators": self.actuators(),
             "streams": {sid: {"dropped": st.dropped,
                               "last_ts": st.last_timestamp}
                         for sid, st in self._streams.items()},

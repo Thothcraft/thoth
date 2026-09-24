@@ -98,7 +98,13 @@ class DeploymentManager:
 
         processor = payload.get("processor") or (
             manifest.processor if manifest else None)
-        if processor not in ("rule", "torchscript", "fusion"):
+        known = {"rule", "torchscript", "fusion"}
+        try:
+            from whispy.models import installed_models
+            known.update(installed_models())
+        except Exception:
+            pass
+        if processor not in known:
             errors.append(f"unsupported processor {processor!r}")
 
         # Artifact: required for torchscript; hash-checked against the

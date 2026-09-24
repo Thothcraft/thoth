@@ -72,6 +72,65 @@ def sensors(ctx):
         sys.exit(1)
 
 
+@main.command()
+@click.pass_context
+def actuators(ctx):
+    """List the node's actuator inventory."""
+    try:
+        _echo(_client(ctx).get("/api/actuators"))
+    except DaemonUnavailable as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+
+
+@main.command()
+@click.option("--lan", is_flag=True, help="bind the local API to the LAN")
+@click.option("--off", is_flag=True, help="return to loopback-only")
+@click.option("--sensor", "sensors_", multiple=True,
+              help="expose only these sensor ids (repeatable)")
+@click.option("--actuator", "actuators_", multiple=True,
+              help="expose only these actuator ids (repeatable)")
+@click.option("--port", "expose_port", default=None, type=int)
+@click.pass_context
+def expose(ctx, lan, off, sensors_, actuators_, expose_port):
+    """Configure LAN exposure of this node's capabilities.
+
+    The daemon binds loopback by default; ``thoth expose --lan`` opts
+    into LAN access. ``--sensor``/``--actuator`` restrict which
+    capabilities are visible — permissions describe capabilities, not
+    HTTP routes. Restart the daemon to apply.
+    """
+    cfg = ctx.obj["config"]
+    if off:
+        cfg.set("local_host", "127.0.0.1")
+        click.echo("LAN exposure disabled — daemon will bind 127.0.0.1 "
+                   "on next start.")
+        return
+    if not lan and not (sensors_ or actuators_ or expose_port):
+        raise click.UsageError("specify --lan, --off, or capability options")
+    if lan:
+        cfg.set("local_host", "0.0.0.0")
+    if expose_port:
+        cfg.set("local_port", int(expose_port))
+    if sensors_ or actuators_:
+        exp = dict(cfg.get("exposed") or {})
+        if sensors_:
+            exp["sensors"] = list(sensors_)
+        if actuators_:
+            exp["actuators"] = list(actuators_)
+        cfg.set("exposed", exp)
+    host = cfg.get("local_host", "127.0.0.1")
+    port = cfg.get("local_port", 5000)
+    click.echo(f"local API will bind {host}:{port} on next daemon start")
+    exp = cfg.get("exposed") or {}
+    if exp.get("sensors") or exp.get("actuators"):
+        click.echo(f"exposed sensors:   {exp.get('sensors') or 'all'}")
+        click.echo(f"exposed actuators: {exp.get('actuators') or 'all'}")
+    else:
+        click.echo("exposed capabilities: all")
+    click.echo(f"local token: {cfg.local_token}")
+
+
 @main.group()
 def capture():
     """Manage captures."""
