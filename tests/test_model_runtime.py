@@ -152,7 +152,10 @@ def test_model_occupancy_publishes_only_explicit_binary_class(tmp_path, monkeypa
     response.raise_for_status.return_value = None
     post = Mock(return_value=response)
     monkeypatch.setattr(home_assistant.requests, "post", post)
-    published = home_assistant.publish_model_occupancy({"class": "occupied", "confidence": 0.9, "model_id": "m"}, "20260915_1200", chunk_index=2)
+    published = home_assistant.publish_model_occupancy({"class": "occupied", "confidence": 0.9, "model_id": "m"}, "20260915_1200", second_index=2)
     assert published["status"] == "published"
-    assert post.call_args.kwargs["json"]["state"] == "on"
+    # First post is the binary occupancy state; a second post publishes the
+    # probability percentage to sensor.thoth_occupancy_probability.
+    assert post.call_args_list[0].kwargs["json"]["state"] == "on"
+    assert post.call_args_list[-1].kwargs["json"]["state"] == 90.0
     assert home_assistant.publish_model_occupancy({"class": "walking"}, "20260915_1200")["status"] == "not_occupancy_class"

@@ -1,6 +1,7 @@
 """Configuration module for Thoth backend."""
 
 import os
+import secrets
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
@@ -8,6 +9,47 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 env_path = os.path.join(Path(__file__).parent.parent.parent, '.env')
 load_dotenv(env_path)
+
+
+def _persisted_secret(config_dir: str, filename: str, length: int = 32) -> str:
+    """Return a per-device secret, generating and persisting it on first use.
+
+    Avoids shipping a shared hardcoded credential while keeping the value
+    stable across restarts. The file is created with owner-only permissions.
+    """
+    path = os.path.join(config_dir, filename)
+    try:
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as handle:
+                value = handle.read().strip()
+            if value:
+                return value
+        os.makedirs(config_dir, exist_ok=True)
+        value = secrets.token_urlsafe(length)
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write(value)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return value
+    except OSError:
+        # Last resort: ephemeral secret. Sessions reset on restart but no
+        # shared credential is ever used.
+        return secrets.token_urlsafe(length)
+
+
+def _resolve_bind_host() -> str:
+    """Resolve the Flask bind host.
+
+    Default is loopback-only. LAN exposure requires the explicit
+    ``THOTH_BIND_MODE=lan`` opt-in (or a direct ``FLASK_HOST`` override).
+    """
+    explicit_host = os.getenv('FLASK_HOST')
+    if explicit_host:
+        return explicit_host
+    mode = os.getenv('THOTH_BIND_MODE', 'loopback').strip().lower()
+    return '0.0.0.0' if mode == 'lan' else '127.0.0.1'
 
 class Config:
     """Base configuration class for Thoth device."""
@@ -17,8 +59,16 @@ class Config:
     VERSION = '1.0.0'
 
     # Flask configuration
-    SECRET_KEY = os.getenv('FLASK_SECRET_KEY', 'thoth-dev-secret-key')
-    HOST = os.getenv('FLASK_HOST', '0.0.0.0')
+    # SECRET_KEY: env override, else a per-device persisted random secret.
+    # Never falls back to a shared hardcoded value.
+    SECRET_KEY = os.getenv('FLASK_SECRET_KEY') or _persisted_secret(
+        os.getenv('THOTH_CONFIG_DIR', os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            'config')),
+        'flask_secret_key')
+    # Loopback by default; set THOTH_BIND_MODE=lan (or FLASK_HOST) to expose.
+    BIND_MODE = os.getenv('THOTH_BIND_MODE', 'loopback').strip().lower()
+    HOST = _resolve_bind_host()
     PORT = int(os.getenv('FLASK_PORT', 5000))
     DEBUG = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
 
@@ -34,7 +84,12 @@ class Config:
     WIFI_SSID = os.getenv('WIFI_SSID', '')
     WIFI_PASSWORD = os.getenv('WIFI_PASSWORD', '')
     AP_SSID = os.getenv('AP_SSID', 'Thoth')
-    AP_PASSWORD = os.getenv('AP_PASSWORD', 'thoth123')
+    # Per-device generated AP password unless explicitly configured.
+    AP_PASSWORD = os.getenv('AP_PASSWORD') or _persisted_secret(
+        os.getenv('THOTH_CONFIG_DIR', os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            'config')),
+        'ap_password', length=12)
     AP_IP = '192.168.4.1'
     AP_NETMASK = '255.255.255.0'
 

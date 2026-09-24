@@ -191,8 +191,25 @@ app.secret_key = Config.SECRET_KEY
 app.permanent_session_lifetime = timedelta(days=int(os.getenv('SESSION_EXPIRE_DAYS', '14')))
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # Disable caching for development
-CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+# CORS / WebSocket origins: loopback-only by default. LAN deployments must
+# set THOTH_CORS_ORIGINS to a comma-separated allowlist (or "*" to opt out
+# explicitly — not recommended without THOTH_BIND_MODE=lan + auth).
+_cors_env = os.getenv('THOTH_CORS_ORIGINS', '').strip()
+if _cors_env:
+    _allowed_origins = [o.strip() for o in _cors_env.split(',') if o.strip()]
+elif Config.BIND_MODE == 'lan':
+    # LAN bind without an explicit allowlist: same-origin only.
+    _allowed_origins = []
+else:
+    _allowed_origins = [
+        f'http://127.0.0.1:{Config.PORT}', f'http://localhost:{Config.PORT}',
+        'http://127.0.0.1', 'http://localhost',
+    ]
+CORS(app, origins=_allowed_origins or None)
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=_allowed_origins if _allowed_origins else None,
+    async_mode='threading')
 
 # Ensure required directories exist
 os.makedirs(Config.CONFIG_DIR, exist_ok=True)
@@ -212,18 +229,6 @@ COLLECTOR_PAUSE_PATH = THOTH_ROOT / 'config' / 'collector.pause'
 _capture_timeline_cache: Dict[str, Any] = {'signature': None, 'items': []}
 _capture_manifest_cache: Dict[str, Any] = {}
 wifi_manager = None
-
-# Mock user for local authentication (in production, use a proper user database)
-USERS = {
-    'admin': {
-        'password': generate_password_hash('admin123'),
-        'role': 'admin'
-    },
-    'user': {
-        'password': generate_password_hash('password123'),
-        'role': 'user'
-    }
-}
 
 def get_active_wifi_state() -> Dict[str, Any]:
     """Return the live WiFi state from NetworkManager."""

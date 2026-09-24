@@ -21,11 +21,19 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 
-MODEL_SCHEMA = "whispy-model/v1"
-# Pre-rename name for the same metadata schema; accepted on ingest and
-# normalized to MODEL_SCHEMA.
-LEGACY_MODEL_SCHEMA = "thoth-model/v1"
-SUPPORTED_MODEL_SCHEMAS = frozenset({MODEL_SCHEMA, LEGACY_MODEL_SCHEMA})
+# Manifest format names are owned by whispy.contracts — the canonical
+# contract source. ``whispy-model/v2`` is accepted alongside v1 and the
+# pre-rename ``thoth-model/v1``.
+from whispy.contracts import (  # noqa: E402
+    MODEL_MANIFEST_FORMAT,
+    MODEL_MANIFEST_FORMAT_V2,
+    LEGACY_MODEL_MANIFEST_FORMAT,
+    SUPPORTED_MANIFEST_FORMATS,
+)
+
+MODEL_SCHEMA = MODEL_MANIFEST_FORMAT
+LEGACY_MODEL_SCHEMA = LEGACY_MODEL_MANIFEST_FORMAT
+SUPPORTED_MODEL_SCHEMAS = SUPPORTED_MANIFEST_FORMATS
 MANIFEST_SCHEMA = "thoth-minute-manifest/v7"
 SUPPORTED_EXTENSIONS = {".pt", ".pth"}
 SUPPORTED_SENSORS = {"radar", "csi"}
@@ -153,7 +161,8 @@ def _positive_int(value: object, label: str) -> int:
 def normalize_metadata(metadata: object) -> dict[str, Any]:
     if not isinstance(metadata, dict):
         raise ModelValidationError("metadata must be a JSON object")
-    if metadata.get("schema") not in SUPPORTED_MODEL_SCHEMAS:
+    schema = metadata.get("schema") or metadata.get("format")
+    if schema not in SUPPORTED_MODEL_SCHEMAS:
         raise ModelValidationError(
             f"metadata.schema must be one of {sorted(SUPPORTED_MODEL_SCHEMAS)}")
     name = " ".join(str(metadata.get("name") or metadata.get("model_name") or "").split())
@@ -169,7 +178,11 @@ def normalize_metadata(metadata: object) -> dict[str, Any]:
     for index, raw in enumerate(raw_inputs):
         if not isinstance(raw, dict):
             raise ModelValidationError(f"inputs[{index}] must be an object")
-        sensor = str(raw.get("sensor") or raw.get("kind") or "").strip().lower()
+        # v2 capability inputs keep tensor details under ``constraints``.
+        if isinstance(raw.get("constraints"), dict):
+            raw = {**raw["constraints"], **raw}
+        sensor = str(raw.get("sensor") or raw.get("modality")
+                     or raw.get("kind") or "").strip().lower()
         if sensor not in SUPPORTED_SENSORS or sensor in seen:
             raise ModelValidationError("v1 inputs must contain radar and/or csi at most once")
         seen.add(sensor)
@@ -211,7 +224,12 @@ def normalize_metadata(metadata: object) -> dict[str, Any]:
 
     output = metadata.get("output")
     if not isinstance(output, dict):
-        output = {"kind": metadata.get("output_kind")}
+        # v2 manifests may carry ``outputs`` as a list.
+        outputs = metadata.get("outputs")
+        if isinstance(outputs, list) and outputs and isinstance(outputs[0], dict):
+            output = outputs[0]
+        else:
+            output = {"kind": metadata.get("output_kind")}
     output_kind = str(output.get("kind") or "").lower()
     if output_kind not in {"logits", "probabilities"}:
         raise ModelValidationError("output.kind must be logits or probabilities")
@@ -220,7 +238,14 @@ def normalize_metadata(metadata: object) -> dict[str, Any]:
         path = []
     if not isinstance(path, list) or any(not isinstance(item, (str, int)) for item in path):
         raise ModelValidationError("output.path must be a list of dict keys and/or tuple indexes")
-    execution = str(metadata.get("execution") or "chunk").strip().lower()
+    execution_raw = metadata.get("execution")
+    if isinstance(execution_raw, list):
+        # v2: ``execution`` is a list of execution classes; the cadence
+        # comes from ``lifecycle`` (windowed→chunk, batch→minute).
+        lifecycle = str(metadata.get("lifecycle") or "windowed").lower()
+        execution = "minute" if lifecycle == "batch" else "chunk"
+    else:
+        execution = str(execution_raw or "chunk").strip().lower()
     if execution not in {"chunk", "minute"}:
         raise ModelValidationError("execution must be chunk or minute")
     aggregation = metadata.get("aggregation")
