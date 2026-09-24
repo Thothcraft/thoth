@@ -97,6 +97,58 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"actions": list(d.dispatcher.results)})
         if path == "/api/deployments":
             return self._json(200, {"deployments": d.deployments._states})
+
+        # -- canonical v1 surface (§12) ---------------------------------------
+        if path == "/api/v1/device":
+            info = d._device.info.to_dict() if d._device else {}
+            info["compute"] = d.compute()
+            return self._json(200, info)
+        if path == "/api/v1/health":
+            return self._json(200, d.health())
+        if path == "/api/v1/compute":
+            return self._json(200, d.compute())
+        if path == "/api/v1/sources":
+            return self._json(200, {"sources": d.sources()})
+        if path == "/api/v1/actuators":
+            return self._json(200, {"actuators": d.actuators()})
+        if path == "/api/v1/models":
+            return self._json(200, {"models": [m.to_dict() for m in d.registry.list()]})
+        if path == "/api/v1/model-deployments":
+            return self._json(200, {"deployments": d.deployments._states})
+        if path == "/api/v1/minutes":
+            return self._json(200, {"minutes": d.minutes()})
+        if path == "/api/v1/privacy":
+            return self._json(200, d.privacy())
+        if path == "/api/v1/sync":
+            return self._json(200, d.sync_state())
+        if path.startswith("/api/v1/minutes/"):
+            rest = path[len("/api/v1/minutes/"):]
+            parts = rest.split("/")
+            minute_id = parts[0]
+            if len(parts) == 3 and parts[1] == "seconds":
+                try:
+                    idx = int(parts[2])
+                except ValueError:
+                    return self._json(400, {"error": "second index must be an integer"})
+                out = d.minute_second(minute_id, idx)
+                return self._json(200 if out else 404, out or {"error": "not found"})
+            out = d.minute(minute_id)
+            return self._json(200 if out else 404, out or {"error": "not found"})
+        if path.startswith("/api/v1/sources/"):
+            rest = path[len("/api/v1/sources/"):]
+            if rest.endswith("/observations"):
+                source_id = rest[:-len("/observations")]
+                try:
+                    cursor = int(qs.get("cursor", [0])[0] or 0)
+                except (TypeError, ValueError):
+                    cursor = 0
+                out = d.source_observations(source_id, cursor)
+                if out is None:
+                    return self._json(404, {"error": f"unknown source {source_id}"})
+                return self._json(200, out)
+            desc = d.source(rest)
+            return self._json(200 if desc else 404,
+                            desc or {"error": "not found"})
         return self._json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -135,6 +187,12 @@ class _Handler(BaseHTTPRequestHandler):
             actuator_id = path[len("/api/actuators/"):-len("/actions")]
             result = d.execute_actuator(actuator_id, body)
             return self._json(200, result)
+        # -- canonical v1 surface (§12) ---------------------------------------
+        if path == "/api/v1/inference":
+            return self._json(200, d.infer(body))
+        if path.startswith("/api/v1/actuators/") and path.endswith("/actions"):
+            actuator_id = path[len("/api/v1/actuators/"):-len("/actions")]
+            return self._json(200, d.execute_actuator(actuator_id, body))
         if path == "/api/internal/prediction":
             # Inject a prediction — drives linked actuators (test hook).
             from whispy.contracts import Prediction
@@ -146,6 +204,22 @@ class _Handler(BaseHTTPRequestHandler):
                 d._fire_actions(model, pred)
             return self._json(200, {"ok": True, "label": pred.label})
         return self._json(404, {"error": "not found"})
+
+
+class _FastBindHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer without the reverse-DNS stall.
+
+    ``HTTPServer.server_bind`` calls ``socket.getfqdn(host)`` which can
+    block ~20s on Windows when the resolver is slow — the node API must
+    come up immediately.
+    """
+
+    def server_bind(self) -> None:
+        import socketserver
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
 
 
 class LocalAPIServer:
@@ -161,7 +235,7 @@ class LocalAPIServer:
         self._thread: Optional[threading.Thread] = None
 
     def start(self) -> "LocalAPIServer":
-        httpd = ThreadingHTTPServer((self.host, self.port), _Handler)
+        httpd = _FastBindHTTPServer((self.host, self.port), _Handler)
         httpd.daemon_ref = self.daemon  # type: ignore[attr-defined]
         httpd.token = self.token        # type: ignore[attr-defined]
         self._httpd = httpd

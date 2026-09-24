@@ -294,6 +294,183 @@ class ThothDaemon:
     def recent_predictions(self, limit: int = 50) -> List[Dict[str, Any]]:
         return list(self.predictions)[-limit:]
 
+    # -- v1 API surface (§12) ---------------------------------------------------
+    def compute(self) -> Dict[str, Any]:
+        """Compute capability advertisement — probed, never fabricated.
+
+        Cached for 60s: probing spawns subprocesses (nvidia-smi) that can
+        be slow, and compute capability is semi-static.
+        """
+        now = time.time()
+        cached = getattr(self, "_compute_cache", None)
+        if cached and now - cached[0] < 60.0:
+            return dict(cached[1])
+        from whispy.compute import probe_compute
+        result = probe_compute().to_dict()
+        self._compute_cache = (now, result)
+        return dict(result)
+
+    def health(self) -> Dict[str, Any]:
+        """Structured health: per-source state, models, actuators, uptime."""
+        sources = []
+        for s in (self._device.sensors() if self._device else []):
+            stream = self._streams.get(s.id)
+            sources.append({
+                "id": s.id, "type": s.type, "online": s.online,
+                "exposed": self.sensor_exposed(s.id),
+                "last_sample_ts": getattr(stream, "last_timestamp", None)
+                    if stream else None,
+                "dropped": getattr(stream, "dropped", 0) if stream else 0,
+            })
+        return {
+            "device_id": self.device_id,
+            "running": not self._stop.is_set(),
+            "uptime_s": (time.time() - self._started_at)
+                if self._started_at else 0,
+            "sources": sources,
+            "actuators": self.actuators(),
+            "models": {"installed": len(self.registry.list()),
+                       "active": len(self.registry.active())},
+            "captures_active": len(self.captures._active),
+        }
+
+    def sources(self) -> List[Dict[str, Any]]:
+        """All observation-source descriptors (exposure-filtered)."""
+        if self._device is None:
+            return []
+        try:
+            descriptors = self._device.sensor_descriptors()
+        except Exception:
+            descriptors = []
+        if not descriptors:
+            # Older devices only expose the Sensor inventory contract.
+            return [s.to_dict() for s in self._device.sensors()
+                    if self.sensor_exposed(s.id)]
+        return [d.to_dict() for d in descriptors
+                if self.sensor_exposed(d.id)]
+
+    def source(self, key: str) -> Optional[Dict[str, Any]]:
+        for desc in self.sources():
+            if key in (desc.get("id"), desc.get("name")):
+                return desc
+        matches = [d for d in self.sources()
+                   if d.get("modality") == key or d.get("type") == key]
+        return matches[0] if len(matches) == 1 else None
+
+    def source_observations(self, source_id: str,
+                            cursor: int = 0) -> Optional[Dict[str, Any]]:
+        """Canonical name for the sensor tail endpoint."""
+        return self.tail_sensor(source_id, cursor)
+
+    def _minutes_root(self):
+        from pathlib import Path
+        from ..settings import config_dir
+        configured = self.config.get("data_dir")
+        return Path(configured).expanduser() if configured \
+            else config_dir() / "minutes"
+
+    def minutes(self) -> List[Dict[str, Any]]:
+        """Minute summaries under the node's data root."""
+        from whispy.minutes import iter_minute_dirs, read_minute
+        out = []
+        for d in iter_minute_dirs(self._minutes_root()):
+            try:
+                m = read_minute(d)
+                out.append({
+                    "minute_id": m.minute_id, "device_id": m.device_id,
+                    "start_timestamp": m.start_timestamp,
+                    "end_timestamp": m.end_timestamp,
+                    "sources": len(m.sources),
+                    "predictions": len(m.predictions),
+                    "labels": m.labels.get("labels") or [],
+                    "canonical": (d / "minute.json").exists(),
+                })
+            except Exception as exc:
+                out.append({"minute_id": d.name, "error": str(exc)})
+        return out
+
+    def minute(self, minute_id: str) -> Optional[Dict[str, Any]]:
+        from whispy.minutes import iter_minute_dirs, read_minute
+        for d in iter_minute_dirs(self._minutes_root()):
+            if d.name == minute_id:
+                return read_minute(d).to_dict()
+        return None
+
+    def minute_second(self, minute_id: str, index: int
+                      ) -> Optional[Dict[str, Any]]:
+        """Second-level view of one minute (legacy chunk data normalized)."""
+        manifest = self.minute(minute_id)
+        if manifest is None:
+            return None
+        seconds = (manifest.get("quality") or {}).get("seconds") or []
+        for entry in seconds:
+            if entry.get("second_index") == index:
+                return entry
+        return {"minute_id": minute_id, "second_index": index,
+                "status": "missing"}
+
+    def infer(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """One-shot inference on the live window → canonical InferenceResult."""
+        from whispy.contracts import (
+            InferenceRequest, InferenceResult, InferenceTrace)
+        req = InferenceRequest.from_dict(request)
+        started = time.time()
+        model = None
+        for m in self.registry.list():
+            if req.model_id in (m.runtime_model_id, m.name):
+                model = m
+                break
+        if model is None:
+            return InferenceResult(
+                request_id=req.request_id, status="failed",
+                error=f"unknown model {req.model_id!r}").to_dict()
+        if self._sync is None:
+            return InferenceResult(
+                request_id=req.request_id, status="failed",
+                error="daemon not started").to_dict()
+        try:
+            window = self._sync.rolling(
+                req.window_seconds or self.window_seconds)
+            pred = model.processor_impl().predict(window)
+            pred.device_id = self.device_id
+            pred.runtime_model_id = model.runtime_model_id
+            latency_ms = (time.time() - started) * 1000.0
+            trace = InferenceTrace(
+                model_id=req.model_id, runtime_id=model.runtime_model_id,
+                execution_device=self.device_id, execution_class="local",
+                input_interval={"start": window.start_timestamp,
+                                "end": window.end_timestamp},
+                inference_timestamp=started, latency_ms=latency_ms,
+                confidence=pred.confidence)
+            self.predictions.append(pred.to_dict())
+            self._fire_actions(model, pred)
+            return InferenceResult(request_id=req.request_id,
+                                   status="succeeded", prediction=pred,
+                                   trace=trace).to_dict()
+        except Exception as exc:
+            return InferenceResult(request_id=req.request_id,
+                                   status="failed", error=str(exc)).to_dict()
+
+    def privacy(self) -> Dict[str, Any]:
+        """Current exposure/privacy posture — what leaves this node."""
+        return {
+            "exposed": self._exposure(),
+            "local_api_host": str(self.config.get("local_host", "127.0.0.1")),
+            "brain_url": self.config.brain_url,
+            "paired": bool(self.config.device_token),
+        }
+
+    def sync_state(self) -> Dict[str, Any]:
+        """Upload/sync posture for captures and minutes."""
+        captures = self.captures.list()
+        return {
+            "captures_total": len(captures),
+            "captures_active": len(self.captures._active),
+            "minutes_root": str(self._minutes_root()),
+            "brain_url": self.config.brain_url,
+            "paired": bool(self.config.device_token),
+        }
+
     def run_forever(self) -> None:
         self.start()
         try:
