@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -21,6 +22,7 @@ class ConfigStore:
 
     def __init__(self, path: Optional[Path] = None):
         self.path = path or (config_dir() / "config.json")
+        self._lock = threading.Lock()
         self._data: Dict[str, Any] = self._load()
 
     def _load(self) -> Dict[str, Any]:
@@ -37,12 +39,27 @@ class ConfigStore:
         except OSError:
             pass
 
+    def reload(self) -> None:
+        """Re-read config.json — the daemon calls this on heartbeat ticks
+        so out-of-band writes (``thoth pair`` storing device_token) take
+        effect without a restart. A torn/failed read keeps the last good
+        state: replacing ``_data`` with {} would make the token/identity
+        getters regenerate and desync the running server."""
+        with self._lock:
+            try:
+                data = self._load()
+            except Exception:
+                return
+            if data:
+                self._data = data
+
     def get(self, key: str, default: Any = None) -> Any:
         return self._data.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
-        self._data[key] = value
-        self.save()
+        with self._lock:
+            self._data[key] = value
+            self.save()
 
     # -- identity -------------------------------------------------------------
     @property

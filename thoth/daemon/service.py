@@ -48,7 +48,8 @@ class ThothDaemon:
 
     def __init__(self, config: Optional[ConfigStore] = None,
                  window_seconds: float = 2.0, tick_hz: float = 2.0,
-                 serve_ui: Optional[bool] = None):
+                 serve_ui: Optional[bool] = None,
+                 dashboard_port: Optional[int] = None):
         self.config = config or ConfigStore()
         self.registry = ModelRegistry()
         self.deployments = DeploymentManager(self.registry)
@@ -80,6 +81,7 @@ class ThothDaemon:
         # None → follow config["dashboard_enabled"] (default on);
         # --no-dashboard passes False for this run.
         self._serve_ui = serve_ui
+        self._dashboard_port = dashboard_port
 
     # -- lifecycle --------------------------------------------------------------
     def start(self) -> "ThothDaemon":
@@ -134,7 +136,9 @@ class ThothDaemon:
         serve_ui = self._serve_ui
         if serve_ui is None:
             serve_ui = bool(self.config.get("dashboard_enabled", True))
-        dash_port = int(self.config.get("dashboard_port", 80))
+        dash_port = (self._dashboard_port
+                     if self._dashboard_port is not None
+                     else int(self.config.get("dashboard_port", 80)))
         ui_on_api = False
         if not serve_ui:
             logger.info("dashboard disabled — API-only mode")
@@ -347,12 +351,22 @@ class ThothDaemon:
 
         Runs at most every ``heartbeat_interval_s`` (default 30s — Brain's
         online timeout is 90s). No-op until a device token is configured.
+        Reloads config each tick so ``thoth pair`` on a running daemon
+        takes effect without a restart; the WS tunnel is (re)started the
+        first time a token appears.
         Failures are logged at debug level: an unreachable Brain must never
         disturb local sensing.
         """
+        try:
+            self.config.reload()
+        except Exception:
+            pass
         token = self.config.device_token
         if not token:
             return
+        if self._brain_ws is None:
+            logger.info("device token found — starting Brain channel")
+            self._start_brain_ws()
         interval = float(self.config.get("heartbeat_interval_s", 30.0))
         now = time.time()
         if now - self._last_heartbeat < interval:

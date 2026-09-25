@@ -82,8 +82,12 @@ def main(ctx, port):
 @click.option("--dashboard/--no-dashboard", "dashboard", default=None,
               help="serve the local dashboard UI (default: on, or the "
                    "dashboard_enabled config key)")
+@click.option("--dashboard-port", "dashboard_port", default=None, type=int,
+              help="port for the dashboard UI (default: 80, or the "
+                   "dashboard_port config key; falls back to the API port "
+                   "when unbindable)")
 @click.pass_context
-def daemon(ctx, window, tick, stop, status_, dashboard):
+def daemon(ctx, window, tick, stop, status_, dashboard, dashboard_port):
     """Run the node service in the foreground (single instance).
 
     ``thoth daemon --stop`` / ``--status`` control a running daemon via
@@ -127,7 +131,8 @@ def daemon(ctx, window, tick, stop, status_, dashboard):
 
     from ..daemon import ThothDaemon
     _write_pid()
-    d = ThothDaemon(window_seconds=window, tick_hz=tick, serve_ui=dashboard)
+    d = ThothDaemon(window_seconds=window, tick_hz=tick,
+                    serve_ui=dashboard, dashboard_port=dashboard_port)
     # SIGTERM → graceful stop so --stop works cross-platform.
     signal.signal(signal.SIGTERM, lambda *_: d.stop() or sys.exit(0))
     click.echo("Starting Thoth daemon (Ctrl+C to stop)…")
@@ -285,16 +290,103 @@ def predict(ctx, label, confidence):
         sys.exit(1)
 
 
+def _brain_req(method: str, url: str, body=None,
+               token=None, secret=None):
+    """Minimal JSON request — stdlib only, no new deps."""
+    import urllib.request
+    import urllib.error
+    data = json.dumps(body).encode() if body is not None else None
+    r = urllib.request.Request(url, data=data, method=method)
+    r.add_header("Content-Type", "application/json")
+    if token:
+        r.add_header("Authorization", f"Bearer {token}")
+    if secret:
+        r.add_header("X-Pairing-Secret", secret)
+    try:
+        with urllib.request.urlopen(r, timeout=15) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except Exception:
+            return e.code, {}
+
+
 @main.command()
+@click.option("--user", "user", default=None,
+              help="portal username/email (prompted when omitted)")
+@click.option("--password", default=None,
+              help="portal password (prompted when omitted)")
+@click.option("--brain", "brain", default=None,
+              help="Brain base URL (default: configured or "
+                   "https://api.thothcraft.com)")
 @click.pass_context
-def pair(ctx):
-    """Start device pairing with Brain (prints a claim code)."""
+def pair(ctx, user, password, brain):
+    """Pair this node with the portal (Brain) — full handshake.
+
+    Logs in as the portal user, starts device pairing, claims the code,
+    and writes the resulting device token into ~/.thoth/config.json.
+    A running daemon picks it up on its next heartbeat (~30 s); otherwise
+    restart with ``thoth daemon --stop`` + ``thoth daemon``.
+    """
+    import socket
+    import time as _time
+
     cfg = ctx.obj["config"]
-    click.echo(f"device_id: {cfg.device_id}")
-    click.echo(f"device_name: {cfg.device_name}")
-    click.echo(f"brain: {cfg.brain_url}")
-    click.echo("Pairing handshake is driven by the daemon once a Brain "
-               "device token is configured (BRAIN_AUTH_TOKEN).")
+    brain = (brain or cfg.brain_url).rstrip("/")
+
+    if not user:
+        user = click.prompt("Portal username or email")
+    if not password:
+        password = click.prompt("Portal password", hide_input=True)
+
+    # 1. user login → JWT for the claim call
+    st, body = _brain_req("POST", f"{brain}/api/token",
+                          {"username": user, "password": password})
+    if st != 200 or not body.get("access_token"):
+        click.echo(f"login failed: {st} {body.get('detail') or body}",
+                   err=True)
+        sys.exit(1)
+    user_token = body["access_token"]
+
+    # 2. start pairing (unauthenticated device call)
+    st, body = _brain_req("POST", f"{brain}/api/device/pairing/start", {
+        "device_id": cfg.device_id,
+        "device_name": cfg.device_name,
+        "device_type": "thoth",
+        "hardware_info": {"hostname": socket.gethostname()}})
+    if st != 200:
+        click.echo(f"pairing/start failed: {st} "
+                   f"{body.get('detail') or body}", err=True)
+        sys.exit(1)
+    code, secret = body["code"], body["pairing_secret"]
+
+    # 3. claim the code as the user
+    st, body = _brain_req("POST", f"{brain}/api/device/pairing/claim",
+                          {"code": code}, token=user_token)
+    if st != 200:
+        click.echo(f"pairing/claim failed: {st} "
+                   f"{body.get('detail') or body}", err=True)
+        sys.exit(1)
+
+    # 4. poll status → device JWT
+    body = {}
+    for _ in range(15):
+        st, body = _brain_req("GET", f"{brain}/api/device/pairing/status",
+                              secret=secret)
+        if body.get("status") == "paired":
+            break
+        _time.sleep(1)
+    if body.get("status") != "paired" or not body.get("access_token"):
+        click.echo(f"pairing/status timed out: {body}", err=True)
+        sys.exit(1)
+
+    cfg.set("device_token", body["access_token"])
+    cfg.set("brain_url", brain)
+    cfg.set("paired_user", (body.get("user") or {}).get("username"))
+    click.echo(f"paired — {cfg.device_name} ({cfg.device_id}) → {brain}")
+    click.echo("The daemon picks up the token on its next heartbeat; "
+               "restart it to connect immediately.")
 
 
 @main.command()

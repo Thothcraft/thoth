@@ -466,6 +466,26 @@ class _FastBindHTTPServer(ThreadingHTTPServer):
         self.server_port = port
 
 
+class _DualStackHTTPServer(_FastBindHTTPServer):
+    """IPv6 wildcard socket with V6ONLY=0 — accepts v4-mapped clients too.
+
+    Avahi/Bonjour advertise AAAA records for ``thoth-*.local``; an
+    IPv4-only listener makes the dashboard unreachable for clients that
+    prefer the v6 address.
+    """
+
+    address_family = __import__("socket").AF_INET6
+
+    def server_bind(self) -> None:
+        import socket
+        try:
+            self.socket.setsockopt(socket.IPPROTO_IPV6,
+                                   socket.IPV6_V6ONLY, 0)
+        except OSError:
+            pass
+        super().server_bind()
+
+
 class LocalAPIServer:
     """Threaded loopback HTTP server hosting the node's local API.
 
@@ -485,8 +505,19 @@ class LocalAPIServer:
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
+    def _make_server(self):
+        """Wildcard binds prefer a dual-stack socket; explicit/loopback
+        hosts stay on the default IPv4 class."""
+        if self.host in ("0.0.0.0", "::", ""):
+            try:
+                return _DualStackHTTPServer(("::", self.port), _Handler)
+            except OSError:
+                # No IPv6 on this host — plain IPv4 wildcard.
+                pass
+        return _FastBindHTTPServer((self.host, self.port), _Handler)
+
     def start(self) -> "LocalAPIServer":
-        httpd = _FastBindHTTPServer((self.host, self.port), _Handler)
+        httpd = self._make_server()
         httpd.daemon_ref = self.daemon  # type: ignore[attr-defined]
         httpd.token = self.token        # type: ignore[attr-defined]
         httpd.serve_ui = self.serve_ui  # type: ignore[attr-defined]
