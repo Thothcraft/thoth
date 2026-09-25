@@ -18,7 +18,41 @@ import sys
 import click
 
 from ..ipc import DaemonClient, DaemonUnavailable
-from ..settings import ConfigStore
+from ..settings import ConfigStore, config_dir
+
+
+# -- daemon lifecycle (pidfile) -----------------------------------------------
+def _pidfile():
+    return config_dir() / "daemon.pid"
+
+
+def _read_pid() -> int | None:
+    try:
+        return int(json.loads(_pidfile().read_text())["pid"])
+    except Exception:
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        import os
+        os.kill(pid, 0)
+        return True
+    except (OSError, OverflowError):
+        return False
+
+
+def _write_pid() -> None:
+    import os
+    _pidfile().write_text(json.dumps({"pid": os.getpid(),
+                                     "started_at": __import__("time").time()}))
+
+
+def _clear_pid() -> None:
+    try:
+        _pidfile().unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _client(ctx) -> DaemonClient:
@@ -43,11 +77,61 @@ def main(ctx, port):
 @main.command()
 @click.option("--window", default=2.0, type=float, help="window seconds")
 @click.option("--tick", default=2.0, type=float, help="loop rate Hz")
-def daemon(window, tick):
-    """Run the persistent node service in the foreground."""
+@click.option("--stop", is_flag=True, help="stop the running daemon")
+@click.option("--status", "status_", is_flag=True, help="show daemon state")
+@click.pass_context
+def daemon(ctx, window, tick, stop, status_):
+    """Run the node service in the foreground (single instance).
+
+    ``thoth daemon --stop`` / ``--status`` control a running daemon via
+    its pidfile (~/.thoth/daemon.pid); a second start refuses while one
+    is already running.
+    """
+    import os
+    import signal
+
+    if status_:
+        pid = _read_pid()
+        if pid and _pid_alive(pid):
+            click.echo(f"daemon running: pid {pid}")
+        else:
+            _clear_pid()
+            click.echo("daemon not running")
+            sys.exit(1)
+        return
+
+    if stop:
+        pid = _read_pid()
+        if not pid or not _pid_alive(pid):
+            _clear_pid()
+            click.echo("daemon not running", err=True)
+            sys.exit(1)
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(30):
+            if not _pid_alive(pid):
+                break
+            __import__("time").sleep(0.3)
+        _clear_pid()
+        click.echo(f"daemon stopped (pid {pid})")
+        return
+
+    existing = _read_pid()
+    if existing and _pid_alive(existing):
+        click.echo(f"daemon already running (pid {existing}) — refusing "
+                   "to start a second instance", err=True)
+        sys.exit(1)
+    _clear_pid()
+
     from ..daemon import ThothDaemon
+    _write_pid()
+    d = ThothDaemon(window_seconds=window, tick_hz=tick)
+    # SIGTERM → graceful stop so --stop works cross-platform.
+    signal.signal(signal.SIGTERM, lambda *_: d.stop() or sys.exit(0))
     click.echo("Starting Thoth daemon (Ctrl+C to stop)…")
-    ThothDaemon(window_seconds=window, tick_hz=tick).run_forever()
+    try:
+        d.run_forever()
+    finally:
+        _clear_pid()
 
 
 @main.command()
