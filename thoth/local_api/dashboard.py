@@ -45,9 +45,30 @@ pre{background:#10141c;border:1px solid var(--line);border-radius:6px;padding:10
 overflow:auto;max-height:300px;font-size:12px;margin:6px 0}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .muted{color:var(--dim)}.page{display:none}.page.on{display:block}
+#gate{position:fixed;inset:0;background:var(--bg);z-index:99;
+display:none;align-items:center;justify-content:center}
+#gate.on{display:flex}
+.gatecard{background:var(--panel);border:1px solid var(--line);
+border-radius:14px;padding:34px 38px;width:340px;text-align:center;
+box-shadow:0 18px 50px #0008}
+.gatecard h2{margin:0 0 4px;font-size:20px}
+.gatecard .sub{color:var(--dim);font-size:12px;margin-bottom:22px}
+.gatecard input{width:100%;text-align:center;margin-bottom:12px}
+.gatecard button{width:100%}
+.gatecard .err{color:var(--err);font-size:12px;min-height:16px;margin-top:10px}
 #liveOut{max-height:260px}
 small{font-size:11px}
 </style></head><body>
+<div id="gate"><div class="gatecard">
+<h2>&#9672; thoth node</h2>
+<div class="sub" id="gateSub">sign in to this node</div>
+<input id="gtok" type="password" placeholder="node token"
+  autocomplete="current-password">
+<button class="go" onclick="unlock()">sign in</button>
+<div class="err" id="gateErr"></div>
+<small class="muted">token = the node's <code>local_token</code>
+(config/CLI <code>thoth token</code>) or the pairing secret</small>
+</div></div>
 <header><b>◈ thoth node</b><span id="devname" class="muted"></span>
 <nav>
 <button data-p="status" class="on">Status</button>
@@ -136,13 +157,32 @@ let TOKEN = new URLSearchParams(location.search).get('token')
         || localStorage.getItem('thoth_tok') || '';
 if (TOKEN) localStorage.setItem('thoth_tok', TOKEN);
 document.getElementById('tok').value = TOKEN;
+const gate=document.getElementById('gate'),
+      gateErr=document.getElementById('gateErr'),
+      gtok=document.getElementById('gtok');
+function showGate(msg){gate.classList.add('on');gateErr.textContent=msg||'';
+  if(msg==null)gtok.value=''; gtok.focus();}
+function hideGate(){gate.classList.remove('on');}
+gtok.addEventListener('keydown',e=>{if(e.key==='Enter')unlock();});
+async function unlock(){
+  const t=gtok.value.trim(); if(!t)return;
+  TOKEN=t; const r=await api('/api/status');
+  if(r.status===401||r.status===403){TOKEN='';gateErr.textContent='invalid token';return;}
+  if(r.status>=400){TOKEN='';gateErr.textContent='node error ('+r.status+')';return;}
+  localStorage.setItem('thoth_tok',TOKEN);
+  document.getElementById('tok').value=TOKEN;
+  hideGate(); refresh();
+}
 function saveTok(){TOKEN=document.getElementById('tok').value;
   localStorage.setItem('thoth_tok',TOKEN); refresh();}
+if(!TOKEN) showGate();
 async function api(path, opt){
   opt = opt||{}; opt.headers = Object.assign(
     {'Authorization':'Bearer '+TOKEN}, opt.headers||{});
   const r = await fetch(path, opt);
   let body=null; try{body=await r.json();}catch(e){}
+  if(r.status===401||r.status===403){localStorage.removeItem('thoth_tok');
+    showGate('session expired — sign in again');}
   return {status:r.status, body};
 }
 const post=(p,b)=>api(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
@@ -304,7 +344,7 @@ async function createAuto(){
 async function toggleAuto(id,en){await post('/api/automations/'+id,{enabled:en});loadAutos();}
 async function delAuto(id){await fetch('/api/automations/'+id,{method:'DELETE',headers:{'Authorization':'Bearer '+TOKEN}});loadAutos();}
 
-async function refresh(){if(!TOKEN)return; await loadStatus();}
+async function refresh(){if(!TOKEN){showGate();return;} await loadStatus();}
 refresh(); setInterval(loadStatus,5000);
 </script></body></html>
 """

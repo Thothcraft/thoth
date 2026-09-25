@@ -13,6 +13,7 @@ dependencies = [
     "whispy>=0.1.0",
     "click>=8.1",
     "websockets>=12.0",   # outbound Brain WS channel (CONTRACT §2)
+    "zeroconf>=0.131",    # mDNS: advertise <name>.local on LAN binds
 ]
 
 [project.scripts]

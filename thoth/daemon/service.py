@@ -164,6 +164,24 @@ class ThothDaemon:
                                    token=token, serve_ui=ui_on_api,
                                    dashboard_dir=dash_dir)
         self._api.start()
+        self._start_mdns(dash_port if self._dash is not None
+                         else api_port)
+
+    def _start_mdns(self, port: int) -> None:
+        """Advertise <device_name>.local + <hostname>.local over mDNS so
+        nodes on OSes without a responder (Windows) resolve .local too.
+        Only meaningful on a LAN-facing bind; loopback skips it."""
+        host = str(self.config.get("local_host", "127.0.0.1"))
+        if host != "0.0.0.0":
+            return
+        try:
+            from ..mdns import MdnsAdvertiser
+            import socket as _s
+            names = {self.config.device_name, _s.gethostname()}
+            self._mdns = MdnsAdvertiser().start(
+                names, port, device_id=self.device_id)
+        except Exception as exc:
+            logger.debug("mDNS advertiser not started: %s", exc)
 
     def _start_brain_ws(self) -> None:
         """Outbound Brain channel (CONTRACT §2) — only when paired."""
@@ -264,6 +282,11 @@ class ThothDaemon:
 
     def stop(self) -> None:
         self._stop.set()
+        if getattr(self, "_mdns", None) is not None:
+            try:
+                self._mdns.close()
+            except Exception:
+                pass
         if self._brain_ws is not None:
             try:
                 self._brain_ws.stop()

@@ -163,8 +163,9 @@ class _Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         qs = parse_qs(urlparse(self.path).query)
         serve_ui = bool(getattr(self.server, "serve_ui", True))
-        # The dashboard page + capture downloads authenticate via ?token=
-        # because the browser cannot set Authorization on document fetches.
+        # The dashboard shell is public (it renders a sign-in gate);
+        # only /api/* data endpoints require the bearer token. ?token=
+        # is still honoured for backward-compat deep links.
         if path in ("/", "/dashboard", "/index.html"):
             if not serve_ui:
                 # API-only port: hand the browser over to the dashboard
@@ -180,9 +181,6 @@ class _Handler(BaseHTTPRequestHandler):
                     if tok:
                         loc += f"?token={tok}"
                     return self._redirect(loc)
-                return self._json(401, {"error": "unauthorized; "
-                                        "open /?token=<local_token>"})
-            if not self._dashboard_authorized(qs):
                 return self._json(401, {"error": "unauthorized; "
                                         "open /?token=<local_token>"})
             index = self._dashboard_index()
@@ -202,8 +200,6 @@ class _Handler(BaseHTTPRequestHandler):
             from .dashboard import PAGE   # dist absent → legacy page
             return self._html(200, PAGE, set_cookie=self._token_qs_ok(qs))
         if serve_ui and path.startswith("/assets/"):
-            if not self._dashboard_authorized(qs):
-                return self._json(401, {"error": "unauthorized"})
             return self._static(path)
         if path.startswith("/api/captures/") and path.endswith("/download") \
                 and not self._authorized_header():

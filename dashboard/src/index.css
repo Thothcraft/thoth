@@ -113,3 +113,12 @@ a { color: var(--acc); }
 .field input, .field select { width: 100%; }
 .split { display: flex; gap: 8px; }
 .split > * { flex: 1; }
+
+/* sign-in gate */
+.gate { position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; z-index: 99; }
+.gatecard { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 34px 38px; width: 340px; text-align: center; box-shadow: 0 18px 50px rgba(0,0,0,.5); }
+.gatecard h2 { margin: 0 0 4px; font-size: 20px; }
+.gatecard .sub { color: var(--dim); font-size: 12px; margin-bottom: 22px; }
+.gatecard input { width: 100%; text-align: center; margin-bottom: 12px; }
+.gatecard button { width: 100%; }
+.gatecard .err { color: var(--err); font-size: 12px; min-height: 16px; margin: 10px 0 8px; }

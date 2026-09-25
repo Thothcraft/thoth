@@ -28,6 +28,11 @@ export function saveToken(t: string) {
   localStorage.setItem('thoth_tok', token)
 }
 
+export function clearToken() {
+  token = ''
+  localStorage.removeItem('thoth_tok')
+}
+
 export interface ApiResult<T = unknown> {
   status: number
   body: T | null
