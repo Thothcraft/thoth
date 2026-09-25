@@ -205,6 +205,20 @@ class BrainWSClient:
                                       ping_timeout=20) as ws:
             self._ws = ws
             logger.info("brain ws connected: %s", url.split("?")[0])
+            # CONTRACT §1.2 — re-sync room + metadata on (re)connect so
+            # Brain's cache converges even if change events were lost.
+            daemon = self._daemon
+            if daemon is not None and self._outbox is not None:
+                try:
+                    self._outbox.put_nowait({
+                        "type": "metadata",
+                        "data": daemon.metadata.document()})
+                    room_doc = daemon.room.document()
+                    if room_doc.get("updated_at"):
+                        self._outbox.put_nowait({
+                            "type": "room_changed", "data": room_doc})
+                except Exception as exc:
+                    logger.debug("connect resync failed: %s", exc)
             sender = asyncio.create_task(self._drain(ws))
             try:
                 async for raw in ws:
