@@ -47,7 +47,7 @@ class Params:
     # -- stack heights -----------------------------------------------------
     under_board_slim: float = 4.0           # clearance under Pi PCB
     under_board_battery: float = 20.0       # PiSugar 3 Plus ~15 + frame ~4 + margin (VERIFY)
-    hat_gap: float = 20.0                   # Pi top → HAT bottom (covers active cooler + tall header)
+    hat_gap: float = 16.0                   # Pi top → HAT bottom — measured: active cooler + ~2 mm
     hat_t: float = 1.6
     radar_head: float = 8.0                 # radar HAT top side clearance
     sense_head: float = 13.0                # Sense HAT joystick ≈ 10 mm + margin
@@ -80,8 +80,13 @@ class Params:
     ps_button_y: float = 28.0               # power button, south wall (VERIFY)
     ps_button_r: float = 2.5
     # -- radar lid ------------------------------------------------------------
-    hat_offset: tuple = (10.0, 0.0)         # HAT board SW corner on Pi board (VERIFY)
-    radar_ant_xy: tuple = (32.5, 20.0)      # antenna centre on DreamHAT+ (MEASURE!)
+    # DreamHAT+ is 65x56.5 with the GPIO header along its bottom edge —
+    # mounted it spans Pi y in [-0.5, 56], x in [0, 65] (mounting holes
+    # share the Pi's 58x49 grid). SW corner sits at Pi (0, -0.5).
+    hat_offset: tuple = (0.0, -0.5)         # HAT SW corner on Pi board
+    radar_ant_xy: tuple = (30.0, 26.5)      # BGT60TR13C centre on HAT, from its
+                                            # SW corner (= 30,30 down-right from
+                                            # the notch-adjacent top-left corner)
     radar_aperture: tuple = (16.0, 22.0)    # opening W×H at inner face — covers 40°×65° FOV
     radar_membrane: float = 1.0             # 0 → fully open aperture
     # -- sense lid -------------------------------------------------------------

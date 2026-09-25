@@ -12,6 +12,10 @@ Pi4/5), **Y = the 56 mm edge** (GPIO header runs along north).
 | Mounting holes | M2.5, inset 3.5 / 3.5, span 58 × 49 | same |
 | Sense HAT PCB | 65.1 × 56.5 × ~1.6 | Raspberry Pi HAT spec / Sense HAT mech |
 | DreamHAT+ FOV | 40° horiz, 65° vert (effective) | vendor datasheet (BGT60TR13C, 58–63.5 GHz, 1TX+3RX AiP 6.5×5.0 mm) |
+| DreamHAT+ PCB | 65 × 56.5, GPIO header on bottom edge, notches at top corners | vendor dimension drawing + on-device check |
+| DreamHAT+ chip centre | (30, 26.5) from HAT SW corner | measured on device: 30 mm down / 30 mm right from the notch-adjacent top-left corner |
+| `hat_gap` | 16.0 | measured: Pi5 Active Cooler (~13.5) + ~2 mm air to HAT underside |
+| `hat_offset` | (0, −0.5) | HAT SW corner on Pi board — holes share the Pi 58×49 grid, board spans y −0.5…56 |
 | PiSugar 3 Plus PCB | 65 × 56 | PiSugar product wiki |
 | 60 GHz λ (free space) | ~5 mm | membrane 1.0 mm ≪ λ — thin uniform dielectric |
 
@@ -20,9 +24,7 @@ Pi4/5), **Y = the 56 mm edge** (GPIO header runs along north).
 | param | default | why it matters |
 | ----- | ------- | -------------- |
 | `under_board_battery` | 20.0 | PiSugar 3 Plus ~15 mm incl. cell + ~4 mm pogo frame + margin — **measure the assembled Pi+PiSugar height under the PCB** |
-| `hat_gap` | 20.0 | Pi top → HAT bottom. Active Cooler ≈ 12–13 mm + gap. Stock 8.5 mm header **won't clear the cooler** — you need a tall stacking header; measure the real stack |
-| `hat_offset` | (10, 0) | HAT SW corner on the Pi board (HATs are narrower than the Pi) |
-| `radar_ant_xy` | (32.5, 20) | **antenna centre on the DreamHAT+** — measured from the HAT's SW corner. The aperture + membrane sit directly over this point; a ±2 mm error is absorbed by the pocket flare, more is not |
+| `radar_ant_xy` | (30, 26.5) | **measured on the real board** — see locked table; keep as param in case boards rev |
 | `radar_aperture` | 16 × 22 | opening at membrane level; with `radar_head` = 8 this covers the full 40°H × 65°V cone with ~±2 mm slack |
 | `sense_matrix_xy` / `sense_matrix_wh` | (28, 38) / 34×34 | 8×8 LED matrix centre/size on the HAT |
 | `sense_joy_xy` / `sense_joy_r` | (40, 14) / 6 | joystick centre + opening radius (Ø12) |

@@ -16,7 +16,7 @@ hole_inset = [3.5, 3.5];  hole_span = [58, 49];
 // ---------------- stack heights -----------------
 under_board_slim    = 4;
 under_board_battery = 20;              // PiSugar 3 Plus stack  // VERIFY
-hat_gap      = 20;                     // Pi top → HAT bottom (active cooler + tall header)
+hat_gap      = 16;                     // Pi top → HAT bottom — measured: cooler + ~2 mm
 hat_t        = 1.6;
 radar_head   = 8;
 sense_head   = 13;                     // joystick ≈10 mm
@@ -40,8 +40,11 @@ ps_west_window = [14, 44];  ps_window_h = 8;    // VERIFY
 ps_button_y = 28;  ps_button_r = 2.5;           // VERIFY
 
 // ---------------- radar lid --------------------------
-hat_offset = [10, 0];                            // HAT SW corner on Pi  // VERIFY
-radar_ant_xy   = [32.5, 20];                     // antenna centre on HAT // MEASURE
+// DreamHAT+ 65x56.5, header along bottom edge; mounted it spans
+// Pi y in [-0.5,56], x in [0,65] (holes share the 58x49 grid).
+hat_offset = [0, -0.5];                        // HAT SW corner on Pi board
+radar_ant_xy   = [30, 26.5];                   // BGT60TR13C centre, from HAT SW
+                                             // (=30,30 down-right from top-left)
 radar_aperture = [16, 22];                       // covers 40°H × 65°V FOV
 radar_membrane = 1.0;                            // 0 = fully open
 
