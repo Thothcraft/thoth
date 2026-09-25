@@ -138,6 +138,31 @@ class ActionScheduler:
                  model_id: str = "") -> None:
         self.submit(action_cfg, prediction, model_id=model_id)
 
+    def fire_now(self, action_cfg: Dict[str, Any], prediction: Any,
+                 model_id: str = "") -> None:
+        """Dispatch immediately — the caller (automations) already decided
+        the action should fire. Cooldown is still honored via last_fired."""
+        from whispy.contracts import Action
+        try:
+            action = Action.from_dict(action_cfg)
+        except Exception as exc:
+            logger.warning("bad fire_now action config: %s", exc)
+            return
+        key = _action_key(model_id or "auto", action, action_cfg)
+        now = self._clock()
+        with self._cond:
+            st = self._states.get(key)
+            if st is None:
+                st = _ActionState(key, action, action_cfg)
+                self._states[key] = st
+            st.action = action
+            if action.cooldown_seconds and st.last_fired is not None and \
+                    (now - st.last_fired) < action.cooldown_seconds:
+                return
+            st.pred = prediction
+            st.due = now
+            self._cond.notify_all()
+
     # -- scheduler loop -------------------------------------------------------
     def _run(self) -> None:
         while not self._stop.is_set():

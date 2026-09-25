@@ -105,3 +105,112 @@ class CaptureManager:
         if manifest.exists():
             return json.loads(manifest.read_text())
         return None
+
+    # -- annotation ------------------------------------------------------------
+    def _write_manifest(self, rec: Dict[str, Any]) -> None:
+        (self._dir(rec["id"]) / "manifest.json").write_text(
+            json.dumps(rec, indent=2))
+
+    def add_label(self, capture_id: str, label: str, source: str = "manual",
+                  start: Optional[float] = None, end: Optional[float] = None,
+                  confidence: Optional[float] = None,
+                  model_id: str = "") -> Optional[Dict[str, Any]]:
+        """Append one label to the capture manifest.
+
+        ``source`` records provenance: ``manual`` from the dashboard,
+        ``auto`` from a model prediction. ``start``/``end`` scope the
+        label inside the capture; omitting them means "whole capture".
+        """
+        rec = self.get(capture_id)
+        if rec is None:
+            return None
+        entry = {
+            "label": str(label),
+            "source": source,
+            "start": float(start) if start is not None
+                     else float(rec.get("started_at") or 0.0),
+            "end": float(end) if end is not None
+                   else float(rec.get("stopped_at") or time.time()),
+            "confidence": confidence,
+            "model_id": model_id,
+            "at": time.time(),
+        }
+        rec.setdefault("labels", []).append(entry)
+        self._write_manifest(rec)
+        return entry
+
+    def clear_labels(self, capture_id: str,
+                     source: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Remove labels; ``source`` filters which provenance to drop."""
+        rec = self.get(capture_id)
+        if rec is None:
+            return None
+        labels = rec.get("labels") or []
+        rec["labels"] = [l for l in labels
+                         if source and l.get("source") != source]
+        self._write_manifest(rec)
+        return rec
+
+    def autolabel(self, capture_id: str,
+                  predictions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Label the capture from predictions inside its time span.
+
+        Every prediction whose timestamp falls in [started_at, stopped_at]
+        becomes a ``source="auto"`` label. Idempotent: existing auto labels
+        are replaced, manual labels are preserved.
+        """
+        rec = self.get(capture_id)
+        if rec is None:
+            return None
+        t0 = float(rec.get("started_at") or 0.0)
+        t1 = float(rec.get("stopped_at") or time.time())
+        manual = [l for l in (rec.get("labels") or [])
+                  if l.get("source") != "auto"]
+        auto = []
+        for p in predictions:
+            try:
+                ts = float(p.get("timestamp") or p.get("at") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if not (t0 <= ts <= t1):
+                continue
+            auto.append({
+                "label": str(p.get("label") or p.get("class") or "?"),
+                "source": "auto",
+                "start": ts, "end": ts,
+                "confidence": p.get("confidence"),
+                "model_id": str(p.get("runtime_model_id")
+                                or p.get("model_id") or ""),
+                "at": ts,
+            })
+        rec["labels"] = manual + auto
+        self._write_manifest(rec)
+        return rec
+
+    # -- lifecycle --------------------------------------------------------------
+    def delete(self, capture_id: str) -> bool:
+        """Remove a capture directory entirely. Active captures refuse."""
+        if capture_id in self._active:
+            return False
+        d = self._dir(capture_id)
+        if not d.is_dir():
+            return False
+        import shutil
+        shutil.rmtree(d)
+        return True
+
+    def export(self, capture_id: str) -> Optional[Path]:
+        """Write ``<capture_id>.zip`` next to the capture dir; return its path."""
+        import zipfile
+        d = self._dir(capture_id)
+        if not d.is_dir():
+            return None
+        # Refresh the manifest so counts/labels are current in the bundle.
+        rec = self.get(capture_id)
+        if rec is not None:
+            self._write_manifest(rec)
+        out = self.root / f"{capture_id}.zip"
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(d.iterdir()):
+                zf.write(f, arcname=f"{capture_id}/{f.name}")
+        return out

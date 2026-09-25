@@ -35,6 +35,37 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(401, {"error": "unauthorized"})
         return False
 
+    def _token_qs_ok(self, qs) -> bool:
+        """Browser-doc auth: ``?token=<local_token>`` for page/asset fetches
+        where no Authorization header can be set (initial GET /, downloads)."""
+        token = self.server.token  # type: ignore[attr-defined]
+        return bool(token) and (qs.get("token", [""])[0] == token)
+
+    def _html(self, code: int, body: str) -> None:
+        data = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _file(self, path, download_name: Optional[str] = None) -> None:
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return self._json(404, {"error": "not found"})
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition",
+                         f'attachment; filename="{download_name or path.name}"')
+        self.end_headers()
+        self.wfile.write(data)
+        try:
+            path.unlink()                    # export artifact is ephemeral
+        except OSError:
+            pass
+
     def _body(self) -> dict:
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -53,10 +84,28 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- routes ---------------------------------------------------------------
     def do_GET(self):
-        if not self._authorized():
-            return
         path = urlparse(self.path).path
         qs = parse_qs(urlparse(self.path).query)
+        # The dashboard page + capture downloads authenticate via ?token=
+        # because the browser cannot set Authorization on document fetches.
+        if path in ("/", "/dashboard"):
+            if not self._token_qs_ok(qs):
+                return self._json(401, {"error": "unauthorized; "
+                                        "open /?token=<local_token>"})
+            from .dashboard import PAGE
+            return self._html(200, PAGE)
+        if path.startswith("/api/captures/") and path.endswith("/download") \
+                and not self._authorized_header():
+            if not self._token_qs_ok(qs):
+                return self._json(401, {"error": "unauthorized"})
+            d = self.daemon
+            cap_id = path[len("/api/captures/"):-len("/download")]
+            out = d.captures.export(cap_id)
+            if out is None:
+                return self._json(404, {"error": "no such capture"})
+            return self._file(out)
+        if not self._authorized():
+            return
         d = self.daemon
         if path == "/api/status":
             return self._json(200, d.status())
@@ -93,6 +142,20 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"models": [m.to_dict() for m in d.registry.list()]})
         if path == "/api/captures":
             return self._json(200, {"captures": d.captures.list()})
+        if path.startswith("/api/captures/") and path.endswith("/download"):
+            cap_id = path[len("/api/captures/"):-len("/download")]
+            out = d.captures.export(cap_id)
+            if out is None:
+                return self._json(404, {"error": "no such capture"})
+            return self._file(out)
+        if path.startswith("/api/captures/"):
+            rec = d.captures.get(path[len("/api/captures/"):])
+            return self._json(200 if rec else 404,
+                            rec or {"error": "no such capture"})
+        if path == "/api/automations":
+            return self._json(200, {"automations": d.automations.list()})
+        if path == "/api/v1/model-catalog":
+            return self._json(200, {"models": d.model_catalog()})
         if path == "/api/actions":
             return self._json(200, {"actions": list(d.dispatcher.results)})
         if path == "/api/deployments":
@@ -191,6 +254,32 @@ class _Handler(BaseHTTPRequestHandler):
             actuator_id = path[len("/api/actuators/"):-len("/actions")]
             result = d.execute_actuator(actuator_id, body)
             return self._json(200, result)
+        # -- automations + capture annotation ------------------------------------
+        if path == "/api/automations":
+            auto = d.automations.upsert(body)
+            return self._json(201, auto.to_dict())
+        if path.startswith("/api/automations/"):
+            auto = d.automations.upsert({"id": path[len("/api/automations/"):],
+                                         **body})
+            return self._json(200, auto.to_dict())
+        if path.startswith("/api/captures/"):
+            rest = path[len("/api/captures/"):]
+            parts = rest.rsplit("/", 1)
+            cap_id, op = parts[0], (parts[1] if len(parts) == 2 else "")
+            if op == "label":
+                entry = d.captures.add_label(cap_id, body.get("label") or "",
+                                             source="manual")
+                return self._json(201 if entry else 404,
+                                entry or {"error": "no such capture"})
+            if op == "autolabel":
+                rec = d.captures.autolabel(cap_id, list(d.predictions))
+                return self._json(200 if rec else 404,
+                                rec or {"error": "no such capture"})
+            if op == "clear-labels":
+                rec = d.captures.clear_labels(
+                    cap_id, source=body.get("source") or None)
+                return self._json(200 if rec else 404,
+                                rec or {"error": "no such capture"})
         # -- canonical v1 surface (§12) ---------------------------------------
         if path == "/api/v1/inference":
             return self._json(200, d.infer(body))
@@ -206,7 +295,27 @@ class _Handler(BaseHTTPRequestHandler):
             d.predictions.append(pred.to_dict())
             for model in d.registry.active():
                 d._fire_actions(model, pred)
+            d.automations.on_prediction(pred)
             return self._json(200, {"ok": True, "label": pred.label})
+        return self._json(404, {"error": "not found"})
+
+    def _authorized_header(self) -> bool:
+        token = self.server.token  # type: ignore[attr-defined]
+        return self.headers.get("Authorization", "") == f"Bearer {token}"
+
+    def do_DELETE(self):
+        if not self._authorized():
+            return
+        path = urlparse(self.path).path
+        d = self.daemon
+        if path.startswith("/api/automations/"):
+            ok = d.automations.remove(path[len("/api/automations/"):])
+            return self._json(200 if ok else 404, {"ok": ok})
+        if path.startswith("/api/captures/"):
+            ok = d.captures.delete(path[len("/api/captures/"):])
+            return self._json(200 if ok else 404,
+                            {"ok": ok, "error": None if ok else
+                             "active or missing capture"})
         return self._json(404, {"error": "not found"})
 
 

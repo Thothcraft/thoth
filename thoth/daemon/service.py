@@ -51,6 +51,8 @@ class ThothDaemon:
         self.deployments = DeploymentManager(self.registry)
         self.captures = CaptureManager()
         self.dispatcher = ActionScheduler()
+        from ..automation import AutomationManager
+        self.automations = AutomationManager(self.dispatcher.fire_now)
         self.window_seconds = window_seconds
         self.tick_hz = tick_hz
 
@@ -153,9 +155,14 @@ class ThothDaemon:
     def _tick(self) -> None:
         self._maybe_heartbeat()
         if self._sync is None:
+            # No streams: still drive time/schedule triggers (no features).
+            self.automations.tick()
             return
         window = self._sync.rolling(self.window_seconds)
         self._record_captures()
+        from whispy.windows import WindowFeatures
+        feats = WindowFeatures(window)
+        last_pred: Optional[Any] = None
         for model in self.registry.active():
             try:
                 proc = model.processor_impl()
@@ -168,6 +175,9 @@ class ThothDaemon:
                 continue
             self.predictions.append(prediction.to_dict())
             self._fire_actions(model, prediction)
+            self.automations.on_prediction(prediction, features=feats)
+            last_pred = prediction
+        self.automations.tick(prediction=last_pred, features=feats)
 
     def _fire_actions(self, model: Any, prediction: Any) -> None:
         for action_cfg in model.config.get("actions") or []:
@@ -398,6 +408,31 @@ class ThothDaemon:
 
     def recent_predictions(self, limit: int = 50) -> List[Dict[str, Any]]:
         return list(self.predictions)[-limit:]
+
+    def model_catalog(self) -> List[Dict[str, Any]]:
+        """Runnable models: local whispy inventory + Brain's cloud catalog
+        when the node is paired. Cloud failures degrade to local-only."""
+        from whispy.models.registry import models as whispy_models
+        out: List[Dict[str, Any]] = []
+        try:
+            out.extend(whispy_models())
+        except Exception as exc:
+            logger.debug("local model inventory failed: %s", exc)
+        token = self.config.device_token
+        if token and self.config.brain_url:
+            try:
+                import json as _json
+                import urllib.request as _req
+                req = _req.Request(
+                    f"{self.config.brain_url.rstrip('/')}/v1/models",
+                    headers={"Authorization": f"Bearer {token}"})
+                with _req.urlopen(req, timeout=8) as res:
+                    for m in _json.loads(res.read().decode()).get("models", []):
+                        m = dict(m); m.setdefault("source", "cloud")
+                        out.append(m)
+            except Exception as exc:
+                logger.debug("cloud model catalog unreachable: %s", exc)
+        return out
 
     # -- v1 API surface (§12) ---------------------------------------------------
     def compute(self) -> Dict[str, Any]:
