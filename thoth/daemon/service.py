@@ -52,6 +52,7 @@ class ThothDaemon:
         self.predictions: Deque[Dict[str, Any]] = deque(maxlen=500)
         self._cap_subs: Dict[str, Dict[str, Any]] = {}
         self._started_at: Optional[float] = None
+        self._last_heartbeat = 0.0
 
     # -- lifecycle --------------------------------------------------------------
     def start(self) -> "ThothDaemon":
@@ -137,6 +138,7 @@ class ThothDaemon:
             time.sleep(period)
 
     def _tick(self) -> None:
+        self._maybe_heartbeat()
         if self._sync is None:
             return
         window = self._sync.rolling(self.window_seconds)
@@ -158,6 +160,45 @@ class ThothDaemon:
         for action_cfg in model.config.get("actions") or []:
             self.dispatcher.submit(action_cfg, prediction,
                                    model_id=model.runtime_model_id)
+
+    # -- Brain heartbeat ---------------------------------------------------------
+    def _maybe_heartbeat(self) -> None:
+        """POST /api/device/heartbeat so the portal sees this node online.
+
+        Runs at most every ``heartbeat_interval_s`` (default 30s — Brain's
+        online timeout is 90s). No-op until a device token is configured.
+        Failures are logged at debug level: an unreachable Brain must never
+        disturb local sensing.
+        """
+        token = self.config.device_token
+        if not token:
+            return
+        interval = float(self.config.get("heartbeat_interval_s", 30.0))
+        now = time.time()
+        if now - self._last_heartbeat < interval:
+            return
+        self._last_heartbeat = now
+        try:
+            import json as _json
+            import socket as _socket
+            import urllib.request as _req
+            body = {
+                "device_id": self.device_id,
+                "device_name": self.config.device_name,
+                "device_type": "thoth",
+                "device_hostname": _socket.gethostname(),
+                "online": True,
+            }
+            req = _req.Request(
+                f"{self.config.brain_url.rstrip('/')}/api/device/heartbeat",
+                data=_json.dumps(body).encode(), method="POST",
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {token}"})
+            with _req.urlopen(req, timeout=10) as resp:
+                if resp.status != 200:
+                    logger.debug("heartbeat rejected: %s", resp.status)
+        except Exception as exc:
+            logger.debug("heartbeat failed: %s", exc)
 
     def _record_captures(self) -> None:
         """Flush each capture's private subscription queue to disk.
