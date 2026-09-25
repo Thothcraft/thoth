@@ -119,6 +119,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"minutes": d.minutes()})
         if path == "/api/v1/privacy":
             return self._json(200, d.privacy())
+        if path == "/api/v1/location":
+            # Node resolves its own public egress IP → postal metadata.
+            from whispy.geo import public_geo
+            return self._json(200, public_geo() or {"error": "unresolved"})
         if path == "/api/v1/sync":
             return self._json(200, d.sync_state())
         if path.startswith("/api/v1/minutes/"):
