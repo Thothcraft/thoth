@@ -47,6 +47,8 @@ class ThothDaemon:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._api = None
+        # action_id → ActionResult dict — idempotent actuator dispatch
+        self._action_results: Dict[str, Dict[str, Any]] = {}
         self.predictions: Deque[Dict[str, Any]] = deque(maxlen=500)
         self._cap_subs: Dict[str, Dict[str, Any]] = {}
         self._started_at: Optional[float] = None
@@ -244,6 +246,22 @@ class ThothDaemon:
         """
         from whispy.contracts import (
             ActionResult, ActionStatus, ActuatorCommand)
+        action_id = command.get("action_id")
+        expires_at = command.get("expires_at")
+        # Idempotent dispatch: a replayed action_id returns the stored
+        # result instead of re-executing (at-least-once → exactly-once).
+        if action_id and action_id in self._action_results:
+            out = dict(self._action_results[action_id])
+            out["deduplicated"] = True
+            return out
+        # Expired commands never execute — explicit terminal status.
+        if expires_at is not None and float(expires_at) < time.time():
+            out = ActionResult(
+                status=ActionStatus.EXPIRED, action_type="actuator",
+                detail="command expired before dispatch").to_dict()
+            if action_id:
+                self._action_results[action_id] = dict(out)
+            return out
         if not self.actuator_exposed(actuator_id):
             return ActionResult(
                 status=ActionStatus.UNSUPPORTED,
@@ -261,12 +279,15 @@ class ThothDaemon:
                 detail=f"unknown actuator {actuator_id!r}").to_dict()
         try:
             result = handle.execute(ActuatorCommand.from_dict(command))
-            return result.to_dict() if hasattr(result, "to_dict") \
+            out = result.to_dict() if hasattr(result, "to_dict") \
                 else dict(result)
         except Exception as exc:
-            return ActionResult(status=ActionStatus.FAILED,
-                                action_type="actuator",
-                                detail=str(exc)).to_dict()
+            out = ActionResult(status=ActionStatus.FAILED,
+                               action_type="actuator",
+                               detail=str(exc)).to_dict()
+        if action_id:
+            self._action_results[action_id] = dict(out)
+        return out
 
     # -- introspection -------------------------------------------------------------
     @property
