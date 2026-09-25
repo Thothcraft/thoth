@@ -28,6 +28,19 @@ from .actions import ActionScheduler
 logger = logging.getLogger(__name__)
 
 
+def _lan_ip() -> Optional[str]:
+    """Best-effort primary LAN IPv4 (UDP connect — no traffic is sent)."""
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = str(s.getsockname()[0])
+        s.close()
+        return ip
+    except Exception:
+        return None
+
+
 class ThothDaemon:
     """Persistent node service — owns the SMA loop and local API."""
 
@@ -188,6 +201,7 @@ class ThothDaemon:
                 "device_type": "thoth",
                 "device_hostname": _socket.gethostname(),
                 "online": True,
+                "hardware_info": self._heartbeat_inventory(),
             }
             req = _req.Request(
                 f"{self.config.brain_url.rstrip('/')}/api/device/heartbeat",
@@ -199,6 +213,35 @@ class ThothDaemon:
                     logger.debug("heartbeat rejected: %s", resp.status)
         except Exception as exc:
             logger.debug("heartbeat failed: %s", exc)
+
+    def _heartbeat_inventory(self) -> Dict[str, Any]:
+        """Sensor/actuator inventory + LAN endpoint for the registry.
+
+        Brain stores this under ``device.hardware_info``: ``local_api``
+        lets same-LAN clients (and Brain-side actuation) reach the node;
+        ``sensors`` feeds ``/v1/devices/{id}/sensors``.
+        """
+        sensors: List[Dict[str, Any]] = []
+        actuators: List[Dict[str, Any]] = []
+        if self._device is not None:
+            try:
+                sensors = [s.to_dict() for s in self._device.sensors()]
+            except Exception:
+                pass
+            try:
+                actuators = [a.to_dict() for a in self._device.actuators()]
+            except Exception:
+                pass
+        local_api: Dict[str, Any] = {}
+        host = _lan_ip()
+        if host:
+            local_api = {
+                "host": host,
+                "port": int(self.config.get("local_port", 5000)),
+                "token": self.config.local_token,
+            }
+        return {"sensors": sensors, "actuators": actuators,
+                "local_api": local_api}
 
     def _record_captures(self) -> None:
         """Flush each capture's private subscription queue to disk.
