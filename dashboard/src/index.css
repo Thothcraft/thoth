@@ -1,0 +1,115 @@
+/* Thoth node dashboard — ops console styling on the Thoth palette. */
+:root {
+  --bg: #0e1117;
+  --panel: #171c26;
+  --panel-2: #10141c;
+  --line: #2a3140;
+  --fg: #dbe2ee;
+  --dim: #8592a8;
+  --acc: #c96f3f;
+  --acc-dim: #a3502e;
+  --ok: #3fce8c;
+  --warn: #ffb84d;
+  --err: #ff6b6b;
+}
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.45 "Inter Variable", -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+header {
+  display: flex; align-items: center; gap: 16px; padding: 10px 18px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 9;
+}
+header .brand { font-size: 15px; font-weight: 600; }
+header .brand b { color: var(--acc); }
+header .devname { color: var(--dim); }
+
+nav { display: flex; gap: 4px; }
+nav a {
+  background: none; border: 1px solid transparent; color: var(--dim);
+  padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  text-decoration: none;
+}
+nav a.on { color: var(--fg); border-color: var(--acc); background: #1d2634; }
+
+input, select, textarea {
+  background: var(--panel-2); border: 1px solid var(--line);
+  color: var(--fg); border-radius: 6px; padding: 6px 9px; font: inherit;
+}
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--acc); }
+textarea { width: 100%; min-height: 110px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+input.num { width: 70px; }
+
+button {
+  background: #233047; border: 1px solid var(--line); color: var(--fg);
+  border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px;
+}
+button:hover { border-color: var(--acc); }
+button:disabled { opacity: 0.45; cursor: default; }
+button.go { background: #1d4a30; border-color: var(--ok); }
+button.danger { background: #452024; border-color: var(--err); }
+button.mini { padding: 2px 8px; font-size: 12px; }
+
+main { padding: 18px; max-width: 1400px; margin: auto; height: calc(100% - 50px); }
+
+.card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
+}
+.card h3 {
+  margin: 0 0 10px; font-size: 12px; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--dim);
+}
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { color: var(--dim); font-weight: 600; text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+td { padding: 5px 8px; border-bottom: 1px solid #20283a; vertical-align: top; }
+td.row-cells, .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+tr.sel td { background: #1d2634; }
+
+.pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; background: #243049; }
+.pill.ok { background: #1d4a30; color: var(--ok); }
+.pill.err { background: #452024; color: var(--err); }
+.pill.warn { background: #453a1d; color: var(--warn); }
+
+pre {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+  padding: 10px; overflow: auto; max-height: 320px; font-size: 12px; margin: 6px 0;
+  font-family: ui-monospace, Consolas, monospace;
+}
+.muted { color: var(--dim); }
+small { font-size: 11px; }
+a { color: var(--acc); }
+
+/* Live page 3-pane layout */
+.live-grid { display: grid; grid-template-columns: 220px 1fr 340px; gap: 14px; height: calc(100vh - 90px); }
+.live-grid .pane { min-height: 0; display: flex; flex-direction: column; }
+.sensor-list button {
+  display: block; width: 100%; text-align: left; margin-bottom: 4px;
+  background: var(--panel-2);
+}
+.sensor-list button.on { border-color: var(--acc); }
+.room-pane { position: relative; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); }
+#liveOut { flex: 1; min-height: 0; }
+
+/* scene labels inside the 3D canvas */
+.scene-label {
+  font: 10px/1.2 "Inter Variable", sans-serif;
+  color: #e8e2d2; background: rgba(20, 22, 28, 0.72);
+  padding: 2px 6px; border-radius: 6px; white-space: nowrap;
+  pointer-events: none;
+}
+
+.meta-grid { display: grid; grid-template-columns: 340px 1fr; gap: 14px; align-items: start; }
+.editor-pane { position: relative; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); height: calc(100vh - 200px); min-height: 420px; }
+.field { margin-bottom: 10px; }
+.field > span { display: block; color: var(--dim); font-size: 11px; margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.05em; }
+.field input, .field select { width: 100%; }
+.split { display: flex; gap: 8px; }
+.split > * { flex: 1; }

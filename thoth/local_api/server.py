@@ -4,6 +4,12 @@ Bound to localhost by default. Every request requires
 ``Authorization: Bearer <local_token>`` (the token lives in
 ``~/.thoth/config.json``). This is the node's local control surface —
 it is never exposed to the public Internet (§24).
+
+The same handler class also serves the node dashboard (React ``dist/``
+on port 80 per CONTRACT §5): document and asset fetches authenticate via
+``?token=`` once, which sets a ``thoth_dash`` session cookie, or via the
+Bearer header/XHR path. When the privileged port cannot be bound the
+daemon falls back to serving the UI on the API port.
 """
 
 from __future__ import annotations
@@ -11,8 +17,29 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse, parse_qs
+
+_DASHBOARD_DIR = Path(__file__).resolve().parents[1] / "dashboard" / "dist"
+
+_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json",
+    ".map": "application/json",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".txt": "text/plain; charset=utf-8",
+}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -41,13 +68,62 @@ class _Handler(BaseHTTPRequestHandler):
         token = self.server.token  # type: ignore[attr-defined]
         return bool(token) and (qs.get("token", [""])[0] == token)
 
-    def _html(self, code: int, body: str) -> None:
+    def _html(self, code: int, body: str, set_cookie: bool = False) -> None:
         data = body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        if set_cookie:
+            self.send_header(
+                "Set-Cookie",
+                f"thoth_dash={self.server.token}; Path=/; "   # type: ignore[attr-defined]
+                "SameSite=Strict")
         self.end_headers()
         self.wfile.write(data)
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _static(self, rel: str) -> None:
+        """Serve a file from the built dashboard ``dist/`` tree."""
+        root = getattr(self.server, "dashboard_dir", None) or _DASHBOARD_DIR
+        try:
+            target = (root / rel.lstrip("/")).resolve()
+            if not str(target).startswith(str(root.resolve())) \
+                    or not target.is_file():
+                return self._json(404, {"error": "not found"})
+            data = target.read_bytes()
+        except OSError:
+            return self._json(404, {"error": "not found"})
+        ctype = _CONTENT_TYPES.get(target.suffix.lower(),
+                                   "application/octet-stream")
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _dashboard_authorized(self, qs) -> bool:
+        """Auth for document/asset fetches: ``?token=`` once (cookie is
+        set), the Bearer header on XHR, or the session cookie."""
+        if self._token_qs_ok(qs) or self._authorized_header():
+            return True
+        cookie = self.headers.get("Cookie", "")
+        token = self.server.token  # type: ignore[attr-defined]
+        for part in cookie.split(";"):
+            part = part.strip()
+            if part.startswith("thoth_dash="):
+                return bool(token) and part[len("thoth_dash="):] == token
+        return False
+
+    def _dashboard_index(self) -> Optional[Path]:
+        root = getattr(self.server, "dashboard_dir", None) or _DASHBOARD_DIR
+        index = root / "index.html"
+        return index if index.is_file() else None
 
     def _file(self, path, download_name: Optional[str] = None) -> None:
         try:
@@ -86,14 +162,49 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         qs = parse_qs(urlparse(self.path).query)
+        serve_ui = bool(getattr(self.server, "serve_ui", True))
         # The dashboard page + capture downloads authenticate via ?token=
         # because the browser cannot set Authorization on document fetches.
-        if path in ("/", "/dashboard"):
-            if not self._token_qs_ok(qs):
+        if path in ("/", "/dashboard", "/index.html"):
+            if not serve_ui:
+                # API-only port: hand the browser over to the dashboard
+                # port when one is bound (CONTRACT §5 — UI on :80).
+                dash = getattr(self.daemon, "_dash", None)
+                if dash is not None:
+                    host = (self.headers.get("Host") or "").split(":")[0] \
+                        or dash.host
+                    port = dash.port
+                    tok = qs.get("token", [""])[0]
+                    loc = (f"http://{host}:{port}/" if port != 80
+                           else f"http://{host}/")
+                    if tok:
+                        loc += f"?token={tok}"
+                    return self._redirect(loc)
                 return self._json(401, {"error": "unauthorized; "
                                         "open /?token=<local_token>"})
-            from .dashboard import PAGE
-            return self._html(200, PAGE)
+            if not self._dashboard_authorized(qs):
+                return self._json(401, {"error": "unauthorized; "
+                                        "open /?token=<local_token>"})
+            index = self._dashboard_index()
+            if index is not None:
+                data = index.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type",
+                                 "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                if self._token_qs_ok(qs):
+                    self.send_header(
+                        "Set-Cookie",
+                        f"thoth_dash={self.server.token}; Path=/; "  # type: ignore[attr-defined]
+                        "SameSite=Strict")
+                self.end_headers()
+                return self.wfile.write(data)
+            from .dashboard import PAGE   # dist absent → legacy page
+            return self._html(200, PAGE, set_cookie=self._token_qs_ok(qs))
+        if serve_ui and path.startswith("/assets/"):
+            if not self._dashboard_authorized(qs):
+                return self._json(401, {"error": "unauthorized"})
+            return self._static(path)
         if path.startswith("/api/captures/") and path.endswith("/download") \
                 and not self._authorized_header():
             if not self._token_qs_ok(qs):
@@ -188,6 +299,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, public_geo() or {"error": "unresolved"})
         if path == "/api/v1/sync":
             return self._json(200, d.sync_state())
+        if path == "/api/v1/metadata":
+            return self._json(200, d.metadata.document())
+        if path == "/api/v1/room":
+            return self._json(200, d.room.document())
         if path.startswith("/api/v1/minutes/"):
             rest = path[len("/api/v1/minutes/"):]
             parts = rest.split("/")
@@ -299,6 +414,22 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "label": pred.label})
         return self._json(404, {"error": "not found"})
 
+    def do_PUT(self):
+        if not self._authorized():
+            return
+        path = urlparse(self.path).path
+        body = self._body()
+        d = self.daemon
+        if path == "/api/v1/metadata":
+            # Body is a subset of the manual section (CONTRACT §1.1);
+            # accept {"manual": {...}} too for relay symmetry.
+            manual = body.get("manual") if isinstance(
+                body.get("manual"), dict) else body
+            return self._json(200, d.metadata.set_manual(manual or {}))
+        if path == "/api/v1/room":
+            return self._json(200, d.room.put(body))
+        return self._json(404, {"error": "not found"})
+
     def _authorized_header(self) -> bool:
         token = self.server.token  # type: ignore[attr-defined]
         return self.headers.get("Authorization", "") == f"Bearer {token}"
@@ -336,14 +467,21 @@ class _FastBindHTTPServer(ThreadingHTTPServer):
 
 
 class LocalAPIServer:
-    """Threaded loopback HTTP server hosting the node's local API."""
+    """Threaded loopback HTTP server hosting the node's local API.
+
+    ``serve_ui`` gates the dashboard surface (GET ``/`` + ``/assets/*``);
+    API routes are always available on whatever port the server binds.
+    """
 
     def __init__(self, daemon, host: str = "127.0.0.1", port: int = 5000,
-                 token: str = ""):
+                 token: str = "", serve_ui: bool = True,
+                 dashboard_dir: Optional[Path] = None):
         self.daemon = daemon
         self.host = host
         self.port = port
         self.token = token
+        self.serve_ui = serve_ui
+        self.dashboard_dir = dashboard_dir
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -351,6 +489,9 @@ class LocalAPIServer:
         httpd = _FastBindHTTPServer((self.host, self.port), _Handler)
         httpd.daemon_ref = self.daemon  # type: ignore[attr-defined]
         httpd.token = self.token        # type: ignore[attr-defined]
+        httpd.serve_ui = self.serve_ui  # type: ignore[attr-defined]
+        if self.dashboard_dir is not None:
+            httpd.dashboard_dir = self.dashboard_dir  # type: ignore[attr-defined]
         self._httpd = httpd
         self._thread = threading.Thread(target=httpd.serve_forever,
                                         name="thoth-local-api", daemon=True)

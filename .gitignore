@@ -69,5 +69,11 @@ dist/
 *.iconset/
 thoth_win/icon.ico
 
+# Node dashboard — the built bundle is committed (Pi installs via
+# pip git+https; no npm on the node) but its toolchain is not.
+node_modules/
+!thoth/dashboard/dist/
+dashboard/node_modules/
+
 # User model library - per-device runtime state
 models/user/

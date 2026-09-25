@@ -36,9 +36,13 @@ class AutomationManager:
     """Persistent automation store + per-tick evaluator."""
 
     def __init__(self, submit: Callable[[Dict[str, Any], Prediction, str], None],
-                 path: Optional[Path] = None):
+                 path: Optional[Path] = None,
+                 on_fire: Optional[Callable[[Automation, Dict[str, Any],
+                                             Optional[Prediction]], None]] = None):
         self.path = path or (config_dir() / "automations.json")
         self._submit = submit
+        # CONTRACT §6 — the daemon sets this to emit trigger_fired events.
+        self.on_fire = on_fire
         self._autos: Dict[str, Automation] = {}
         self._ctx: Dict[str, Any] = {}
         self._feats: Any = None     # latest WindowFeatures (lazy scalars)
@@ -141,6 +145,11 @@ class AutomationManager:
         auto.state["fires"] = int(auto.state.get("fires") or 0) + 1
         self._save()
         self._submit(action_cfg, pred, model_id=f"automation:{auto.id}")
+        if self.on_fire is not None:
+            try:
+                self.on_fire(auto, action_cfg, pred)
+            except Exception as exc:
+                logger.debug("automation on_fire failed: %s", exc)
 
 
 __all__ = ["AutomationManager"]

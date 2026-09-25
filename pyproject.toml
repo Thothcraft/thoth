@@ -12,6 +12,7 @@ license = { text = "MIT" }
 dependencies = [
     "whispy>=0.1.0",
     "click>=8.1",
+    "websockets>=12.0",   # outbound Brain WS channel (CONTRACT §2)
 ]
 
 [project.scripts]
@@ -19,3 +20,8 @@ thoth = "thoth.cli.main:main"
 
 [tool.setuptools.packages.find]
 include = ["thoth*"]
+
+# The built node dashboard ships inside the package so the node serves
+# the same UI on :80 that the portal embeds over the relay (CONTRACT §5).
+[tool.setuptools.package-data]
+thoth = ["dashboard/dist/**/*"]

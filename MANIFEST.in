@@ -1,0 +1,3 @@
+# Ship the built node dashboard inside the package (CONTRACT §5):
+# the daemon serves thoth/dashboard/dist on :80.
+recursive-include thoth/dashboard/dist *

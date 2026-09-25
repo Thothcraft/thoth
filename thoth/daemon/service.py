@@ -21,7 +21,9 @@ from typing import Any, Deque, Dict, List, Optional
 
 from ..capture import CaptureManager
 from ..deployment import DeploymentManager
+from ..metadata import MetadataManager
 from ..models import ModelRegistry
+from ..room import RoomManager
 from ..settings import ConfigStore
 from .actions import ActionScheduler
 
@@ -53,6 +55,9 @@ class ThothDaemon:
         self.dispatcher = ActionScheduler()
         from ..automation import AutomationManager
         self.automations = AutomationManager(self.dispatcher.fire_now)
+        self.automations.on_fire = self._automation_fired
+        self.metadata = MetadataManager()
+        self.room = RoomManager(on_change=self._room_changed)
         self.window_seconds = window_seconds
         self.tick_hz = tick_hz
 
@@ -68,6 +73,9 @@ class ThothDaemon:
         self._cap_subs: Dict[str, Dict[str, Any]] = {}
         self._started_at: Optional[float] = None
         self._last_heartbeat = 0.0
+        self._last_metadata = 0.0
+        self._dash = None            # dashboard server on :80 (may be None)
+        self._brain_ws = None        # outbound Brain WS client
 
     # -- lifecycle --------------------------------------------------------------
     def start(self) -> "ThothDaemon":
@@ -87,6 +95,9 @@ class ThothDaemon:
                                         daemon=True)
         self._thread.start()
         self._start_api()
+        self._start_brain_ws()
+        # First inferred refresh off the SMA thread — geo probes egress.
+        self._maybe_refresh_metadata(force=True)
         logger.info("ThothDaemon started: %d sensor stream(s)", len(self._streams))
         return self
 
@@ -106,13 +117,147 @@ class ThothDaemon:
         from ..local_api import LocalAPIServer
         # Loopback by default; set local_host=0.0.0.0 to opt into LAN access.
         host = str(self.config.get("local_host", "127.0.0.1"))
-        self._api = LocalAPIServer(self, host=host,
-                                   port=int(self.config.get("local_port", 5000)),
-                                   token=self.config.local_token)
+        api_port = int(self.config.get("local_port", 5000))
+        token = self.config.local_token
+        from pathlib import Path
+        dash_dir_cfg = self.config.get("dashboard_dir")
+        dash_dir = Path(dash_dir_cfg) if dash_dir_cfg else None
+
+        # Dashboard surface: CONTRACT §5 serves the node UI + API on :80.
+        # Same exposure policy as the API port (LAN only when opted in).
+        dash_port = int(self.config.get("dashboard_port", 80))
+        ui_on_api = False
+        if dash_port and dash_port != api_port:
+            try:
+                self._dash = LocalAPIServer(
+                    self, host=host, port=dash_port, token=token,
+                    serve_ui=True, dashboard_dir=dash_dir).start()
+            except OSError as exc:
+                # Privileged/port-in-use — degrade gracefully: the API
+                # port serves the dashboard instead (Pi without root).
+                logger.warning("dashboard port %d unavailable (%s); "
+                               "serving UI on :%d", dash_port, exc,
+                               api_port)
+                self._dash = None
+                ui_on_api = True
+        else:
+            ui_on_api = True
+        self._api = LocalAPIServer(self, host=host, port=api_port,
+                                   token=token, serve_ui=ui_on_api,
+                                   dashboard_dir=dash_dir)
         self._api.start()
+
+    def _start_brain_ws(self) -> None:
+        """Outbound Brain channel (CONTRACT §2) — only when paired."""
+        token = self.config.device_token
+        if not token:
+            return
+        try:
+            from .brain_ws import BrainWSClient
+            host = str(self.config.get("local_host", "127.0.0.1"))
+            loop_host = "127.0.0.1" if host == "0.0.0.0" else host
+            api_base = (f"http://{loop_host}:"
+                        f"{int(self.config.get('local_port', 5000))}")
+            self._brain_ws = BrainWSClient(
+                self, api_base=api_base,
+                local_token=self.config.local_token,
+                brain_url=self.config.brain_url,
+                device_id=self.device_id,
+                device_token=token).start()
+        except Exception as exc:
+            logger.debug("brain ws client not started: %s", exc)
+
+    def emit_event(self, kind: str, data: Dict[str, Any]) -> None:
+        """Push a node→Brain frame (WS when connected, REST fallback)."""
+        ws = self._brain_ws
+        if ws is not None:
+            try:
+                ws.send_event(kind, data)
+                return
+            except Exception as exc:
+                logger.debug("event send failed: %s", exc)
+        # Unpaired or no WS client — nothing to do locally.
+
+    def _automation_fired(self, auto: Any, action_cfg: Dict[str, Any],
+                        prediction: Any) -> None:
+        """AutomationManager → CONTRACT §6 trigger_fired event."""
+        self.emit_event("trigger_fired", {
+            "automation_id": getattr(auto, "id", ""),
+            "name": getattr(auto, "name", ""),
+            "device_id": self.device_id,
+            "action_type": (action_cfg or {}).get("type", ""),
+            "label": getattr(prediction, "label", None),
+            "confidence": getattr(prediction, "confidence", None),
+            "at": time.time(),
+        })
+
+    def _room_changed(self, doc: Dict[str, Any]) -> None:
+        """Room PUT → broadcast room_changed + authoritative REST sync
+        (CONTRACT §1.2 — node POSTs the doc to Brain on every change)."""
+        self.emit_event("room_changed", doc)
+        token = self.config.device_token
+        if not token:
+            return
+        def _push() -> None:
+            try:
+                import json as _json
+                import urllib.request as _req
+                req = _req.Request(
+                    f"{self.config.brain_url.rstrip('/')}/v1/nodes/"
+                    f"{self.device_id}/room",
+                    data=_json.dumps(doc).encode(), method="PUT",
+                    headers={"Content-Type": "application/json",
+                             "Authorization": f"Bearer {token}"})
+                _req.urlopen(req, timeout=8).read()
+            except Exception as exc:
+                logger.debug("room push failed: %s", exc)
+        threading.Thread(target=_push, name="thoth-room-push",
+                         daemon=True).start()
+
+    def _maybe_refresh_metadata(self, force: bool = False,
+                                inline: bool = False) -> None:
+        """Refresh inferred metadata (≥60 s cadence) off the SMA thread.
+
+        ``public_geo`` does a network call — run it on a helper thread so
+        an unreachable egress never stalls inference. ``inline`` is the
+        synchronous path used by tests.
+        """
+        interval = float(self.config.get("metadata_interval_s", 60.0))
+        now = time.time()
+        if not force and now - self._last_metadata < interval:
+            return
+        self._last_metadata = now
+
+        def _run() -> None:
+            try:
+                changed = self.metadata.refresh_inferred(
+                    predictions=list(self.predictions))
+            except Exception as exc:
+                logger.debug("metadata refresh failed: %s", exc)
+                return
+            if changed:
+                self.emit_event("metadata", self.metadata.document())
+
+        if inline:
+            _run()
+        else:
+            threading.Thread(target=_run, name="thoth-metadata",
+                             daemon=True).start()
 
     def stop(self) -> None:
         self._stop.set()
+        if self._brain_ws is not None:
+            try:
+                self._brain_ws.stop()
+            except Exception:
+                pass
+            self._brain_ws = None
+        if self._dash is not None:
+            try:
+                self._dash.stop()
+            except Exception:
+                pass
+            self._dash = None
         if self._thread:
             self._thread.join(timeout=3.0)
         try:
@@ -154,6 +299,7 @@ class ThothDaemon:
 
     def _tick(self) -> None:
         self._maybe_heartbeat()
+        self._maybe_refresh_metadata()
         if self._sync is None:
             # No streams: still drive time/schedule triggers (no features).
             self.automations.tick()
