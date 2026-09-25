@@ -326,7 +326,10 @@ class _Handler(BaseHTTPRequestHandler):
                     cursor = int(qs.get("cursor", [0])[0] or 0)
                 except (TypeError, ValueError):
                     cursor = 0
-                out = d.source_observations(source_id, cursor)
+                if qs.get("latest"):
+                    out = d.latest_observation(source_id)
+                else:
+                    out = d.source_observations(source_id, cursor)
                 if out is None:
                     return self._json(404, {"error": f"unknown source {source_id}"})
                 return self._json(200, out)

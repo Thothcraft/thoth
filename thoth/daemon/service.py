@@ -714,6 +714,25 @@ class ThothDaemon:
         """Canonical name for the sensor tail endpoint."""
         return self.tail_sensor(source_id, cursor)
 
+    def latest_observation(self, source_id: str) -> Optional[Dict[str, Any]]:
+        """Just the newest sample — what live views actually want.
+
+        ``tail`` over a whole buffer is for history; streaming UIs poll
+        ``?latest=1`` and get one sample, so the response stays small
+        even when payloads are heavy (radar xy_map frames).
+        """
+        if not self.sensor_exposed(source_id):
+            return None
+        stream = self._streams.get(source_id)
+        if stream is None:
+            return None
+        snap = stream.snapshot()
+        if not snap:
+            return {"sensor_id": source_id, "cursor": 0, "samples": []}
+        last = max(snap, key=lambda s: s.sequence)
+        return {"sensor_id": source_id, "cursor": last.sequence,
+                "samples": [last.to_dict()]}
+
     def _minutes_root(self):
         from pathlib import Path
         from ..settings import config_dir
