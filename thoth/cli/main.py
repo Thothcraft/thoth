@@ -79,8 +79,11 @@ def main(ctx, port):
 @click.option("--tick", default=2.0, type=float, help="loop rate Hz")
 @click.option("--stop", is_flag=True, help="stop the running daemon")
 @click.option("--status", "status_", is_flag=True, help="show daemon state")
+@click.option("--dashboard/--no-dashboard", "dashboard", default=None,
+              help="serve the local dashboard UI (default: on, or the "
+                   "dashboard_enabled config key)")
 @click.pass_context
-def daemon(ctx, window, tick, stop, status_):
+def daemon(ctx, window, tick, stop, status_, dashboard):
     """Run the node service in the foreground (single instance).
 
     ``thoth daemon --stop`` / ``--status`` control a running daemon via
@@ -124,7 +127,7 @@ def daemon(ctx, window, tick, stop, status_):
 
     from ..daemon import ThothDaemon
     _write_pid()
-    d = ThothDaemon(window_seconds=window, tick_hz=tick)
+    d = ThothDaemon(window_seconds=window, tick_hz=tick, serve_ui=dashboard)
     # SIGTERM → graceful stop so --stop works cross-platform.
     signal.signal(signal.SIGTERM, lambda *_: d.stop() or sys.exit(0))
     click.echo("Starting Thoth daemon (Ctrl+C to stop)…")

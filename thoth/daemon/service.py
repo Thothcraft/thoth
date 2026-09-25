@@ -47,7 +47,8 @@ class ThothDaemon:
     """Persistent node service — owns the SMA loop and local API."""
 
     def __init__(self, config: Optional[ConfigStore] = None,
-                 window_seconds: float = 2.0, tick_hz: float = 2.0):
+                 window_seconds: float = 2.0, tick_hz: float = 2.0,
+                 serve_ui: Optional[bool] = None):
         self.config = config or ConfigStore()
         self.registry = ModelRegistry()
         self.deployments = DeploymentManager(self.registry)
@@ -76,6 +77,9 @@ class ThothDaemon:
         self._last_metadata = 0.0
         self._dash = None            # dashboard server on :80 (may be None)
         self._brain_ws = None        # outbound Brain WS client
+        # None → follow config["dashboard_enabled"] (default on);
+        # --no-dashboard passes False for this run.
+        self._serve_ui = serve_ui
 
     # -- lifecycle --------------------------------------------------------------
     def start(self) -> "ThothDaemon":
@@ -125,9 +129,16 @@ class ThothDaemon:
 
         # Dashboard surface: CONTRACT §5 serves the node UI + API on :80.
         # Same exposure policy as the API port (LAN only when opted in).
+        # On by default; `--no-dashboard` or config dashboard_enabled=false
+        # runs API-only.
+        serve_ui = self._serve_ui
+        if serve_ui is None:
+            serve_ui = bool(self.config.get("dashboard_enabled", True))
         dash_port = int(self.config.get("dashboard_port", 80))
         ui_on_api = False
-        if dash_port and dash_port != api_port:
+        if not serve_ui:
+            logger.info("dashboard disabled — API-only mode")
+        elif dash_port and dash_port != api_port:
             try:
                 self._dash = LocalAPIServer(
                     self, host=host, port=dash_port, token=token,
