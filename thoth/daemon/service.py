@@ -54,7 +54,7 @@ class ThothDaemon:
         self.registry = ModelRegistry()
         self.deployments = DeploymentManager(self.registry)
         self.captures = CaptureManager()
-        self.dispatcher = ActionScheduler()
+        self.dispatcher = ActionScheduler(executor=self._execute_action)
         from ..automation import AutomationManager
         self.automations = AutomationManager(self.dispatcher.fire_now)
         self.automations.on_fire = self._automation_fired
@@ -72,6 +72,9 @@ class ThothDaemon:
         # action_id → ActionResult dict — idempotent actuator dispatch
         self._action_results: Dict[str, Dict[str, Any]] = {}
         self.predictions: Deque[Dict[str, Any]] = deque(maxlen=500)
+        # model_id → last emitted label — prediction events are
+        # edge-triggered (label changes only, not every tick)
+        self._last_pred_labels: Dict[str, str] = {}
         self._cap_subs: Dict[str, Dict[str, Any]] = {}
         self._started_at: Optional[float] = None
         self._last_heartbeat = 0.0
@@ -335,10 +338,48 @@ class ThothDaemon:
                                model.runtime_model_id, exc)
                 continue
             self.predictions.append(prediction.to_dict())
+            self._emit_prediction_edge(model, prediction)
             self._fire_actions(model, prediction)
             self.automations.on_prediction(prediction, features=feats)
             last_pred = prediction
         self.automations.tick(prediction=last_pred, features=feats)
+
+    def _emit_prediction_edge(self, model: Any, prediction: Any) -> None:
+        """Emit a ``prediction`` event on each label transition.
+
+        Brain projects these into ContextState (``key=prediction``) →
+        ContextEvent → server-side rules. Edge-triggered so a steady
+        label never floods the channel.
+        """
+        mid = model.runtime_model_id
+        label = prediction.label
+        if self._last_pred_labels.get(mid) == label:
+            return
+        previous = self._last_pred_labels.get(mid)
+        self._last_pred_labels[mid] = label
+        self.emit_event("prediction", {
+            **prediction.to_dict(),
+            "model_id": mid,
+            "previous_label": previous})
+
+    def _execute_action(self, key: str, action: Any, pred: Any) -> None:
+        """Dispatcher executor — runs the actuator, then bridges
+        ``notification`` results onto the node→Brain event channel so a
+        triggered rule surfaces as a push notification on the app."""
+        from whispy.contracts import ActionResult, ActionStatus
+        from whispy.actuators import create_actuator
+        try:
+            actuator = create_actuator(action)
+            result = actuator.trigger(action, pred)
+        except Exception as exc:
+            result = ActionResult(status=ActionStatus.FAILED,
+                                  action_type=action.type, detail=str(exc))
+        self.dispatcher._record(key, action, pred, result=result)
+        if action.type == "notification":
+            note = ((result.response or {}).get("notification")
+                    if result.response else None)
+            if note and result.status == ActionStatus.SUCCEEDED:
+                self.emit_event("notification", note)
 
     def _fire_actions(self, model: Any, prediction: Any) -> None:
         for action_cfg in model.config.get("actions") or []:
@@ -754,6 +795,7 @@ class ThothDaemon:
                 inference_timestamp=started, latency_ms=latency_ms,
                 confidence=pred.confidence)
             self.predictions.append(pred.to_dict())
+            self._emit_prediction_edge(model, pred)
             self._fire_actions(model, pred)
             return InferenceResult(request_id=req.request_id,
                                    status="succeeded", prediction=pred,
@@ -761,6 +803,33 @@ class ThothDaemon:
         except Exception as exc:
             return InferenceResult(request_id=req.request_id,
                                    status="failed", error=str(exc)).to_dict()
+
+    def context(self) -> Dict[str, Any]:
+        """Current device context — the same normalized shape Brain's
+        ``/v1/context/state`` stores: latest prediction per model as a
+        state entry, plus room + metadata docs.
+
+        One context model backs every surface (local API, Brain
+        projection, SDK, MCP) — this method is the node-side view.
+        """
+        states = [
+            {
+                "key": "prediction",
+                "entity_id": self.device_id,
+                "value": p.get("label"),
+                "confidence": p.get("confidence"),
+                "estimator": p.get("runtime_model_id"),
+                "ts": p.get("timestamp"),
+            }
+            for p in list(self.predictions)[-50:]
+        ]
+        return {
+            "device_id": self.device_id,
+            "states": states,
+            "room": self.room.document(),
+            "metadata": self.metadata.document(),
+            "online": bool(self._brain_ws is not None),
+        }
 
     def privacy(self) -> Dict[str, Any]:
         """Current exposure/privacy posture — what leaves this node."""

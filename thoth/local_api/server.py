@@ -301,6 +301,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, d.sync_state())
         if path == "/api/v1/metadata":
             return self._json(200, d.metadata.document())
+        if path == "/api/v1/context":
+            return self._json(200, d.context())
         if path == "/api/v1/room":
             return self._json(200, d.room.document())
         if path.startswith("/api/v1/minutes/"):

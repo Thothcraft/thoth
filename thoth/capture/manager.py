@@ -55,6 +55,12 @@ class CaptureManager:
             "state": "active",
             "sensors": sensors,
             "sample_counts": {s: 0 for s in sensors},
+            # epoch_second -> {sensor_id -> n} — the second-level alignment
+            # index. Every sample keeps its own timestamp in the JSONL;
+            # this index makes "all samples belonging to second T"
+            # addressable without scanning files, and aligns across
+            # devices on the same epoch second.
+            "seconds": {},
         }
         self._dir(capture_id).mkdir(parents=True, exist_ok=True)
         (self._dir(capture_id) / "manifest.json").write_text(
@@ -70,6 +76,12 @@ class CaptureManager:
         with (self._dir(capture_id) / f"{sid}.jsonl").open("a") as fh:
             fh.write(json.dumps(sample.to_dict()) + "\n")
         rec["sample_counts"][sid] = rec["sample_counts"].get(sid, 0) + 1
+        ts = float(getattr(sample, "timestamp", 0.0) or
+                   (sample.to_dict().get("timestamp") if hasattr(
+                       sample, "to_dict") else 0.0) or time.time())
+        sec = str(int(ts))
+        bucket = rec["seconds"].setdefault(sec, {})
+        bucket[sid] = bucket.get(sid, 0) + 1
 
     def stop(self, capture_id: str) -> Optional[Dict[str, Any]]:
         rec = self._active.pop(capture_id, None)
@@ -84,6 +96,24 @@ class CaptureManager:
         (self._dir(capture_id) / "manifest.json").write_text(
             json.dumps(rec, indent=2))
         return rec
+
+    def align_seconds(self, captures: List[str]) -> Dict[str, Any]:
+        """Cross-device second-level alignment for a capture set.
+
+        Returns ``{epoch_second: {capture_id: {sensor_id: count}}}`` —
+        the union of each manifest's ``seconds`` index. Two devices that
+        recorded the same wall-clock second produce one key with both
+        devices' counts; samples themselves keep sub-second precision.
+        """
+        out: Dict[str, Any] = {}
+        for cid in captures:
+            rec = self.get(cid)
+            if not rec:
+                continue
+            for sec, per_sensor in (rec.get("seconds") or {}).items():
+                slot = out.setdefault(sec, {})
+                slot[cid] = per_sensor
+        return {"seconds": out, "captures": captures}
 
     def list(self) -> List[Dict[str, Any]]:
         out = list(self._active.values())

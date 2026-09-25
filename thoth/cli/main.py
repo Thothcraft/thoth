@@ -390,6 +390,81 @@ def pair(ctx, user, password, brain):
 
 
 @main.command()
+@click.option("--remote", is_flag=True,
+              help="query Brain /v1/context instead of the local daemon")
+@click.pass_context
+def context(ctx, remote):
+    """Current context — local daemon or Brain context store."""
+    if remote:
+        from whispy.cloud.client import Client
+        try:
+            _echo(Client().context_snapshot())
+        except Exception as exc:
+            click.echo(f"Brain context failed: {exc}", err=True)
+            sys.exit(1)
+        return
+    try:
+        _echo(_client(ctx).get("/api/v1/context"))
+    except DaemonUnavailable as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+
+
+@main.command()
+@click.option("--brain", is_flag=True,
+              help="read the Brain event feed instead of local daemon state")
+@click.option("--kind", default=None, help="filter by event kind")
+@click.option("--since", default=None,
+              help="event id or epoch ts — strict >")
+@click.option("--device", "device_id", default=None)
+@click.option("--follow", is_flag=True,
+              help="stream live events over SSE (no polling)")
+@click.pass_context
+def events(ctx, brain, kind, since, device_id, follow):
+    """Event feed — node events via Brain (or local status when offline)."""
+    if brain or follow:
+        from whispy.cloud.client import Client
+        try:
+            client = Client()
+        except Exception as exc:
+            click.echo(f"no Brain credentials ({exc}) — run `whispy login` "
+                       f"or set WHISPY_API_KEY", err=True)
+            sys.exit(1)
+        if not follow:
+            _echo(client.events(device_id=device_id, kind=kind,
+                                since=since))
+            return
+        last_id = since
+        while True:  # drop-reconnect loop with resume cursor
+            try:
+                for evt in client.event_stream(
+                        device_id=device_id, kind=kind,
+                        last_event_id=last_id):
+                    _echo(evt)
+                    last_id = str(evt.get("id") or last_id or "")
+            except KeyboardInterrupt:
+                return
+            except Exception as exc:
+                click.echo(f"stream dropped ({exc}); reconnecting…",
+                           err=True)
+                import time as _t
+                _t.sleep(2.0)
+        return
+    try:
+        _echo(_client(ctx).get("/api/v1/context"))
+    except DaemonUnavailable as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+
+
+@main.command()
+def mcp():
+    """Run the MCP stdio server (agents/IDEs ↔ Thoth tools)."""
+    from ..mcp import serve
+    serve()
+
+
+@main.command()
 @click.pass_context
 def doctor(ctx):
     """Run node diagnostics."""
