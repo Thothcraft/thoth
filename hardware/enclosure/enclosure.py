@@ -103,6 +103,14 @@ class Params:
     lid_vent_grid: tuple = (4, 3)           # cols×rows of Ø4 holes in lid plate (east half)
     lid_vent_r: float = 2.2
     lid_vent_pitch: float = 9.0
+    # -- wall mounting --------------------------------------------------------
+    mount_keyholes: bool = True             # keyhole slots in the floor for
+                                            # screws — tape still works, floor
+                                            # stays mostly flat
+    keyhole_spacing: float = 70.0           # screw spacing along X (horizontal on wall)
+    keyhole_head_r: float = 4.3             # entry hole Ø8.6 for pan/washer head
+    keyhole_slot_w: float = 4.6             # slot width for M4 screw shaft
+    keyhole_slot_l: float = 11.0            # slot travel (+Y = 'up' when hung)
 
     # -- derived ---------------------------------------------------------------
     @property
@@ -294,6 +302,22 @@ def build_tray(p: Params, battery: bool) -> trimesh.Trimesh:
                                x=vx0 + i * vp - vw / 2,
                                y=-0.3,
                                z=vz + j * vpy))
+
+    # -- wall-mount keyholes in the floor ------------------------------------
+    # Entry hole at the south end, narrow slot runs north: hang the unit
+    # with its north (GPIO) edge up, slide it down to lock onto the heads.
+    if p.mount_keyholes:
+        for kx in (p.outer_w / 2 - p.keyhole_spacing / 2,
+                   p.outer_w / 2 + p.keyhole_spacing / 2):
+            cutters.append(cyl(p.keyhole_head_r, p.floor + 0.4,
+                               x=kx, y=p.outer_d / 2 - p.keyhole_slot_l / 2
+                                 - p.keyhole_head_r,
+                               z=-0.2, sections=32))
+            cutters.append(box(p.keyhole_slot_w, p.keyhole_slot_l,
+                               p.floor + 0.4,
+                               x=kx - p.keyhole_slot_w / 2,
+                               y=p.outer_d / 2 - p.keyhole_slot_l / 2,
+                               z=-0.2))
 
     # -- battery well extras ------------------------------------------------
     if battery:

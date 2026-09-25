@@ -60,6 +60,13 @@ vent_slot = [6, 2.4];  vent_pitch = [10, 6];
 vent_wall_z = 0.55;
 lid_vent_grid = [4, 3];  lid_vent_r = 2.2;  lid_vent_pitch = 9;
 
+// ---------------- wall mounting -----------------------
+mount_keyholes = true;                       // floor slots for screw heads
+keyhole_spacing = 70;                        // along X (horizontal on wall)
+keyhole_head_r  = 4.3;                       // Ø8.6 entry (pan/washer head)
+keyhole_slot_w  = 4.6;                       // M4 shaft
+keyhole_slot_l  = 11;                        // travel toward +Y (north = up)
+
 // ---------------- derived ----------------------------
 inner_w = pcb_w + 2*clearance;
 inner_d = pcb_d + 2*clearance;
@@ -149,6 +156,17 @@ module tray() {
                  -0.3,
                  floor_t + wall_h*vent_wall_z + j*vent_pitch[1]])
         cube([vent_slot[0], wall + 0.6, vent_slot[1]]);
+    // wall-mount keyholes in the floor — hang north edge up, slide
+    // down to lock onto the screw heads
+    if (mount_keyholes)
+      for (kx = [outer_w/2 - keyhole_spacing/2,
+                 outer_w/2 + keyhole_spacing/2]) {
+        translate([kx, outer_d/2 - keyhole_slot_l/2 - keyhole_head_r, -0.2])
+          cylinder(r=keyhole_head_r, h=floor_t + 0.4, $fn=32);
+        translate([kx - keyhole_slot_w/2,
+                   outer_d/2 - keyhole_slot_l/2, -0.2])
+          cube([keyhole_slot_w, keyhole_slot_l, floor_t + 0.4]);
+      }
     // battery well ports
     if (PART == "base_battery") {
       translate([-0.2, wall + ps_west_window[0], floor_t + 3.0])
