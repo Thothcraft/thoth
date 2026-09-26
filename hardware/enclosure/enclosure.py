@@ -1,11 +1,13 @@
 """Thoth node enclosure — parametric 3D-printable case generator.
 
-Two independent options → 4 printable variants:
+Two bottoms and one top → 3 printable parts:
 
     TOP     "radar"  (DreamHAT+ BGT60TR13C, integral 60 GHz membrane window)
-            "sense"  (Sense HAT bezel — LED matrix + joystick exposed)
     BOTTOM  "slim"   (bare Pi)
             "battery" (PiSugar 3 Plus 5000 mAh module under the Pi)
+
+The RPi5 Active Cooler fits under the DreamHAT's GPIO header inside the
+`hat_gap` — its presence does not change any enclosure dimension.
 
 Build all STLs:
 
@@ -50,7 +52,6 @@ class Params:
     hat_gap: float = 16.0                   # Pi top → HAT bottom — measured: active cooler + ~2 mm
     hat_t: float = 1.6
     radar_head: float = 8.0                 # radar HAT top side clearance
-    sense_head: float = 13.0                # Sense HAT joystick ≈ 10 mm + margin
     # -- shell --------------------------------------------------------------
     wall: float = 2.2
     floor: float = 2.0
@@ -89,11 +90,6 @@ class Params:
                                             # the notch-adjacent top-left corner)
     radar_aperture: tuple = (16.0, 22.0)    # opening W×H at inner face — covers 40°×65° FOV
     radar_membrane: float = 1.2             # 0 → fully open aperture
-    # -- sense lid -------------------------------------------------------------
-    sense_matrix_xy: tuple = (28.0, 38.0)   # LED matrix centre on HAT (MEASURE!)
-    sense_matrix_wh: tuple = (34.0, 34.0)   # 8×8 LED matrix opening
-    sense_joy_xy: tuple = (40.0, 14.0)      # joystick centre (MEASURE!)
-    sense_joy_r: float = 6.0                # joystick opening radius
     # -- vents -----------------------------------------------------------------
     vent_rows: int = 3
     vent_cols: int = 6
@@ -132,8 +128,9 @@ class Params:
     def under_board(self, battery: bool) -> float:
         return self.under_board_battery if battery else self.under_board_slim
 
-    def head_room(self, top: str) -> float:
-        return self.radar_head if top == "radar" else self.sense_head
+    @property
+    def head_room(self) -> float:
+        return self.radar_head
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +216,7 @@ def _hat_xy(p: Params, hat_xy):
 
 def build_tray(p: Params, battery: bool) -> trimesh.Trimesh:
     ub = p.under_board(battery)
-    head = max(p.radar_head, p.sense_head)   # walls fit the taller (sense) stack
+    head = p.radar_head
     stack_top = p.floor + ub + p.pcb_t + p.hat_gap + p.hat_t + head
     wall_h = stack_top - p.floor
     iw, id_ = p.inner_w, p.inner_d
@@ -415,18 +412,6 @@ def build_lid_radar(p: Params) -> trimesh.Trimesh:
     return subtract(lid, cutters)
 
 
-def build_lid_sense(p: Params) -> trimesh.Trimesh:
-    lid, cutters = _lid_base(p)
-    mx, my = _hat_xy(p, p.sense_matrix_xy)
-    mw, mh = p.sense_matrix_wh
-    cutters.append(box(mw, mh, p.lid_t + 0.4,
-                       x=mx - mw / 2, y=my - mh / 2, z=-0.2))
-    jx, jy = _hat_xy(p, p.sense_joy_xy)
-    cutters.append(cyl(p.sense_joy_r, p.lid_t + 0.4, jx, jy,
-                       -0.2, sections=48))
-    return subtract(lid, cutters)
-
-
 # ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
@@ -436,7 +421,6 @@ PARTS = {
     "base_slim": lambda p: build_tray(p, battery=False),
     "base_battery": lambda p: build_tray(p, battery=True),
     "lid_radar": build_lid_radar,
-    "lid_sense": build_lid_sense,
 }
 
 

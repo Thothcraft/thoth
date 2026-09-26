@@ -2,7 +2,10 @@
 // Mirror of enclosure.py (same parameter names). Select the part, F6
 // render, File → Export → Export as STL.
 //
-//   PART = "base_slim" | "base_battery" | "lid_radar" | "lid_sense"
+//   PART = "base_slim" | "base_battery" | "lid_radar"
+//
+// RPi5 Active Cooler fits under the DreamHAT GPIO header inside
+// hat_gap — it does not change any enclosure dimension.
 //
 // All mm. Z-up. Origin: outer bottom west/south corner.
 // Params marked // VERIFY: measure on YOUR boards before printing.
@@ -19,7 +22,6 @@ under_board_battery = 20;              // PiSugar 3 Plus stack  // VERIFY
 hat_gap      = 16;                     // Pi top → HAT bottom — measured: cooler + ~2 mm
 hat_t        = 1.6;
 radar_head   = 8;
-sense_head   = 13;                     // joystick ≈10 mm
 
 // ---------------- shell --------------------------
 wall = 2.2;  floor_t = 2.0;  lid_t = 2.0;  lid_skirt = 5.0;
@@ -48,12 +50,6 @@ radar_ant_xy   = [30, 26.5];                   // BGT60TR13C centre, from HAT SW
 radar_aperture = [16, 22];                       // covers 40°H × 65°V FOV
 radar_membrane = 1.2;                            // 0 = fully open
 
-// ---------------- sense lid --------------------------
-sense_matrix_xy = [28, 38];                      // MEASURE
-sense_matrix_wh = [34, 34];
-sense_joy_xy    = [40, 14];                      // MEASURE
-sense_joy_r     = 6;
-
 // ---------------- vents ------------------------------
 vent_rows = 3;  vent_cols = 6;
 vent_slot = [6, 2.4];  vent_pitch = [10, 6];
@@ -73,7 +69,7 @@ inner_d = pcb_d + 2*clearance;
 outer_w = inner_w + 2*wall;
 outer_d = inner_d + 2*wall;
 ub = (PART == "base_battery") ? under_board_battery : under_board_slim;
-head = max(radar_head, sense_head);   // tray fits both tops
+head = radar_head;
 stack_top = floor_t + ub + pcb_t + hat_gap + hat_t + head;
 wall_h = stack_top - floor_t;
 board_bot = floor_t + ub;
@@ -229,22 +225,7 @@ module lid_radar() {
     }
   }
 }
-module lid_sense() {
-  mx = wall + clearance + hat_offset[0] + sense_matrix_xy[0];
-  my = wall + clearance + hat_offset[1] + sense_matrix_xy[1];
-  jx = wall + clearance + hat_offset[0] + sense_joy_xy[0];
-  jy = wall + clearance + hat_offset[1] + sense_joy_xy[1];
-  difference() {
-    lid_base();
-    translate([mx - sense_matrix_wh[0]/2, my - sense_matrix_wh[1]/2, -0.2])
-      cube([sense_matrix_wh[0], sense_matrix_wh[1], lid_t + 0.4]);
-    translate([jx, jy, -0.2])
-      cylinder(r=sense_joy_r, h=lid_t + 0.4, $fn=48);
-  }
-}
-
 // ---------------- dispatch -----------------------------
 if (PART == "base_slim" || PART == "base_battery") tray();
 else if (PART == "lid_radar") lid_radar();
-else if (PART == "lid_sense") lid_sense();
 else echo("unknown PART");

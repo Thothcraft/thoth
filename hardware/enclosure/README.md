@@ -1,20 +1,23 @@
 # Thoth node enclosure
 
-Parametric 3D-printed case for the Thoth sensing node. Two independent
-options → **4 variants**, plus "use it as a normal Pi" thanks to
-full-edge port windows:
+Parametric 3D-printed case for the Thoth sensing node
+(Raspberry Pi + DreamHAT+ BGT60TR13C radar). Two bottoms, one lid →
+**3 parts**:
 
 ```
                  TOP (lid cap)
-            ┌─────────────┬─────────────┐
-            │  radar      │   sense     │
-            │  DreamHAT+  │   Sense HAT │
-BOTTOM      ├─────────────┼─────────────┤
- slim       │ Pi + HAT    │ Pi + HAT    │
- battery    │ + PiSugar 3 │ + PiSugar 3 │
-            │   Plus      │   Plus      │
-            └─────────────┴─────────────┘
+            ┌─────────────┐
+            │  radar      │
+            │  DreamHAT+  │
+BOTTOM      ├─────────────┤
+ slim       │ Pi + HAT    │
+ battery    │ + PiSugar 3 │
+            │   Plus      │
+            └─────────────┘
 ```
+
+The RPi5 Active Cooler mounts under the DreamHAT's GPIO header inside
+the `hat_gap` — it doesn't change any enclosure dimension.
 
 - **Board support**: Raspberry Pi 3B+/4B/5 (same 85×56 mm footprint +
   mounting holes; ports stay fully accessible through the side windows,
@@ -31,13 +34,13 @@ BOTTOM      ├─────────────┼───────�
 | `enclosure.py` | Python generator (trimesh + manifold3d) — emits watertight STL |
 | `enclosure.scad` | Same model in OpenSCAD for GUI tweaking |
 | `DIMENSIONS.md` | Every parameter, its source, and what to VERIFY on real boards |
-| `stl/` | Pre-built parts: `thoth_base_slim`, `thoth_base_battery`, `thoth_lid_radar`, `thoth_lid_sense` |
+| `stl/` | Pre-built parts: `thoth_base_slim`, `thoth_base_battery`, `thoth_lid_radar` |
 
 ## Regenerate the STLs
 
 ```bash
 pip install trimesh manifold3d shapely
-python enclosure.py                 # all 4 parts → stl/
+python enclosure.py                 # all 3 parts → stl/
 python enclosure.py --part lid_radar
 python enclosure.py --check-only    # validate without writing
 ```
@@ -55,8 +58,8 @@ Or open `enclosure.scad`, set `PART`, F6, export STL.
 - Print orientation: **trays as-is** (flat on the floor); **lids
   top-face-down** for a clean exterior surface — the radar membrane is
   on the underside of the plate, unaffected.
-- The membrane is 1.0 mm — make sure your slicer doesn't thin it below
-  ~0.8 mm (set "minimum thickness" if warned).
+- The membrane is 1.2 mm — make sure your slicer doesn't thin it below
+  ~1.0 mm (set "minimum thickness" if warned).
 
 ## BOM per unit
 
@@ -73,6 +76,5 @@ Or open `enclosure.scad`, set `PART`, F6, export STL.
   try); if your printer runs tight, drop `clearance` to 0.25.
 - The radar aperture is sized for the published 40°H × 65°V FOV of the
   DreamHAT+ at an 8 mm antenna→membrane gap; see `radar_*` params.
-- ⚠ Before printing: measure the five VERIFY/MEASURE dimensions in
-  `DIMENSIONS.md` on your actual boards (antenna position, PiSugar
-  height/ports, Sense HAT matrix/joystick, header stack height).
+- ⚠ Before printing: measure the VERIFY dimensions in `DIMENSIONS.md`
+  on your actual boards (PiSugar height/ports, header stack height).
