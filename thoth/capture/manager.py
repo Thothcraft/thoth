@@ -275,6 +275,7 @@ class CaptureManager:
             self._write_manifest(rec)
         out = self.root / f"{capture_id}.zip"
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in sorted(d.iterdir()):
-                zf.write(f, arcname=f"{capture_id}/{f.name}")
+            for f in sorted(d.rglob("*")):
+                if f.is_file():
+                    zf.write(f, arcname=f"{capture_id}/{f.relative_to(d)}")
         return out
