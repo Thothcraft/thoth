@@ -357,12 +357,14 @@ def pair(ctx, user, password, brain):
         sys.exit(1)
     user_token = body["access_token"]
 
-    # 2. start pairing (unauthenticated device call)
+    # 2. start pairing — present the existing device token when there is one
+    # so an online device is allowed to re-pair instead of being 409-blocked.
     st, body = _brain_req("POST", f"{brain}/api/device/pairing/start", {
         "device_id": cfg.device_id,
         "device_name": cfg.device_name,
         "device_type": "thoth",
-        "hardware_info": {"hostname": socket.gethostname()}})
+        "hardware_info": {"hostname": socket.gethostname()}},
+        token=cfg.device_token or None)
     if st != 200:
         click.echo(f"pairing/start failed: {st} "
                    f"{body.get('detail') or body}", err=True)
