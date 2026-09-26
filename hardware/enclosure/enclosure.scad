@@ -27,7 +27,7 @@ clearance = 0.35;  corner_r = 3.0;  fillet_r = 4.2;
 screw_pilot = 2.1;  screw_clear = 3.0;  post_r = 3.0;
 
 // ---------------- clips ---------------------------
-clip_w = 6;  clip_t = 1.0;  clip_h = 3.4;  clip_hook = 0.7;
+clip_w = 6;  clip_t = 1.2;  clip_h = 3.4;  clip_hook = 1.0;
 
 // ---------------- port canyons ---------------------
 west_window  = [10, 46];
@@ -46,7 +46,7 @@ hat_offset = [0, -0.5];                        // HAT SW corner on Pi board
 radar_ant_xy   = [30, 26.5];                   // BGT60TR13C centre, from HAT SW
                                              // (=30,30 down-right from top-left)
 radar_aperture = [16, 22];                       // covers 40°H × 65°V FOV
-radar_membrane = 1.0;                            // 0 = fully open
+radar_membrane = 1.2;                            // 0 = fully open
 
 // ---------------- sense lid --------------------------
 sense_matrix_xy = [28, 38];                      // MEASURE
@@ -135,8 +135,9 @@ module tray() {
       translate([wall + clearance + hh[0], wall + clearance + hh[1],
                  floor_t + ub - 6])
         cylinder(d=screw_pilot, h=6, $fn=24);
-    // port canyons — west + east full port windows
-    win_h = stack_top - board_bot - 1.0;
+    // port canyons — west + east full port windows, open to wall top
+    // (a leftover top skin would be a <1mm unprintable wall)
+    win_h = stack_top - board_bot - 0.5 + 0.2;
     translate([-0.2, wall + west_window[0], board_bot + 0.5])
       cube([wall + 0.4, west_window[1] - west_window[0], win_h]);
     translate([outer_w - wall - 0.2, wall + east_window[0],
@@ -204,7 +205,7 @@ module lid_base() {
         cylinder(d=screw_clear, h=lid_t + 0.4, $fn=24);
     cols = lid_vent_grid[0];  rows = lid_vent_grid[1];
     for (i = [0:cols-1]) for (j = [0:rows-1])
-      translate([outer_w*0.70 + i*lid_vent_pitch,
+      translate([outer_w*0.60 + i*lid_vent_pitch,
                  outer_d/2 - (rows-1)*lid_vent_pitch/2
                    + j*lid_vent_pitch, -0.2])
         cylinder(r=lid_vent_r, h=lid_t + 0.4, $fn=24);

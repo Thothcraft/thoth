@@ -64,9 +64,9 @@ class Params:
     post_r: float = 3.0                     # Pi support posts
     # -- retention clips ----------------------------------------------------
     clip_w: float = 6.0
-    clip_t: float = 1.0
+    clip_t: float = 1.2                     # finger thickness — >=1.2 for FDM/MJF walls
     clip_h: float = 3.4                     # finger height above wall inner face base
-    clip_hook: float = 0.7                  # hook depth over board edge
+    clip_hook: float = 1.0                  # hook depth over board edge
     # -- port canyons (cut into wall top edge) -------------------------------
     west_window: tuple = (10.0, 46.0)       # y-range opened on west wall
     east_window: tuple = (10.0, 46.0)       # y-range opened on east wall
@@ -88,7 +88,7 @@ class Params:
                                             # SW corner (= 30,30 down-right from
                                             # the notch-adjacent top-left corner)
     radar_aperture: tuple = (16.0, 22.0)    # opening W×H at inner face — covers 40°×65° FOV
-    radar_membrane: float = 1.0             # 0 → fully open aperture
+    radar_membrane: float = 1.2             # 0 → fully open aperture
     # -- sense lid -------------------------------------------------------------
     sense_matrix_xy: tuple = (28.0, 38.0)   # LED matrix centre on HAT (MEASURE!)
     sense_matrix_wh: tuple = (34.0, 34.0)   # 8×8 LED matrix opening
@@ -273,8 +273,10 @@ def build_tray(p: Params, battery: bool) -> trimesh.Trimesh:
         body = union_all([body, finger, hook])
 
     # -- wall-top canyons --------------------------------------------------
-    # West + east: full port window from board bottom to wall top.
-    win_h = stack_top - board_bot - 1.0
+    # West + east: full port window from board bottom, open all the way
+    # to the wall top — a leftover top skin would be a <1 mm wall
+    # (unprintable) and would block taller plugs anyway.
+    win_h = stack_top - board_bot - 0.5 + 0.2
     wy0, wy1 = p.west_window
     cutters.append(box(p.wall + 0.4, wy1 - wy0, win_h,
                        x=-0.2, y=p.wall + wy0, z=board_bot + 0.5))
@@ -380,7 +382,7 @@ def _lid_base(p: Params):
                            -0.2, sections=32))
     # vent grid on the east half of the plate
     cols, rows = p.lid_vent_grid
-    gx0 = ow * 0.70
+    gx0 = ow * 0.60                       # keep last column clear of the plate edge
     gy0 = od / 2 - (rows - 1) * p.lid_vent_pitch / 2
     for i in range(cols):
         for j in range(rows):
