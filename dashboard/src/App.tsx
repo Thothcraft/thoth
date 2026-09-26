@@ -32,13 +32,54 @@ async function tokenOk(t: string): Promise<'ok' | 'bad' | 'error'> {
   }
 }
 
+/* Portal credentials → local session token via the node-side
+   /api/auth/login bridge (Brain-verified server-side). */
+async function loginWithPassword(
+  username: string, password: string,
+): Promise<'ok' | 'bad' | 'error' | 'tokenless'> {
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    })
+    if (r.status === 401) return 'bad'
+    if (!r.ok) return 'error'
+    const data = await r.json().catch(() => ({}))
+    if (data.token) {
+      saveToken(data.token)
+      return 'ok'
+    }
+    return 'tokenless'
+  } catch {
+    return 'error'
+  }
+}
+
 function SignIn({ onUnlock }: { onUnlock: (t: string) => Promise<void> }) {
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
-  async function submit(v: string) {
+  const [mode, setMode] = useState<'account' | 'token'>('account')
+
+  async function submitAccount(u: string, p: string) {
+    if (!u || !p || busy) return
+    setBusy(true)
+    setErr('')
+    const r = await loginWithPassword(u, p)
+    if (r === 'ok') {
+      const t = getToken()
+      if (t) { location.reload(); return }
+      setErr('signed in but no token returned')
+    } else if (r === 'bad') setErr('invalid username or password')
+    else setErr('sign-in failed — node may be offline from Brain')
+    setBusy(false)
+  }
+
+  async function submitToken(v: string) {
     const t = v.trim()
     if (!t || busy) return
     setBusy(true)
+    setErr('')
     try {
       await onUnlock(t)
       setErr('invalid token (check `thoth token` on the node)')
@@ -47,6 +88,10 @@ function SignIn({ onUnlock }: { onUnlock: (t: string) => Promise<void> }) {
     }
     setBusy(false)
   }
+
+  const field = (sel: string) =>
+    document.querySelector<HTMLInputElement>(`.gatecard ${sel}`)?.value ?? ''
+
   return (
     <div className="gate">
       <div className="gatecard">
@@ -54,26 +99,54 @@ function SignIn({ onUnlock }: { onUnlock: (t: string) => Promise<void> }) {
           <span className="brand"><b>◈</b></span> thoth node
         </h2>
         <div className="sub">{location.hostname} — sign in</div>
-        <input
-          autoFocus type="password" placeholder="node token"
-          autoComplete="current-password"
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') submit((e.target as HTMLInputElement).value)
-          }}
-        />
-        <button className="go" disabled={busy}
-                onClick={() => {
-                  const el = document.querySelector<HTMLInputElement>(
-                    '.gatecard input')
-                  void submit(el?.value ?? '')
-                }}>
-          {busy ? 'checking…' : 'sign in'}
-        </button>
+        {mode === 'account' ? (
+          <>
+            <input
+              autoFocus placeholder="portal username or email"
+              autoComplete="username" className="gate-user"
+            />
+            <input
+              type="password" placeholder="portal password"
+              autoComplete="current-password" className="gate-pass"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter')
+                  void submitAccount(field('.gate-user'), field('.gate-pass'))
+              }}
+            />
+            <button className="go" disabled={busy}
+                    onClick={() =>
+                      void submitAccount(field('.gate-user'), field('.gate-pass'))}>
+              {busy ? 'checking…' : 'sign in'}
+            </button>
+            <small className="muted">
+              same credentials as{' '}
+              <a href="#" onClick={(e) => { e.preventDefault(); setMode('token'); setErr('') }}>
+                node token
+              </a>
+            </small>
+          </>
+        ) : (
+          <>
+            <input
+              autoFocus type="password" placeholder="node token"
+              autoComplete="off" className="gate-tok"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void submitToken(field('.gate-tok'))
+              }}
+            />
+            <button className="go" disabled={busy}
+                    onClick={() => void submitToken(field('.gate-tok'))}>
+              {busy ? 'checking…' : 'unlock'}
+            </button>
+            <small className="muted">
+              <a href="#" onClick={(e) => { e.preventDefault(); setMode('account'); setErr('') }}>
+                portal sign-in
+              </a>{' '}
+              instead
+            </small>
+          </>
+        )}
         <div className="err">{err}</div>
-        <small className="muted">
-          token = the node's <code>local_token</code>
-          (<code>thoth token</code> on the device)
-        </small>
       </div>
     </div>
   )

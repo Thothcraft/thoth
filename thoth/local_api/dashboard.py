@@ -62,12 +62,23 @@ small{font-size:11px}
 <div id="gate"><div class="gatecard">
 <h2>&#9672; thoth node</h2>
 <div class="sub" id="gateSub">sign in to this node</div>
-<input id="gtok" type="password" placeholder="node token"
+<div id="acctMode">
+<input id="guser" placeholder="portal username or email"
+  autocomplete="username">
+<input id="gpass" type="password" placeholder="portal password"
   autocomplete="current-password">
-<button class="go" onclick="unlock()">sign in</button>
+<button class="go" onclick="unlockAcct()">sign in</button>
+<small class="muted"><a href="#" onclick="gateMode('token');return false"
+  style="color:var(--dim)">use node token</a></small>
+</div>
+<div id="tokMode" style="display:none">
+<input id="gtok" type="password" placeholder="node token"
+  autocomplete="off">
+<button class="go" onclick="unlock()">unlock</button>
+<small class="muted"><a href="#" onclick="gateMode('acct');return false"
+  style="color:var(--dim)">portal sign-in</a> instead</small>
+</div>
 <div class="err" id="gateErr"></div>
-<small class="muted">token = the node's <code>local_token</code>
-(config/CLI <code>thoth token</code>) or the pairing secret</small>
 </div></div>
 <header><b>◈ thoth node</b><span id="devname" class="muted"></span>
 <nav>
@@ -159,11 +170,31 @@ if (TOKEN) localStorage.setItem('thoth_tok', TOKEN);
 document.getElementById('tok').value = TOKEN;
 const gate=document.getElementById('gate'),
       gateErr=document.getElementById('gateErr'),
-      gtok=document.getElementById('gtok');
+      gtok=document.getElementById('gtok'),
+      guser=document.getElementById('guser'),
+      gpass=document.getElementById('gpass');
 function showGate(msg){gate.classList.add('on');gateErr.textContent=msg||'';
-  if(msg==null)gtok.value=''; gtok.focus();}
+  guser.focus();}
 function hideGate(){gate.classList.remove('on');}
+function gateMode(m){
+  document.getElementById('acctMode').style.display=m==='acct'?'':'none';
+  document.getElementById('tokMode').style.display=m==='token'?'':'none';
+  gateErr.textContent='';}
 gtok.addEventListener('keydown',e=>{if(e.key==='Enter')unlock();});
+gpass.addEventListener('keydown',e=>{if(e.key==='Enter')unlockAcct();});
+async function unlockAcct(){
+  const u=guser.value.trim(), p=gpass.value;
+  if(!u||!p)return;
+  const r=await fetch('/api/auth/login',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({username:u,password:p})}).catch(()=>null);
+  if(!r){gateErr.textContent='node unreachable';return;}
+  if(r.status===401){gateErr.textContent='invalid username or password';return;}
+  const b=await r.json().catch(()=>({}));
+  if(!b.token){gateErr.textContent='sign-in failed — check Brain connection';return;}
+  TOKEN=b.token; localStorage.setItem('thoth_tok',TOKEN);
+  document.getElementById('tok').value=TOKEN; hideGate(); refresh();
+}
 async function unlock(){
   const t=gtok.value.trim(); if(!t)return;
   TOKEN=t; const r=await api('/api/status');

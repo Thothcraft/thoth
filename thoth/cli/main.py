@@ -223,6 +223,14 @@ def expose(ctx, lan, off, sensors_, actuators_, expose_port):
     click.echo(f"local token: {cfg.local_token}")
 
 
+@main.command()
+@click.pass_context
+def token(ctx):
+    """Print the local API/dashboard token for this node."""
+    cfg = ctx.obj["config"]
+    click.echo(cfg.local_token)
+
+
 @main.group()
 def capture():
     """Manage captures."""

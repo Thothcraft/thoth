@@ -335,9 +335,36 @@ class _Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        path = urlparse(self.path).path
+        # Public auth endpoint: portal username+password -> local token.
+        # Verified against Brain; the node returns its own local_token so the
+        # dashboard can open a session without exposing it in the URL.
+        if path == "/api/auth/login":
+            body = self._body()
+            username = str(body.get("username") or "").strip()
+            password = str(body.get("password") or "")
+            if not username or not password:
+                return self._json(422, {"error": "username and password required"})
+            cfg = getattr(self.daemon, "config", None)
+            brain = (getattr(cfg, "brain_url", None)
+                     or "https://api.thothcraft.com").rstrip("/")
+            try:
+                import urllib.request as _ur
+                req = _ur.Request(
+                    f"{brain}/api/token",
+                    data=json.dumps(
+                        {"username": username, "password": password}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                with _ur.urlopen(req, timeout=15) as resp:
+                    ok = resp.status == 200
+            except Exception:
+                ok = False
+            if not ok:
+                return self._json(401, {"error": "invalid credentials"})
+            return self._json(200, {"token": self.server.token})  # type: ignore[attr-defined]
         if not self._authorized():
             return
-        path = urlparse(self.path).path
         body = self._body()
         d = self.daemon
         if path == "/api/captures/start":
