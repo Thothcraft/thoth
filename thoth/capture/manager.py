@@ -68,17 +68,51 @@ class CaptureManager:
         self._active[capture_id] = rec
         return rec
 
+    _EXT = {"jpeg": "jpg", "png": "png", "pcm_s16le": "pcm"}
+
     def record(self, capture_id: str, sample: Any) -> None:
         rec = self._active.get(capture_id)
         if rec is None:
             return
         sid = sample.sensor_id
+        row = sample.to_dict() if hasattr(sample, "to_dict") \
+            else dict(sample)
+        payload = row.get("payload") or {}
+        enc = str(payload.get("encoding") or "")
+        data64 = payload.get("data")
+        # Binary payloads land as real files (images you can open, pcm you
+        # can play); the JSONL stays an index pointing at them.
+        if isinstance(data64, str) and enc in self._EXT:
+            try:
+                import base64
+                blob = base64.b64decode(data64)
+            except Exception:
+                blob = b""
+            if blob:
+                n = rec["sample_counts"].get(sid, 0)
+                if enc == "pcm_s16le":
+                    fname = f"{sid}.pcm"
+                    with (self._dir(capture_id) / fname).open("ab") as bf:
+                        offset = bf.tell()
+                        bf.write(blob)
+                else:
+                    sdir = self._dir(capture_id) / sid
+                    sdir.mkdir(exist_ok=True)
+                    fname = f"{sid}/{n:06d}.{self._EXT[enc]}"
+                    offset = None
+                    (self._dir(capture_id) / fname).write_bytes(blob)
+                payload = dict(payload)
+                payload.pop("data", None)
+                payload["file"] = fname
+                payload["bytes"] = len(blob)
+                if offset is not None:
+                    payload["offset"] = offset
+                row["payload"] = payload
         with (self._dir(capture_id) / f"{sid}.jsonl").open("a") as fh:
-            fh.write(json.dumps(sample.to_dict()) + "\n")
+            fh.write(json.dumps(row) + "\n")
         rec["sample_counts"][sid] = rec["sample_counts"].get(sid, 0) + 1
         ts = float(getattr(sample, "timestamp", 0.0) or
-                   (sample.to_dict().get("timestamp") if hasattr(
-                       sample, "to_dict") else 0.0) or time.time())
+                   row.get("timestamp") or time.time())
         sec = str(int(ts))
         bucket = rec["seconds"].setdefault(sec, {})
         bucket[sid] = bucket.get(sid, 0) + 1

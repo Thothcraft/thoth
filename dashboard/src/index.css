@@ -88,7 +88,7 @@ small { font-size: 11px; }
 a { color: var(--acc); }
 
 /* Live page 3-pane layout */
-.live-grid { display: grid; grid-template-columns: 220px 1fr 340px; gap: 14px; height: calc(100vh - 90px); }
+.live-grid { display: grid; grid-template-columns: 200px 1fr 1fr; gap: 14px; height: calc(100vh - 90px); }
 .live-grid .pane { min-height: 0; display: flex; flex-direction: column; }
 .sensor-list button {
   display: block; width: 100%; text-align: left; margin-bottom: 4px;

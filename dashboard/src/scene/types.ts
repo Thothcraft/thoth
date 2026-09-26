@@ -55,7 +55,19 @@ export interface RoomDevice {
   pos: V3
   rot_y?: number
   mount?: Mount
+  /** which named room this device lives in; '' = the primary room */
+  room_id?: string
   sensors?: RoomSensorSpec[]
+}
+
+/** A secondary named room: own geometry + furniture, devices join it via
+ * `RoomDevice.room_id`. */
+export interface RoomSpec {
+  room_id: string
+  name?: string
+  dims: RoomDims
+  walls?: RoomWall[]
+  furniture?: RoomFurniture[]
 }
 
 export interface RoomDoc {
@@ -66,7 +78,41 @@ export interface RoomDoc {
   walls?: RoomWall[]
   furniture?: RoomFurniture[]
   devices?: RoomDevice[]
+  /** extra rooms beyond the primary (top-level) one */
+  rooms?: RoomSpec[]
   updated_at?: number
+}
+
+/** All selectable rooms in a doc: primary first, then `rooms[]` entries. */
+export function roomOptions(doc: RoomDoc):
+    Array<{ room_id: string; name: string }> {
+  const out = [{ room_id: doc.room_id || '',
+                 name: doc.name || 'main room' }]
+  for (const r of doc.rooms ?? [])
+    out.push({ room_id: r.room_id, name: r.name || r.room_id })
+  return out
+}
+
+/** Renderable RoomDoc for one room: that room's geometry/furniture plus
+ * only the devices assigned to it (unassigned = primary room). */
+export function roomView(doc: RoomDoc, roomId: string): RoomDoc {
+  const primary = doc.room_id || ''
+  if (roomId === primary) {
+    return { ...doc,
+      devices: (doc.devices ?? []).filter(
+        (d) => !d.room_id || d.room_id === primary) }
+  }
+  const r = (doc.rooms ?? []).find((x) => x.room_id === roomId)
+  if (!r) return { ...doc, devices: [] }
+  return {
+    ...doc,
+    room_id: r.room_id,
+    name: r.name || r.room_id,
+    dims: r.dims,
+    walls: r.walls ?? [],
+    furniture: r.furniture ?? [],
+    devices: (doc.devices ?? []).filter((d) => d.room_id === roomId),
+  }
 }
 
 export const EMPTY_ROOM: RoomDoc = {

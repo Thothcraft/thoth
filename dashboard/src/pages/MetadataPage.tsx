@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ThreeEvent } from '@react-three/fiber'
 import { get, put } from '../api'
-import { RoomScene } from '../scene'
-import type { RoomDevice, RoomDoc, RoomFurniture, V3 } from '../scene'
+import { RoomScene, roomOptions, roomView } from '../scene'
+import { EMPTY_ROOM } from '../scene/types'
+import type { RoomDevice, RoomDoc, RoomFurniture, RoomSpec, V3 } from '../scene'
 
 const ts = (t?: number) => t ? new Date(t * 1000).toLocaleString() : '–'
 
@@ -117,6 +118,7 @@ export default function MetadataPage() {
   const [saved, setSaved] = useState('')
   const [addType, setAddType] = useState('table')
   const [newDevice, setNewDevice] = useState('')
+  const [selRoom, setSelRoom] = useState('')
 
   const refresh = useCallback(async () => {
     const m = await get<any>('/api/v1/metadata')
@@ -125,7 +127,10 @@ export default function MetadataPage() {
       setManual(m.body.manual ?? {})
     }
     const r = await get<RoomDoc>('/api/v1/room')
-    if (r.body) setRoom(r.body)
+    if (r.body) {
+      setRoom(r.body)
+      setSelRoom((prev) => prev || (r.body!.room_id ?? ''))
+    }
   }, [])
 
   useEffect(() => {
@@ -160,24 +165,42 @@ export default function MetadataPage() {
     })
   }
 
+  /** Mutate the ACTIVE room's sections — top-level when editing the
+   * primary room, rooms[] entry otherwise. Devices always mutate at the
+   * top level (they carry room_id). */
+  const mutateRoom = (fn: (d: RoomDoc | RoomSpec) => void) => {
+    mutate((doc) => {
+      const primary = doc.room_id || ''
+      if (selRoom === primary) return fn(doc)
+      const r = (doc.rooms ?? []).find((x) => x.room_id === selRoom)
+      if (r) fn(r)
+    })
+  }
+
+  // The doc as rendered for the active room.
+  const view = room ? roomView(room, selRoom || (room.room_id ?? ''))
+                    : null
+
   const selId = sel?.id ?? null
 
   const findItem = (kind: 'device' | 'furniture', id: string) =>
     kind === 'device'
       ? room?.devices?.find((d, i) => (d.device_id || `dev-${i}`) === id)
-      : room?.furniture?.find((f, i) => (f.id ?? `furniture-${i}`) === id)
+      : (view?.furniture ?? []).find((f, i) => (f.id ?? `furniture-${i}`) === id)
 
   const onMove = (kind: 'device' | 'furniture', id: string, pos: V3) => {
     setDragging(true)
-    mutate((doc) => {
-      if (kind === 'device') {
+    if (kind === 'device') {
+      mutate((doc) => {
         const d = doc.devices?.find((x, i) => (x.device_id || `dev-${i}`) === id)
         if (d) d.pos = pos
-      } else {
-        const f = doc.furniture?.find((x, i) => (x.id ?? `furniture-${i}`) === id)
+      })
+    } else {
+      mutateRoom((r) => {
+        const f = r.furniture?.find((x, i) => (x.id ?? `furniture-${i}`) === id)
         if (f) f.pos = pos
-      }
-    })
+      })
+    }
   }
   const onCommit = () => {
     setDragging(false)
@@ -233,27 +256,24 @@ export default function MetadataPage() {
         </div>
 
         <div className="card">
-          <h3>Room</h3>
+          <h3>Room — {roomOptions(room ?? EMPTY_ROOM).find((r) => r.room_id === selRoom)?.name ?? '…'}</h3>
           <div className="field"><span>name</span>
-            <input value={room?.name ?? ''}
-                   onChange={(e) => mutate((d) => { d.name = e.target.value })} /></div>
-          <div className="field"><span>room id</span>
-            <input value={room?.room_id ?? ''}
-                   onChange={(e) => mutate((d) => { d.room_id = e.target.value })} /></div>
+            <input value={view?.name ?? ''}
+                   onChange={(e) => mutateRoom((r) => { r.name = e.target.value })} /></div>
           <div className="field"><span>dims (w × d × h)</span>
             <div className="row">
-              <Num v={room?.dims.w ?? 0} onChange={(n) => mutate((d) => { d.dims.w = n })} />
-              <Num v={room?.dims.d ?? 0} onChange={(n) => mutate((d) => { d.dims.d = n })} />
-              <Num v={room?.dims.h ?? 0} onChange={(n) => mutate((d) => { d.dims.h = n })} />
+              <Num v={view?.dims.w ?? 0} onChange={(n) => mutateRoom((d) => { d.dims.w = n })} />
+              <Num v={view?.dims.d ?? 0} onChange={(n) => mutateRoom((d) => { d.dims.d = n })} />
+              <Num v={view?.dims.h ?? 0} onChange={(n) => mutateRoom((d) => { d.dims.h = n })} />
             </div></div>
           <div className="row">
             <select value={addType} onChange={(e) => setAddType(e.target.value)}>
               {['sofa', 'table', 'bed', 'desk', 'shelf', 'wall'].map((t) =>
                 <option key={t}>{t}</option>)}
             </select>
-            <button onClick={() => mutate((d) => {
-              d.furniture = d.furniture ?? []
-              d.furniture.push({
+            <button onClick={() => mutateRoom((r) => {
+              r.furniture = r.furniture ?? []
+              r.furniture.push({
                 id: `f-${Date.now().toString(36)}`, type: addType,
                 pos: [0, 0, 0], rot_y: 0,
                 dims: addType === 'bed' ? [2, 0.5, 1.6]
@@ -271,7 +291,7 @@ export default function MetadataPage() {
                 d.devices = d.devices ?? []
                 d.devices.push({
                   device_id: newDevice.trim(), pos: [0, 1.2, 0],
-                  rot_y: 0, mount: 'wall',
+                  rot_y: 0, mount: 'wall', room_id: selRoom,
                   sensors: [{ type: 'radar', pos: [0, 0, 0.05],
                               rot_y: 0, tilt: 0, fov_deg: 60, range_m: 6 }],
                 })
@@ -287,10 +307,30 @@ export default function MetadataPage() {
         </div>
       </div>
 
-      <div className="editor-pane">
+      <div className="editor-pane" style={{ position: 'relative' }}>
+        {room && (
+          <div className="row" style={{ marginBottom: 8, flexWrap: 'wrap' }}>
+            {roomOptions(room).map((r) => (
+              <button key={r.room_id || 'primary'}
+                      className={r.room_id === selRoom ? 'go' : ''}
+                      onClick={() => { setSelRoom(r.room_id); setSel(null) }}>
+                {r.name}
+              </button>
+            ))}
+            <button className="mini" onClick={() => {
+              const id = `room-${Date.now().toString(36)}`
+              mutate((d) => {
+                d.rooms = d.rooms ?? []
+                d.rooms.push({ room_id: id, name: 'new room',
+                               dims: { ...d.dims }, walls: [], furniture: [] })
+              })
+              setSelRoom(id)
+            }}>+ room</button>
+          </div>
+        )}
         {room && (
           <RoomScene
-            room={room}
+            room={view ?? room}
             selectedId={selId}
             controlsEnabled={!dragging}
             onBackgroundClick={() => setSel(null)}
@@ -300,17 +340,17 @@ export default function MetadataPage() {
                 ? (p.item as RoomDevice).device_id
                 : ((p.item as RoomFurniture).id ?? ''),
             })}
-            overlays={
-              <DragLayer room={room} setSel={setSel}
+            overlays={view && (
+              <DragLayer room={view} setSel={setSel}
                          onMove={onMove} onCommit={onCommit}
                          onBegin={() => setDragging(true)} />
-            }
+            )}
           />
         )}
 
         {sel && (selDevice || selFurn) && (
           <div className="card" style={{
-            position: 'absolute', right: 10, top: 10, width: 240,
+            position: 'absolute', right: 10, top: 46, width: 250,
             background: 'rgba(23,28,38,0.94)' }}>
             <h3>{sel.kind === 'device' ? 'Device' : 'Furniture'} — {sel.id}</h3>
             {selDevice && (
@@ -322,6 +362,27 @@ export default function MetadataPage() {
                              (x, i) => (x.device_id || `dev-${i}`) === sel.id)
                            if (t) t.device_id = e.target.value
                          })} /></div>
+                <div className="field"><span>room</span>
+                  <select value={selDevice.room_id ?? ''}
+                          onChange={(e) => mutate((d) => {
+                            const t = d.devices?.find(
+                              (x, i) => (x.device_id || `dev-${i}`) === sel.id)
+                            if (t) t.room_id = e.target.value
+                            if (t) {
+                              // keep a sane pos inside the new room's walls
+                              const rid = e.target.value
+                              const rr = rid === (d.room_id || '')
+                                ? d.dims
+                                : (d.rooms ?? []).find(
+                                    (x) => x.room_id === rid)?.dims
+                              if (rr && t) t.pos = [0, Math.min(t.pos[1], rr.h), 0]
+                            }
+                          })}>
+                    {roomOptions(room!).map((r) => (
+                      <option key={r.room_id || 'primary'}
+                              value={r.room_id}>{r.name}</option>
+                    ))}
+                  </select></div>
                 <div className="field"><span>mount</span>
                   <select value={selDevice.mount ?? 'wall'}
                           onChange={(e) => mutate((d) => {
@@ -370,8 +431,8 @@ export default function MetadataPage() {
               <>
                 <div className="field"><span>type</span>
                   <select value={selFurn.type}
-                          onChange={(e) => mutate((d) => {
-                            const t = d.furniture?.find(
+                          onChange={(e) => mutateRoom((r) => {
+                            const t = r.furniture?.find(
                               (x, i) => (x.id ?? `furniture-${i}`) === sel.id)
                             if (t) t.type = e.target.value
                           })}>
@@ -381,8 +442,8 @@ export default function MetadataPage() {
                 <div className="field"><span>pos (x y z)</span>
                   <div className="row">
                     {selFurn.pos.map((v, i) => (
-                      <Num key={i} v={v} onChange={(n) => mutate((d) => {
-                        const t = d.furniture?.find(
+                      <Num key={i} v={v} onChange={(n) => mutateRoom((r) => {
+                        const t = r.furniture?.find(
                           (x, j) => (x.id ?? `furniture-${j}`) === sel.id)
                         if (t) t.pos[i] = n
                       })} />
@@ -391,8 +452,8 @@ export default function MetadataPage() {
                 <div className="field"><span>dims (w h d)</span>
                   <div className="row">
                     {selFurn.dims.map((v, i) => (
-                      <Num key={i} v={v} onChange={(n) => mutate((d) => {
-                        const t = d.furniture?.find(
+                      <Num key={i} v={v} onChange={(n) => mutateRoom((r) => {
+                        const t = r.furniture?.find(
                           (x, j) => (x.id ?? `furniture-${j}`) === sel.id)
                         if (t) t.dims[i] = n
                       })} />
@@ -401,8 +462,8 @@ export default function MetadataPage() {
                 <div className="field"><span>yaw (deg)</span>
                   <Num v={((selFurn.rot_y ?? 0) * 180) / Math.PI}
                        step={5}
-                       onChange={(n) => mutate((d) => {
-                         const t = d.furniture?.find(
+                       onChange={(n) => mutateRoom((r) => {
+                         const t = r.furniture?.find(
                            (x, i) => (x.id ?? `furniture-${i}`) === sel.id)
                          if (t) t.rot_y = (n * Math.PI) / 180
                        })} /></div>
@@ -410,14 +471,17 @@ export default function MetadataPage() {
             )}
             <div className="row">
               <button className="danger mini" onClick={() => {
-                mutate((d) => {
-                  if (sel.kind === 'device')
+                if (sel.kind === 'device') {
+                  mutate((d) => {
                     d.devices = (d.devices ?? []).filter(
                       (x, i) => (x.device_id || `dev-${i}`) !== sel.id)
-                  else
-                    d.furniture = (d.furniture ?? []).filter(
+                  })
+                } else {
+                  mutateRoom((r) => {
+                    r.furniture = (r.furniture ?? []).filter(
                       (x, i) => (x.id ?? `furniture-${i}`) !== sel.id)
-                })
+                  })
+                }
                 setSel(null)
               }}>remove</button>
             </div>

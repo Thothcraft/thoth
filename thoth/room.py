@@ -69,18 +69,45 @@ def normalize_room(doc: Dict[str, Any]) -> Dict[str, Any]:
         walls.append({"p": _vec3(w.get("p")), "s": _vec3(w.get("s"))})
     out["walls"] = walls
 
-    furniture = []
-    for f in doc.get("furniture") or []:
-        if not isinstance(f, dict):
+    def _furniture(items: Any) -> list:
+        rows = []
+        for f in items or []:
+            if not isinstance(f, dict):
+                continue
+            rows.append({
+                "id": str(f.get("id") or f"furniture-{len(rows)}"),
+                "type": str(f.get("type") or "table"),
+                "pos": _vec3(f.get("pos")),
+                "rot_y": _num(f.get("rot_y")),
+                "dims": _vec3(f.get("dims"), (0.8, 0.5, 0.8)),
+            })
+        return rows
+
+    out["furniture"] = _furniture(doc.get("furniture"))
+
+    # Additional named rooms. The top-level sections describe the
+    # "primary" room; each entry here is a fully-formed extra room that
+    # devices can be assigned to via ``devices[].room_id``.
+    rooms = []
+    for r in doc.get("rooms") or []:
+        if not isinstance(r, dict):
             continue
-        furniture.append({
-            "id": str(f.get("id") or f"furniture-{len(furniture)}"),
-            "type": str(f.get("type") or "table"),
-            "pos": _vec3(f.get("pos")),
-            "rot_y": _num(f.get("rot_y")),
-            "dims": _vec3(f.get("dims"), (0.8, 0.5, 0.8)),
+        rdims = r.get("dims") if isinstance(r.get("dims"), dict) else {}
+        rwalls = []
+        for w in r.get("walls") or []:
+            if isinstance(w, dict):
+                rwalls.append({"p": _vec3(w.get("p")),
+                               "s": _vec3(w.get("s"))})
+        rooms.append({
+            "room_id": str(r.get("room_id") or f"room-{len(rooms)}"),
+            "name": str(r.get("name") or ""),
+            "dims": {"w": _num(rdims.get("w"), 6.0),
+                     "d": _num(rdims.get("d"), 4.0),
+                     "h": _num(rdims.get("h"), 2.6)},
+            "walls": rwalls,
+            "furniture": _furniture(r.get("furniture")),
         })
-    out["furniture"] = furniture
+    out["rooms"] = rooms
 
     devices = []
     for dev in doc.get("devices") or []:
@@ -103,6 +130,8 @@ def normalize_room(doc: Dict[str, Any]) -> Dict[str, Any]:
             "pos": _vec3(dev.get("pos")),
             "rot_y": _num(dev.get("rot_y")),
             "mount": str(dev.get("mount") or "wall"),
+            # which named room this device belongs to ("" = primary room)
+            "room_id": str(dev.get("room_id") or ""),
             "sensors": sensors,
         })
     out["devices"] = devices

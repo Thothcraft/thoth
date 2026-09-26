@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { get } from '../api'
-import { RoomScene } from '../scene'
+import { RoomScene, roomOptions, roomView } from '../scene'
 import type { RoomDevice, RoomDoc } from '../scene'
+import { StreamView, type Sample } from '../components/StreamView'
 
 const fmtTs = (t?: number) =>
   t ? new Date(t * 1000).toLocaleTimeString() : '–'
@@ -11,7 +12,13 @@ interface SensorInfo {
   type?: string
   capabilities?: string[]
   sample_rate?: number
+  metadata?: { name?: string }
 }
+
+const sensorLabel = (s: SensorInfo) =>
+  s.metadata?.name || s.id
+
+const MAX_KEEP = 200
 
 /**
  * Live: sensor list · open-roof RoomScene · sample tail stream.
@@ -21,11 +28,13 @@ interface SensorInfo {
 export default function LivePage() {
   const [sensors, setSensors] = useState<SensorInfo[]>([])
   const [room, setRoom] = useState<RoomDoc | null>(null)
+  const [selRoom, setSelRoom] = useState('')
   const [selSensor, setSelSensor] = useState<string>('')
   const [streaming, setStreaming] = useState(false)
   const [count, setCount] = useState(0)
   const [rate, setRate] = useState(0)
   const [lastTs, setLastTs] = useState<number>(0)
+  const [samples, setSamples] = useState<Sample[]>([])
   const outRef = useRef<HTMLPreElement>(null)
   const cursorRef = useRef(0)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -36,7 +45,10 @@ export default function LivePage() {
       setSensors(r.body?.sensors ?? [])
     })
     get<RoomDoc>('/api/v1/room').then((r) => {
-      if (r.body?.format === 'room/v1') setRoom(r.body)
+      if (r.body?.format === 'room/v1') {
+        setRoom(r.body)
+        setSelRoom((prev) => prev || (r.body!.room_id ?? ''))
+      }
     })
   }, [])
 
@@ -51,6 +63,7 @@ export default function LivePage() {
     cursorRef.current = 0
     setCount(0)
     setRate(0)
+    setSamples([])
     if (outRef.current) outRef.current.textContent = ''
     if (!sid) return
     setStreaming(true)
@@ -70,6 +83,8 @@ export default function LivePage() {
         setLastTs(list[list.length - 1].timestamp ?? 0)
       }
       const el = outRef.current
+      if (list.length)
+        setSamples((prev) => [...prev, ...list].slice(-MAX_KEEP))
       if (el) {
         let text = el.textContent ?? ''
         for (const s of list) {
@@ -114,8 +129,8 @@ export default function LivePage() {
             <button key={s.id}
                     className={s.id === selSensor ? 'on' : ''}
                     onClick={() => selectSensor(s.id)}>
-              {s.id}
-              <div className="muted"><small>{s.type}</small></div>
+              {sensorLabel(s)}
+              <div className="muted"><small>{s.type} · {s.id}</small></div>
             </button>
           ))}
           {!sensors.length && <span className="muted">no sensors</span>}
@@ -123,8 +138,24 @@ export default function LivePage() {
       </div>
 
       <div className="room-pane">
+        {room && roomOptions(room).length > 1 && (
+          <div style={{ position: 'absolute', top: 8, left: 8, zIndex: 5,
+                        display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {roomOptions(room).map((r) => (
+              <button key={r.room_id || 'primary'} className="mini"
+                      style={{
+                        opacity: r.room_id === selRoom ? 1 : 0.55,
+                        borderColor: r.room_id === selRoom
+                          ? 'var(--acc)' : 'var(--line)',
+                      }}
+                      onClick={() => setSelRoom(r.room_id)}>
+                {r.name}
+              </button>
+            ))}
+          </div>
+        )}
         <RoomScene
-          room={room}
+          room={room ? roomView(room, selRoom || (room.room_id ?? '')) : room}
           selectedId={selDeviceId}
           onPick={(p) => {
             if (p.kind === 'device') {
@@ -144,7 +175,9 @@ export default function LivePage() {
 
       <div className="pane">
         <div className="card" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          <h3>Stream — {selSensor || 'select a sensor'}</h3>
+          <h3>Stream — {sensors.find((s) => s.id === selSensor)
+            ? sensorLabel(sensors.find((s) => s.id === selSensor)!)
+            : 'select a sensor'}</h3>
           <div className="row" style={{ marginBottom: 8 }}>
             <button className="go" disabled={!selSensor || streaming}
                     onClick={() => start(selSensor)}>stream</button>
@@ -153,7 +186,17 @@ export default function LivePage() {
               {count} samples · {rate.toFixed(1)}/s · last {fmtTs(lastTs)}
             </span>
           </div>
-          <pre id="liveOut" ref={outRef} style={{ flex: 1 }} />
+          <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+            <StreamView
+              type={sensors.find((s) => s.id === selSensor)?.type ?? ''}
+              samples={samples} />
+            <details style={{ marginTop: 10 }}>
+              <summary className="muted" style={{ cursor: 'pointer', fontSize: 12 }}>
+                raw payload tail
+              </summary>
+              <pre id="liveOut" ref={outRef} style={{ flex: 1, maxHeight: 200 }} />
+            </details>
+          </div>
         </div>
       </div>
     </div>
