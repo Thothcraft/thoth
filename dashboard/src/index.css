@@ -77,6 +77,19 @@ tr.sel td { background: #1d2634; }
 .pill.ok { background: #1d4a30; color: var(--ok); }
 .pill.err { background: #452024; color: var(--err); }
 .pill.warn { background: #453a1d; color: var(--warn); }
+.pill.live { background: #1d4a30; color: var(--ok); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.45; } }
+
+/* selectable sensor chips (captures page) */
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  border: 1px solid var(--line); border-radius: 16px; padding: 4px 12px;
+  background: var(--panel-2); cursor: pointer; font-size: 12px; color: var(--fg);
+}
+.chip.on { border-color: var(--ok); background: #1d4a30; }
+.chip .muted { font-size: 10px; }
+.stat { display: inline-block; margin-right: 14px; font-size: 12px; color: var(--dim); }
+.stat b { color: var(--fg); font-weight: 600; }
 
 pre {
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
@@ -92,9 +105,12 @@ a { color: var(--acc); }
 .live-grid .pane { min-height: 0; display: flex; flex-direction: column; }
 .sensor-list button {
   display: block; width: 100%; text-align: left; margin-bottom: 4px;
-  background: var(--panel-2);
+  background: var(--panel-2); border-left: 3px solid transparent;
 }
-.sensor-list button.on { border-color: var(--acc); }
+.sensor-list button.on {
+  border-color: var(--acc); border-left-color: var(--acc);
+  background: #1d2634;
+}
 .room-pane { position: relative; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); }
 #liveOut { flex: 1; min-height: 0; }
 

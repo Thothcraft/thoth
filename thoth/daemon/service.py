@@ -535,7 +535,8 @@ class ThothDaemon:
         allowed = self._exposure()["actuators"]
         return not allowed or actuator_id in allowed
 
-    def tail_sensor(self, sensor_id: str, cursor: int = 0) -> Optional[Dict[str, Any]]:
+    def tail_sensor(self, sensor_id: str, cursor: int = 0,
+                    limit: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Return buffered samples newer than ``cursor`` for one sensor.
 
         Reads the stream's ring buffer non-destructively (``snapshot``), so
@@ -543,6 +544,11 @@ class ThothDaemon:
         ``sequence`` is the ordering key, so a client's cursor is just the
         last sequence it saw — stateless and safe for concurrent clients.
         Returns ``None`` for unknown or non-exposed sensors.
+
+        ``limit`` bounds the response: ``0`` returns only the latest cursor
+        (a cheap "jump to live edge" probe), and ``N`` returns the newest
+        ``N`` samples — without it a fast sensor can dump the whole 4096-
+        sample ring on the first poll and stall the client.
         """
         if not self.sensor_exposed(sensor_id):
             return None
@@ -552,8 +558,17 @@ class ThothDaemon:
         snap = stream.snapshot()
         latest = max((s.sequence for s in snap), default=cursor)
         samples = [s.to_dict() for s in snap if s.sequence > cursor]
-        return {"sensor_id": sensor_id, "cursor": latest,
-                "samples": samples}
+        skipped = 0
+        if limit is not None:
+            if limit <= 0:
+                samples = []          # cursor-only probe
+            elif len(samples) > limit:
+                skipped, samples = len(samples) - limit, samples[-limit:]
+        out = {"sensor_id": sensor_id, "cursor": latest,
+               "samples": samples}
+        if skipped:
+            out["skipped"] = skipped
+        return out
 
     # -- actuators ---------------------------------------------------------------
     def actuators(self) -> List[Dict[str, Any]]:

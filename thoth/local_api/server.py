@@ -238,7 +238,11 @@ class _Handler(BaseHTTPRequestHandler):
                 cursor = int(qs.get("cursor", [0])[0] or 0)
             except (TypeError, ValueError):
                 cursor = 0
-            out = d.tail_sensor(sensor_id, cursor)
+            try:
+                limit = int(qs["limit"][0])
+            except (KeyError, TypeError, ValueError):
+                limit = None
+            out = d.tail_sensor(sensor_id, cursor, limit)
             if out is None:
                 return self._json(404, {"error": f"unknown sensor {sensor_id}"})
             return self._json(200, out)

@@ -35,10 +35,12 @@ export default function LivePage() {
   const [rate, setRate] = useState(0)
   const [lastTs, setLastTs] = useState<number>(0)
   const [samples, setSamples] = useState<Sample[]>([])
+  const [streamErr, setStreamErr] = useState('')
   const outRef = useRef<HTMLPreElement>(null)
   const cursorRef = useRef(0)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const rateRef = useRef<{ at: number; n: number }>({ at: 0, n: 0 })
+  const busyRef = useRef(false)
+  const rateRef = useRef({ ema: 0, at: 0 })
 
   useEffect(() => {
     get<{ sensors: SensorInfo[] }>('/api/sensors').then((r) => {
@@ -60,31 +62,30 @@ export default function LivePage() {
 
   const start = useCallback((sid: string) => {
     stop()
-    cursorRef.current = 0
     setCount(0)
     setRate(0)
+    setLastTs(0)
+    setStreamErr('')
     setSamples([])
     if (outRef.current) outRef.current.textContent = ''
     if (!sid) return
-    setStreaming(true)
-    timerRef.current = setInterval(async () => {
-      const r = await get<{ cursor?: number; samples?: any[] }>(
-        `/api/sensors/${encodeURIComponent(sid)}/tail?cursor=${cursorRef.current}`)
-      if (r.status !== 200 || !r.body) return
-      const list = r.body.samples ?? []
-      cursorRef.current = r.body.cursor ?? cursorRef.current
+    rateRef.current = { ema: 0, at: 0 }
+
+    const ingest = (list: Sample[]) => {
+      if (!list.length) return
       setCount((c) => c + list.length)
-      const now = Date.now() / 1000
+      const now = Date.now()
       const rr = rateRef.current
-      if (list.length) {
-        if (now - rr.at > 1.5) { rr.at = now; rr.n = list.length }
-        else rr.n += list.length
-        setRate(rr.n / Math.max(0.001, now - rr.at))
-        setLastTs(list[list.length - 1].timestamp ?? 0)
+      // EMA of the per-poll arrival rate — smooth across tick jitter.
+      if (rr.at) {
+        const inst = (list.length * 1000) / Math.max(1, now - rr.at)
+        rr.ema = rr.ema ? rr.ema * 0.7 + inst * 0.3 : inst
       }
+      rr.at = now
+      setRate(rr.ema)
+      setLastTs(list[list.length - 1].timestamp ?? 0)
+      setSamples((prev) => [...prev, ...list].slice(-MAX_KEEP))
       const el = outRef.current
-      if (list.length)
-        setSamples((prev) => [...prev, ...list].slice(-MAX_KEEP))
       if (el) {
         let text = el.textContent ?? ''
         for (const s of list) {
@@ -95,7 +96,44 @@ export default function LivePage() {
         el.textContent = text
         el.scrollTop = el.scrollHeight
       }
-    }, 700)
+    }
+
+    setStreaming(true)
+    // Prime at the live edge: limit=0 returns only the latest cursor —
+    // no 4000-sample backlog dump on first paint.
+    void (async () => {
+      const prime = await get<{ cursor?: number; samples?: Sample[] }>(
+        `/api/sensors/${encodeURIComponent(sid)}/tail?limit=1`)
+      if (prime.status !== 200 || !prime.body) {
+        setStreamErr(`tail failed — HTTP ${prime.status || 'no response'}`)
+        stop()
+        return
+      }
+      cursorRef.current = prime.body.cursor ?? 0
+      if (prime.body.samples?.length) ingest(prime.body.samples)
+
+      timerRef.current = setInterval(async () => {
+        if (busyRef.current) return   // never overlap polls
+        busyRef.current = true
+        try {
+          const r = await get<{
+            cursor?: number; samples?: Sample[]; skipped?: number
+          }>(
+            `/api/sensors/${encodeURIComponent(sid)}/tail` +
+            `?cursor=${cursorRef.current}&limit=120`)
+          if (r.status === 404) {
+            setStreamErr('sensor stream not available (offline?)')
+            stop()
+            return
+          }
+          if (r.status !== 200 || !r.body) return
+          cursorRef.current = r.body.cursor ?? cursorRef.current
+          ingest(r.body.samples ?? [])
+        } finally {
+          busyRef.current = false
+        }
+      }, 500)
+    })()
   }, [stop])
 
   useEffect(() => stop, [stop])
@@ -179,11 +217,18 @@ export default function LivePage() {
             ? sensorLabel(sensors.find((s) => s.id === selSensor)!)
             : 'select a sensor'}</h3>
           <div className="row" style={{ marginBottom: 8 }}>
-            <button className="go" disabled={!selSensor || streaming}
-                    onClick={() => start(selSensor)}>stream</button>
-            <button disabled={!streaming} onClick={stop}>stop</button>
+            {streaming ? (
+              <button className="rec" onClick={stop}>■ stop</button>
+            ) : (
+              <button className="go" disabled={!selSensor}
+                      onClick={() => start(selSensor)}>▶ stream</button>
+            )}
+            {streaming && (
+              <span className="pill live">● live · {rate.toFixed(1)}/s</span>
+            )}
+            {streamErr && <span className="pill err">{streamErr}</span>}
             <span className="muted">
-              {count} samples · {rate.toFixed(1)}/s · last {fmtTs(lastTs)}
+              {count} samples · last {fmtTs(lastTs)}
             </span>
           </div>
           <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
