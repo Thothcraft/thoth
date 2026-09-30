@@ -3,17 +3,22 @@
 Linux/Pi nodes get ``<hostname>.local`` from Avahi; Windows has no
 mDNS responder, so nodes like ``thoth-denver`` are unreachable by
 name without this. We register ``_thoth._tcp`` + ``_http._tcp``
-services whose ``server=`` records publish the ``<name>.local``
-address, so ``http://<name>.local`` resolves on any node.
+services whose ``server=`` records point at ``<name>.local``.
+
+When a system responder (Avahi) already owns the hostname we publish
+**only** the service records (PTR/SRV/TXT) — no A record — so we never
+fight it for the name and the hostname survives daemon restarts. On
+hosts with no responder we publish the primary LAN address ourselves.
 
 Soft dependency: missing ``zeroconf`` just disables advertisement.
 """
 from __future__ import annotations
 
 import logging
+import os
 import re
 import socket
-from typing import Iterable, Optional
+from typing import Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +29,47 @@ def _sanitise(name: str) -> str:
     """hostname-safe mDNS label: lowercase, [a-z0-9-], no edge dashes."""
     label = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
     return label[:63]
+
+
+def _system_responder_active() -> bool:
+    """A system mDNS responder already publishes ``<hostname>.local``.
+
+    Avahi keeps its socket at ``/run/avahi-daemon/socket`` while running;
+    systemd-resolved mDNS is rarer and skipped. When present, publishing
+    our own A record for the hostname conflicts (Avahi yields and renames
+    itself to ``<host>-2``, and our records die with the daemon).
+    """
+    return os.path.exists("/run/avahi-daemon/socket")
+
+
+def _lan_addresses() -> List[str]:
+    """Primary LAN IPv4(s) — never loopback/link-local.
+
+    ``getaddrinfo(hostname)`` is useless for this: Debian/cloud-init maps
+    the hostname to ``127.0.1.1`` in /etc/hosts. A UDP "connect" to an
+    unroutable address reveals the primary outbound interface instead.
+    """
+    addrs: List[str] = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))  # no traffic is sent
+        addrs.append(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    for ai in socket.getaddrinfo(socket.gethostname(), None):
+        a = ai[4][0]
+        if "." in a and not a.startswith(("127.", "169.254.")):
+            addrs.append(a)
+    out = list(dict.fromkeys(addrs))
+    if not out:
+        try:
+            fallback = socket.gethostbyname(socket.gethostname())
+            if not fallback.startswith("127."):
+                out.append(fallback)
+        except OSError:
+            pass
+    return out
 
 
 class MdnsAdvertiser:
@@ -39,13 +85,11 @@ class MdnsAdvertiser:
             logger.debug("zeroconf not installed — mDNS advertisement off")
             return None
         try:
-            addrs = {
-                ai[4][0]
-                for ai in socket.getaddrinfo(socket.gethostname(), None)
-                if "." in ai[4][0]  # IPv4 only; v6 link-local is noisy
-            }
-            if not addrs:
-                addrs = {socket.gethostbyname(socket.gethostname())}
+            own_addr = not _system_responder_active()
+            addrs = _lan_addresses() if own_addr else []
+            if own_addr and not addrs:
+                logger.debug("mDNS: no LAN address found — skipping")
+                return None
             props = {b"id": device_id.encode(), b"path": b"/"}
             self._zc = Zeroconf()
             for raw in names:
