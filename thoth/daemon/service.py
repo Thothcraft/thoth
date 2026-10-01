@@ -557,13 +557,17 @@ class ThothDaemon:
             return None
         snap = stream.snapshot()
         latest = max((s.sequence for s in snap), default=cursor)
-        samples = [s.to_dict() for s in snap if s.sequence > cursor]
+        # Slice the backlog BEFORE serializing — a fast sensor can hold
+        # thousands of samples and to_dict() on each one is the expensive
+        # part, so dropping them post-serialize wasted real CPU per poll.
+        backlog = [s for s in snap if s.sequence > cursor]
         skipped = 0
         if limit is not None:
             if limit <= 0:
-                samples = []          # cursor-only probe
-            elif len(samples) > limit:
-                skipped, samples = len(samples) - limit, samples[-limit:]
+                backlog = []          # cursor-only probe
+            elif len(backlog) > limit:
+                skipped, backlog = len(backlog) - limit, backlog[-limit:]
+        samples = [s.to_dict() for s in backlog]
         out = {"sensor_id": sensor_id, "cursor": latest,
                "samples": samples}
         if skipped:
@@ -653,6 +657,10 @@ class ThothDaemon:
             "active_models": len(self.registry.active()),
             "predictions": len(self.predictions),
             "captures": len(self.captures.list()),
+            "capture": {
+                "active": bool(self.captures._active),
+                "capture_id": next(iter(self.captures._active), None),
+            },
             "running": not self._stop.is_set(),
         }
 

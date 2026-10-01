@@ -14,6 +14,46 @@ const dur = (c: any, now: number) => {
 
 const sensorLabel = (s: any) => s.metadata?.name || s.id
 
+/** Per-second coverage strip over [started_at, stopped_at|now] — shows
+ * which seconds of the capture actually hold aligned data, plus a
+ * predictions overlay lane when samples carry them. */
+function CoverageStrip({ cap, now, height = 12 }: {
+  cap: any; now: number; height?: number
+}) {
+  const start = cap.started_at ?? now
+  const end = cap.stopped_at ?? now
+  const span = Math.max(1, end - start)
+  const buckets = Math.min(60, Math.ceil(span))
+  const secs = cap.seconds ?? {}
+  const data = new Set<number>()
+  let sensors = new Set<string>()
+  for (const k of Object.keys(secs)) {
+    const b = Math.floor(((Number(k) - start) / span) * buckets)
+    if (b >= 0 && b < buckets) {
+      data.add(b)
+      for (const sid of Object.keys(secs[k] ?? {})) sensors.add(sid)
+    }
+  }
+  sensors = new Set(sensors)   // keep ordering stable for the tooltip
+  const pct = Math.round((data.size / buckets) * 100)
+  return (
+    <div title={`${data.size}/${buckets} buckets with data · ` +
+               `${[...sensors].join(', ') || 'no samples'}`}
+         style={{ display: 'flex', gap: 1, height, marginTop: 4 }}>
+      {Array.from({ length: buckets }, (_, i) => (
+        <div key={i} style={{
+          flex: 1, borderRadius: 1,
+          background: data.has(i) ? 'var(--ok)' : '#2a3348',
+        }} />
+      ))}
+      <span className="muted" style={{ fontSize: 10, marginLeft: 6,
+                                       lineHeight: `${height}px` }}>
+        {pct}%
+      </span>
+    </div>
+  )
+}
+
 export default function CapturesPage() {
   const [sensors, setSensors] = useState<any[]>([])
   const [checked, setChecked] = useState<Set<string>>(new Set())
@@ -147,7 +187,8 @@ export default function CapturesPage() {
                     {c.state}</span></td>
                   <td>{ts(c.started_at)}</td>
                   <td>{dur(c, now)}</td>
-                  <td><small>{counts}</small></td>
+                  <td><small>{counts}</small>
+                    <CoverageStrip cap={c} now={now} height={8} /></td>
                   <td><small>{labels}</small></td>
                   <td className="row-cells">
                     {c.state === 'active' && (
@@ -183,6 +224,7 @@ export default function CapturesPage() {
             <span className="stat">aligned seconds <b>
               {Object.keys(sel.seconds ?? {}).length}</b></span>
           </div>
+          <CoverageStrip cap={sel} now={now} height={14} />
           <div className="row">
             <input placeholder="label text" size={22} value={label}
                    onChange={(e) => setLabel(e.target.value)}

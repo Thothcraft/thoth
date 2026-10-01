@@ -15,36 +15,70 @@ interface SensorInfo {
   metadata?: { name?: string }
 }
 
-const sensorLabel = (s: SensorInfo) =>
-  s.metadata?.name || s.id
+const sensorLabel = (s: SensorInfo) => s.metadata?.name || s.id
 
-const MAX_KEEP = 200
+// Camera frames are huge JPEG payloads and only the newest frame is drawn;
+// chart sensors benefit from a longer retained tail.
+const keepFor = (type: string) => (/cam|video|image|jpeg/i.test(type) ? 6 : 80)
+
+const FETCH_LIMIT = 100   // bounded delta per sensor per tick
+const POLL_MS = 700
+
+interface StreamState {
+  cursor: number
+  samples: Sample[]
+  count: number
+  lastTs: number
+  ema: number
+  lastTick: number
+  err: string
+  keep: number
+}
+
+const newStream = (type: string): StreamState => ({
+  cursor: 0, samples: [], count: 0, lastTs: 0,
+  ema: 0, lastTick: 0, err: '', keep: keepFor(type),
+})
+
+/** Renders a lazily-expanded raw tail — JSON is only stringified while open. */
+function RawTail({ samples }: { samples: Sample[] }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <details style={{ marginTop: 10 }}
+             onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+      <summary className="muted" style={{ cursor: 'pointer', fontSize: 12 }}>
+        raw payload tail
+      </summary>
+      {open && (
+        <pre style={{ maxHeight: 200 }}>
+          {JSON.stringify(samples.slice(-8), null, 1)}
+        </pre>
+      )}
+    </details>
+  )
+}
 
 /**
- * Live: sensor list · open-roof RoomScene · sample tail stream.
- * Sensors in the room doc get FOV wedges; selecting a sensor in the
- * sidebar selects its device in the scene and starts the tail.
+ * Live: sensor list · open-roof RoomScene · per-sensor stream cards.
+ * Clicking a sensor toggles its stream — several sensors can stream in
+ * parallel. One timer fans out bounded /tail requests; stream state lives
+ * in a ref and the page re-renders once per round, so a 134 Hz sensor
+ * cannot flood React with renders.
  */
 export default function LivePage() {
   const [sensors, setSensors] = useState<SensorInfo[]>([])
   const [room, setRoom] = useState<RoomDoc | null>(null)
   const [selRoom, setSelRoom] = useState('')
-  const [selSensor, setSelSensor] = useState<string>('')
-  const [streaming, setStreaming] = useState(false)
-  const [count, setCount] = useState(0)
-  const [rate, setRate] = useState(0)
-  const [lastTs, setLastTs] = useState<number>(0)
-  const [samples, setSamples] = useState<Sample[]>([])
-  const [streamErr, setStreamErr] = useState('')
-  const outRef = useRef<HTMLPreElement>(null)
-  const cursorRef = useRef(0)
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [, bump] = useState(0)
+  const streamsRef = useRef(new Map<string, StreamState>())
+  const sensorsRef = useRef<SensorInfo[]>([])
   const busyRef = useRef(false)
-  const rateRef = useRef({ ema: 0, at: 0 })
 
   useEffect(() => {
     get<{ sensors: SensorInfo[] }>('/api/sensors').then((r) => {
-      setSensors(r.body?.sensors ?? [])
+      const list = r.body?.sensors ?? []
+      sensorsRef.current = list
+      setSensors(list)
     })
     get<RoomDoc>('/api/v1/room').then((r) => {
       if (r.body?.format === 'room/v1') {
@@ -54,97 +88,84 @@ export default function LivePage() {
     })
   }, [])
 
-  const stop = useCallback(() => {
-    if (timerRef.current) clearInterval(timerRef.current)
-    timerRef.current = null
-    setStreaming(false)
-  }, [])
-
-  const start = useCallback((sid: string) => {
-    stop()
-    setCount(0)
-    setRate(0)
-    setLastTs(0)
-    setStreamErr('')
-    setSamples([])
-    if (outRef.current) outRef.current.textContent = ''
-    if (!sid) return
-    rateRef.current = { ema: 0, at: 0 }
-
-    const ingest = (list: Sample[]) => {
-      if (!list.length) return
-      setCount((c) => c + list.length)
-      const now = Date.now()
-      const rr = rateRef.current
-      // EMA of the per-poll arrival rate — smooth across tick jitter.
-      if (rr.at) {
-        const inst = (list.length * 1000) / Math.max(1, now - rr.at)
-        rr.ema = rr.ema ? rr.ema * 0.7 + inst * 0.3 : inst
-      }
-      rr.at = now
-      setRate(rr.ema)
-      setLastTs(list[list.length - 1].timestamp ?? 0)
-      setSamples((prev) => [...prev, ...list].slice(-MAX_KEEP))
-      const el = outRef.current
-      if (el) {
-        let text = el.textContent ?? ''
-        for (const s of list) {
-          text +=
-            `${fmtTs(s.timestamp)} ${JSON.stringify(s.payload).slice(0, 300)}\n`
+  const tick = useCallback(async () => {
+    if (busyRef.current) return            // never overlap fetch rounds
+    busyRef.current = true
+    try {
+      const streams = streamsRef.current
+      const jobs = [...streams].map(async ([id, st]) => {
+        if (st.cursor === 0) {
+          // Prime at the live edge — jump past the ring backlog.
+          try {
+            const p = await get<any>(
+              `/api/sensors/${encodeURIComponent(id)}/tail?limit=0`)
+            if (p.status === 404) {
+              st.err = 'sensor gone'
+              streams.delete(id)
+              return
+            }
+            st.cursor = p.body?.cursor ?? 0
+          } catch {
+            st.err = 'node unreachable'
+          }
+          return
         }
-        if (text.length > 20000) text = text.slice(-10000)
-        el.textContent = text
-        el.scrollTop = el.scrollHeight
-      }
-    }
-
-    setStreaming(true)
-    // Prime at the live edge: limit=0 returns only the latest cursor —
-    // no 4000-sample backlog dump on first paint.
-    void (async () => {
-      const prime = await get<{ cursor?: number; samples?: Sample[] }>(
-        `/api/sensors/${encodeURIComponent(sid)}/tail?limit=1`)
-      if (prime.status !== 200 || !prime.body) {
-        setStreamErr(`tail failed — HTTP ${prime.status || 'no response'}`)
-        stop()
-        return
-      }
-      cursorRef.current = prime.body.cursor ?? 0
-      if (prime.body.samples?.length) ingest(prime.body.samples)
-
-      timerRef.current = setInterval(async () => {
-        if (busyRef.current) return   // never overlap polls
-        busyRef.current = true
         try {
-          const r = await get<{
-            cursor?: number; samples?: Sample[]; skipped?: number
-          }>(
-            `/api/sensors/${encodeURIComponent(sid)}/tail` +
-            `?cursor=${cursorRef.current}&limit=120`)
+          const r = await get<any>(
+            `/api/sensors/${encodeURIComponent(id)}/tail` +
+            `?cursor=${st.cursor}&limit=${FETCH_LIMIT}`)
           if (r.status === 404) {
-            setStreamErr('sensor stream not available (offline?)')
-            stop()
+            st.err = 'sensor gone'
+            streams.delete(id)
             return
           }
-          if (r.status !== 200 || !r.body) return
-          cursorRef.current = r.body.cursor ?? cursorRef.current
-          ingest(r.body.samples ?? [])
-        } finally {
-          busyRef.current = false
+          const body = r.body ?? {}
+          const now = performance.now()
+          const dt = st.lastTick ? (now - st.lastTick) / 1000 : 0
+          const arrived = (body.samples?.length ?? 0) + (body.skipped ?? 0)
+          if (dt > 0) {
+            const inst = arrived / dt
+            st.ema = st.ema ? st.ema * 0.6 + inst * 0.4 : inst
+          }
+          st.lastTick = now
+          st.cursor = body.cursor ?? st.cursor
+          if (body.samples?.length) {
+            st.samples = [...st.samples, ...body.samples].slice(-st.keep)
+            st.count += body.samples.length
+            st.lastTs = body.samples.at(-1)?.timestamp ?? st.lastTs
+          }
+          st.err = ''
+        } catch {
+          st.err = 'fetch failed'
         }
-      }, 500)
-    })()
-  }, [stop])
+      })
+      await Promise.all(jobs)
+    } finally {
+      busyRef.current = false
+    }
+    bump((n) => n + 1)
+  }, [])
 
-  useEffect(() => stop, [stop])
+  useEffect(() => {
+    const t = setInterval(() => { void tick() }, POLL_MS)
+    return () => clearInterval(t)
+  }, [tick])
 
-  const selectSensor = (sid: string) => {
-    setSelSensor(sid)
-    start(sid)
-  }
+  const toggleStream = useCallback((sid: string) => {
+    const streams = streamsRef.current
+    if (streams.has(sid)) {
+      streams.delete(sid)
+    } else {
+      const type = sensorsRef.current.find((s) => s.id === sid)?.type ?? ''
+      streams.set(sid, newStream(type))
+      void tick()                        // prime immediately, don't wait a tick
+    }
+    bump((n) => n + 1)
+  }, [tick])
 
-  // Find which room device claims the selected sensor (type match —
-  // room/v1 sensors are typed, not id'd).
+  // Scene highlight: the most recently toggled stream's sensor.
+  const activeIds = [...streamsRef.current.keys()]
+  const selSensor = activeIds.at(-1) ?? ''
   const selDeviceId = (() => {
     const sel = sensors.find((s) => s.id === selSensor)
     if (!sel || !room?.devices) return null
@@ -158,19 +179,26 @@ export default function LivePage() {
     return null
   })()
 
+  const streams = streamsRef.current
+
   return (
     <div className="live-grid">
       <div className="pane sensor-list">
         <div className="card" style={{ flex: 1, overflow: 'auto' }}>
-          <h3>Sensors</h3>
-          {sensors.map((s) => (
-            <button key={s.id}
-                    className={s.id === selSensor ? 'on' : ''}
-                    onClick={() => selectSensor(s.id)}>
-              {sensorLabel(s)}
-              <div className="muted"><small>{s.type} · {s.id}</small></div>
-            </button>
-          ))}
+          <h3>Sensors — click to stream</h3>
+          {sensors.map((s) => {
+            const st = streams.get(s.id)
+            return (
+              <button key={s.id}
+                      className={st ? 'on' : ''}
+                      onClick={() => toggleStream(s.id)}>
+                {sensorLabel(s)}
+                {st && !st.err &&
+                  <span className="muted"> · {st.ema.toFixed(1)}/s</span>}
+                <div className="muted"><small>{s.type} · {s.id}</small></div>
+              </button>
+            )
+          })}
           {!sensors.length && <span className="muted">no sensors</span>}
         </div>
       </div>
@@ -197,7 +225,6 @@ export default function LivePage() {
           selectedId={selDeviceId}
           onPick={(p) => {
             if (p.kind === 'device') {
-              // pick the first sensor of that device in the sidebar list
               const picked = p.item as RoomDevice
               const dev = room?.devices?.find(
                 (d) => d.device_id === picked.device_id)
@@ -205,42 +232,44 @@ export default function LivePage() {
               const match = sensors.find((s) =>
                 s.id === picked.device_id ||
                 (st && (s.type ?? '').toLowerCase() === st))
-              if (match) selectSensor(match.id)
+              if (match) toggleStream(match.id)
             }
           }}
         />
       </div>
 
       <div className="pane">
-        <div className="card" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          <h3>Stream — {sensors.find((s) => s.id === selSensor)
-            ? sensorLabel(sensors.find((s) => s.id === selSensor)!)
-            : 'select a sensor'}</h3>
-          <div className="row" style={{ marginBottom: 8 }}>
-            {streaming ? (
-              <button className="rec" onClick={stop}>■ stop</button>
-            ) : (
-              <button className="go" disabled={!selSensor}
-                      onClick={() => start(selSensor)}>▶ stream</button>
-            )}
-            {streaming && (
-              <span className="pill live">● live · {rate.toFixed(1)}/s</span>
-            )}
-            {streamErr && <span className="pill err">{streamErr}</span>}
-            <span className="muted">
-              {count} samples · last {fmtTs(lastTs)}
-            </span>
-          </div>
+        <div className="card" style={{ flex: 1, display: 'flex',
+                                      flexDirection: 'column', minHeight: 0 }}>
+          <h3>Streams {streams.size > 0 && `· ${streams.size} live`}</h3>
           <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
-            <StreamView
-              type={sensors.find((s) => s.id === selSensor)?.type ?? ''}
-              samples={samples} />
-            <details style={{ marginTop: 10 }}>
-              <summary className="muted" style={{ cursor: 'pointer', fontSize: 12 }}>
-                raw payload tail
-              </summary>
-              <pre id="liveOut" ref={outRef} style={{ flex: 1, maxHeight: 200 }} />
-            </details>
+            {streams.size === 0 && (
+              <span className="muted">
+                select sensors on the left — click again to stop
+              </span>
+            )}
+            {[...streams].map(([id, st]) => {
+              const sensor = sensors.find((s) => s.id === id)
+              return (
+                <div key={id} className="stream-card">
+                  <div className="row" style={{ marginBottom: 6 }}>
+                    <strong style={{ fontSize: 13 }}>
+                      {sensor ? sensorLabel(sensor) : id}
+                    </strong>
+                    {st.err
+                      ? <span className="pill err">{st.err}</span>
+                      : <span className="pill live">● live · {st.ema.toFixed(1)}/s</span>}
+                    <span className="muted" style={{ marginLeft: 'auto' }}>
+                      {st.count} · last {fmtTs(st.lastTs)}
+                    </span>
+                    <button className="mini danger"
+                            onClick={() => toggleStream(id)}>✕</button>
+                  </div>
+                  <StreamView type={sensor?.type ?? ''} samples={st.samples} />
+                  <RawTail samples={st.samples} />
+                </div>
+              )
+            })}
           </div>
         </div>
       </div>
