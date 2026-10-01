@@ -21,6 +21,26 @@ class CaptureManager:
         self.root = root or (config_dir() / "captures")
         self.root.mkdir(parents=True, exist_ok=True)
         self._active: Dict[str, Dict[str, Any]] = {}
+        self._repair_orphans()
+
+    def _repair_orphans(self) -> None:
+        """Daemon restarts leave manifests stuck at ``active`` although the
+        writer thread is gone — finalize them as interrupted so lists and
+        status reflect reality."""
+        for d in self.root.iterdir():
+            manifest = d / "manifest.json"
+            if not (d.is_dir() and manifest.exists()):
+                continue
+            try:
+                rec = json.loads(manifest.read_text())
+            except Exception:
+                continue
+            if rec.get("state") != "active":
+                continue
+            rec["state"] = "interrupted"
+            if not rec.get("stopped_at"):
+                rec["stopped_at"] = manifest.stat().st_mtime
+            manifest.write_text(json.dumps(rec, indent=2))
 
     def _dir(self, capture_id: str) -> Path:
         return self.root / capture_id
