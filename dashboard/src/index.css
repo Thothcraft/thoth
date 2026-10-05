@@ -144,3 +144,27 @@ a { color: var(--acc); }
 .gatecard input { width: 100%; text-align: center; margin-bottom: 12px; }
 .gatecard button { width: 100%; }
 .gatecard .err { color: var(--err); font-size: 12px; min-height: 16px; margin: 10px 0 8px; }
+
+/* PHYSICAL → OBSERVATIONS → PREDICTIONS → CONTEXT strip (Part 7) */
+.pipe-strip {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 14px; margin-bottom: 12px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
+}
+.pipe-stage { color: var(--dim); padding: 3px 10px; border-radius: 8px;
+  border: 1px solid var(--line); }
+.pipe-stage.ok { color: var(--ok); border-color: #1d4a30; background: #12271c; }
+.pipe-stage.err { color: var(--err); border-color: #452024; background: #241317; }
+.pipe-arrow { color: var(--dim); }
+
+@media (max-width: 1100px) {
+  .live-grid { grid-template-columns: 1fr; height: auto; }
+  .room-pane { height: 420px; }
+}
+
+/* Reduced-motion support (Part 9): kill the pulse, keep the state. */
+@media (prefers-reduced-motion: reduce) {
+  .pill.live { animation: none; }
+  * { transition: none !important; }
+}

@@ -4,6 +4,33 @@ import { RoomScene, roomOptions, roomView } from '../scene'
 import type { RoomDevice, RoomDoc } from '../scene'
 import { StreamView, type Sample } from '../components/StreamView'
 
+/** WebGL availability probe — the scene degrades to a 2D plan list. */
+function webglAvailable(): boolean {
+  try {
+    const c = document.createElement('canvas')
+    return !!(c.getContext('webgl2') || c.getContext('webgl'))
+  } catch {
+    return false
+  }
+}
+
+interface Prediction {
+  model_id?: string
+  label?: string
+  confidence?: number
+  timestamp?: number
+  [key: string]: unknown
+}
+
+/** /api/v1/context — node-local derived states/events. The field shape is
+ * the node's own; we read defensively and degrade to "no context" when
+ * the endpoint isn't implemented yet. */
+interface NodeContext {
+  states?: Array<Record<string, unknown>>
+  events?: Array<Record<string, unknown>>
+  [key: string]: unknown
+}
+
 const fmtTs = (t?: number) =>
   t ? new Date(t * 1000).toLocaleTimeString() : '–'
 
@@ -73,6 +100,10 @@ export default function LivePage() {
   const streamsRef = useRef(new Map<string, StreamState>())
   const sensorsRef = useRef<SensorInfo[]>([])
   const busyRef = useRef(false)
+  const [predictions, setPredictions] = useState<Prediction[]>([])
+  const [context, setContext] = useState<NodeContext | null>(null)
+  const [ctxOnline, setCtxOnline] = useState<boolean | null>(null)
+  const [webgl] = useState(webglAvailable)
 
   useEffect(() => {
     get<{ sensors: SensorInfo[] }>('/api/sensors').then((r) => {
@@ -86,6 +117,19 @@ export default function LivePage() {
         setSelRoom((prev) => prev || (r.body!.room_id ?? ''))
       }
     })
+    // Prediction + context layers poll at a slower cadence — they're
+    // derived, not sample-rate data.
+    const ctxPoll = async () => {
+      const p = await get<{ predictions?: Prediction[] }>(
+        '/api/v1/predictions?limit=12')
+      setPredictions(p.body?.predictions ?? [])
+      const c = await get<NodeContext>('/api/v1/context')
+      setCtxOnline(c.status === 200)
+      setContext(c.status === 200 ? c.body : null)
+    }
+    void ctxPoll()
+    const t = setInterval(() => { void ctxPoll() }, 3000)
+    return () => clearInterval(t)
   }, [])
 
   const tick = useCallback(async () => {
@@ -181,7 +225,34 @@ export default function LivePage() {
 
   const streams = streamsRef.current
 
+  // Pipeline strip liveness: observations = open streams with samples,
+  // predictions = recent inference rows, context = node context endpoint.
+  const obsActive = [...streams.values()].filter((s) => s.count > 0).length
+  const predAge = predictions.length
+    ? Date.now() / 1000 - (predictions[predictions.length - 1].timestamp ?? 0)
+    : Infinity
+  const ctxStates = context?.states ?? []
+  const ctxEvents = context?.events ?? []
+
   return (
+    <>
+    {/* PHYSICAL → OBSERVATIONS → PREDICTIONS → CONTEXT pipeline strip —
+        each stage shows whether data is flowing *right now*. */}
+    <div className="pipe-strip">
+      <span className="pipe-stage ok">physical world</span>
+      <span className="pipe-arrow">→</span>
+      <span className={`pipe-stage ${obsActive ? 'ok' : ''}`}>
+        observations {obsActive ? `· ${obsActive} streaming` : '· idle'}
+      </span>
+      <span className="pipe-arrow">→</span>
+      <span className={`pipe-stage ${predAge < 30 ? 'ok' : ''}`}>
+        predictions {predAge < 30 ? `· ${predictions.length} recent` : '· quiet'}
+      </span>
+      <span className="pipe-arrow">→</span>
+      <span className={`pipe-stage ${ctxOnline ? 'ok' : ctxOnline === false ? 'err' : ''}`}>
+        context {ctxOnline === false ? '· unavailable' : ctxStates.length ? `· ${ctxStates.length} live` : '· none'}
+      </span>
+    </div>
     <div className="live-grid">
       <div className="pane sensor-list">
         <div className="card" style={{ flex: 1, overflow: 'auto' }}>
@@ -220,28 +291,116 @@ export default function LivePage() {
             ))}
           </div>
         )}
-        <RoomScene
-          room={room ? roomView(room, selRoom || (room.room_id ?? '')) : room}
-          selectedId={selDeviceId}
-          onPick={(p) => {
-            if (p.kind === 'device') {
-              const picked = p.item as RoomDevice
-              const dev = room?.devices?.find(
-                (d) => d.device_id === picked.device_id)
-              const st = dev?.sensors?.[0]?.type
-              const match = sensors.find((s) =>
-                s.id === picked.device_id ||
-                (st && (s.type ?? '').toLowerCase() === st))
-              if (match) toggleStream(match.id)
-            }
-          }}
-        />
+        {webgl ? (
+          <RoomScene
+            room={room ? roomView(room, selRoom || (room.room_id ?? '')) : room}
+            selectedId={selDeviceId}
+            onPick={(p) => {
+              if (p.kind === 'device') {
+                const picked = p.item as RoomDevice
+                const dev = room?.devices?.find(
+                  (d) => d.device_id === picked.device_id)
+                const st = dev?.sensors?.[0]?.type
+                const match = sensors.find((s) =>
+                  s.id === picked.device_id ||
+                  (st && (s.type ?? '').toLowerCase() === st))
+                if (match) toggleStream(match.id)
+              }
+            }}
+          />
+        ) : (
+          /* Non-WebGL fallback (Part 9): 2D plan — same content, no 3D. */
+          <div className="card" style={{ margin: 8, padding: 12 }}>
+            <h3>Space — 2D view (WebGL unavailable)</h3>
+            {(room?.devices ?? []).map((d) => (
+              <div key={d.device_id} className="row" style={{ padding: '4px 0' }}>
+                <span>{d.device_id}</span>
+                <span className="muted">
+                  [{d.pos.map((n) => n.toFixed(1)).join(', ')}]
+                  {d.sensors?.length ? ` · ${d.sensors.length} sensors` : ''}
+                </span>
+              </div>
+            ))}
+            {!room?.devices?.length && (
+              <span className="muted">no devices placed in the room doc</span>)}
+          </div>
+        )}
       </div>
 
       <div className="pane">
+        {/* ── prediction layer (evidence, not truth) ─────────────────── */}
+        <div className="card" style={{ maxHeight: 180, overflow: 'auto' }}>
+          <h3>Predictions <span className="muted">evidence</span></h3>
+          {predictions.length === 0 && (
+            <span className="muted">no recent inference output</span>)}
+          {predictions.map((p, i) => (
+            <div key={i} className="row" style={{ padding: '2px 0', fontSize: 12 }}>
+              <span className="muted" style={{ fontFamily: 'monospace' }}>
+                {p.model_id ?? 'model'}
+              </span>
+              <span>{String(p.label ?? (p.payload ? 'payload' : '—'))}</span>
+              {p.confidence != null && (
+                <span className="pill">{Math.round(p.confidence * 100)}%</span>)}
+            </div>
+          ))}
+        </div>
+
+        {/* ── context layer (derived state + transitions) ────────────── */}
+        <div className="card" style={{ maxHeight: 200, overflow: 'auto' }}>
+          <h3>Context <span className="muted">derived · {ctxOnline === false ? 'endpoint unavailable' : 'live'}</span></h3>
+          {ctxStates.length === 0 && ctxEvents.length === 0 && (
+            <span className="muted">
+              {ctxOnline === false
+                ? 'the node does not expose /api/v1/context yet'
+                : 'no active context states'}
+            </span>)}
+          {ctxStates.map((s, i) => (
+            <div key={`s${i}`} className="row" style={{ padding: '2px 0', fontSize: 12 }}>
+              <span style={{ fontFamily: 'monospace' }}>{String(s.key ?? 'state')}</span>
+              <span>{String(s.value ?? s.entity_id ?? '')}</span>
+              <span className="pill live">
+                {s.confidence != null ? `${Math.round(Number(s.confidence) * 100)}%` : 'on'}
+              </span>
+            </div>
+          ))}
+          {ctxEvents.slice(-6).map((e, i) => (
+            <div key={`e${i}`} className="row" style={{ padding: '2px 0', fontSize: 12 }}>
+              <span className="muted" style={{ fontFamily: 'monospace' }}>
+                {String(e.key ?? 'event')}
+              </span>
+              <span className="muted">
+                {String(e.type ?? '')} {e.value != null ? String(e.value) : ''}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {/* ── BLE diagnostics ─────────────────────────────────────────── */}
+        {sensors.some((s) => /ble|rssi|prox/i.test(`${s.id} ${s.type ?? ''}`)) && (
+          <div className="card" style={{ maxHeight: 140, overflow: 'auto' }}>
+            <h3>BLE diagnostics</h3>
+            {sensors
+              .filter((s) => /ble|rssi|prox/i.test(`${s.id} ${s.type ?? ''}`))
+              .map((s) => {
+                const st = streams.get(s.id)
+                return (
+                  <div key={s.id} className="row" style={{ padding: '2px 0', fontSize: 12 }}>
+                    <span>{sensorLabel(s)}</span>
+                    <span className="muted">
+                      {st && st.samples.length
+                        ? `rssi ${JSON.stringify(st.samples.at(-1)?.payload ?? {})}`
+                        : 'idle — click to stream'}
+                    </span>
+                    {st && <span className="pill live">{st.ema.toFixed(1)}/s</span>}
+                  </div>
+                )
+              })}
+          </div>
+        )}
+
         <div className="card" style={{ flex: 1, display: 'flex',
                                       flexDirection: 'column', minHeight: 0 }}>
-          <h3>Streams {streams.size > 0 && `· ${streams.size} live`}</h3>
+          <h3>Observations {streams.size > 0 && `· ${streams.size} live`}</h3>
           <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
             {streams.size === 0 && (
               <span className="muted">
@@ -274,5 +433,6 @@ export default function LivePage() {
         </div>
       </div>
     </div>
+    </>
   )
 }
