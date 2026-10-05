@@ -57,7 +57,7 @@ apt-get update -qq
 apt-get install -y -qq \
     python3-venv python3-pip python3-dev python3-spidev python3-gpiozero \
     ffmpeg v4l-utils sox openssh-server avahi-daemon avahi-utils \
-    git bluez rfkill network-manager policykit-1
+    git bluez rfkill network-manager polkitd
 apt-get install -y -qq python3-picamera2 || true
 apt-get install -y -qq python3-rpi.gpio || true
 # Sense HAT support (optional — only present on some devices)
