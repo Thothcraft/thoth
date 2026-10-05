@@ -64,13 +64,17 @@ class ConfigStore:
     # -- identity -------------------------------------------------------------
     @property
     def device_id(self) -> str:
-        did = self._data.get("device_id")
-        if not did:
-            import uuid
-            did = str(uuid.uuid5(uuid.NAMESPACE_DNS,
-                                 f"thoth-{os.uname().nodename if hasattr(os,'uname') else 'node'}-{os.getlogin() if hasattr(os,'getlogin') else 'user'}"))
-            self.set("device_id", did)
-        return did
+        with self._lock:
+            did = self._data.get("device_id")
+            if not did:
+                import uuid
+                did = str(uuid.uuid5(
+                    uuid.NAMESPACE_DNS,
+                    f"thoth-{os.uname().nodename if hasattr(os,'uname') else 'node'}"
+                    f"-{os.getlogin() if hasattr(os,'getlogin') else 'user'}"))
+                self._data["device_id"] = did
+                self.save()
+            return did
 
     @property
     def device_name(self) -> str:
@@ -79,11 +83,16 @@ class ConfigStore:
     # -- local API token ---------------------------------------------------------
     @property
     def local_token(self) -> str:
-        token = self._data.get("local_token")
-        if not token:
-            token = secrets.token_urlsafe(24)
-            self.set("local_token", token)
-        return token
+        # Get-or-generate must be atomic: the SMA tick and _start_api race
+        # on first boot, and a second generator would clobber the token the
+        # running API server was bound with (every request then 401s).
+        with self._lock:
+            token = self._data.get("local_token")
+            if not token:
+                token = secrets.token_urlsafe(24)
+                self._data["local_token"] = token
+                self.save()
+            return token
 
     # -- brain ------------------------------------------------------------------
     @property

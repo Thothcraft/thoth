@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # One-command Thoth installer for a freshly imaged Raspberry Pi OS system.
+#
+# Installs the packaged thoth-node daemon (python -m thoth daemon) as the
+# single authoritative service. The legacy src/app.py + src/collector.py
+# units are migrated away on rerun — src/ is a deprecated path kept for
+# reference only.
 
 set -euo pipefail
 
@@ -46,9 +51,13 @@ log "Installing Raspberry Pi system dependencies"
 apt-get update -qq
 # Note: libopencv-dev and docker.io are intentionally NOT installed — nothing
 # in the codebase uses cv2, and Home Assistant is a manual opt-in (see below).
+# bluez + rfkill: BLE observer/central/peripheral roles and BLE-first
+# provisioning. network-manager + policykit-1: Wi-Fi join via nmcli from
+# the unprivileged daemon (polkit rule below grants netdev).
 apt-get install -y -qq \
     python3-venv python3-pip python3-dev python3-spidev python3-gpiozero \
-    ffmpeg v4l-utils sox openssh-server avahi-daemon avahi-utils
+    ffmpeg v4l-utils sox openssh-server avahi-daemon avahi-utils \
+    git bluez rfkill network-manager policykit-1
 apt-get install -y -qq python3-picamera2 || true
 apt-get install -y -qq python3-rpi.gpio || true
 # Sense HAT support (optional — only present on some devices)
@@ -76,19 +85,66 @@ else
     fi
 fi
 
-for group in dialout video render spi gpio; do
+# bluetooth → org.bluez D-Bus access (observer/central/peripheral);
+# netdev → NetworkManager control for provisioning (polkit rule below).
+for group in dialout video render spi gpio bluetooth netdev; do
     getent group "$group" >/dev/null 2>&1 && usermod -aG "$group" "$SERVICE_USER"
 done
+
+# Let netdev manage NetworkManager without an interactive session — the
+# daemon joins Wi-Fi during BLE/AP provisioning as the service user.
+if [ -d /etc/polkit-1/rules.d ]; then
+    cat > /etc/polkit-1/rules.d/50-thoth-net.rules <<'EOF'
+polkit.addRule(function(action, subject) {
+    if (subject.isInGroup("netdev") &&
+        action.id.indexOf("org.freedesktop.NetworkManager.") === 0) {
+        return polkit.Result.YES;
+    }
+});
+EOF
+fi
 
 log "Creating Python environment"
 python3 -m venv --system-site-packages "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install --upgrade pip -q
 
-# Core packages every profile needs.
+# whispy: shared contracts/drivers package. Resolution order:
+#   1. sibling checkout at ../whispy/packages/* (developer machines)
+#   2. git+https (subdirectory installs for plugin packages)
+#   3. PyPI fallback for the core package alone.
+WORKSPACE_ROOT="$(dirname "$THOTH_ROOT")"
+WHISPY_LOCAL="$WORKSPACE_ROOT/whispy/packages"
+if [ -d "$WHISPY_LOCAL/whispy" ]; then
+    log "Installing whispy from sibling checkout: $WHISPY_LOCAL"
+    "$VENV_DIR/bin/python" -m pip install -q "$WHISPY_LOCAL/whispy"
+    for pkg in "$WHISPY_LOCAL"/whispy-*; do
+        [ -d "$pkg" ] || continue
+        "$VENV_DIR/bin/python" -m pip install -q "$pkg" || true
+    done
+else
+    "$VENV_DIR/bin/python" -m pip install -q \
+        "whispy @ git+https://github.com/Thothcraft/whispy#subdirectory=packages/whispy" \
+        || "$VENV_DIR/bin/python" -m pip install -q whispy
+    for pkg in whispy-sensor-dreamhat whispy-sensor-mmwhat whispy-sensor-csi \
+               whispy-sensor-opencv-camera whispy-sensor-microphone \
+               whispy-sensor-sensehat whispy-model-occ \
+               whispy-model-opencv-person whispy-actuator-homeassistant \
+               whispy-actuator-sensehat whispy-actuator-speaker \
+               whispy-model-whisper-stt whispy-model-face; do
+        "$VENV_DIR/bin/python" -m pip install -q \
+            "$pkg @ git+https://github.com/Thothcraft/whispy#subdirectory=packages/$pkg" \
+            || true
+    done
+fi
+
+# The packaged node application — install from this checkout (non-editable
+# keeps parity with the git+https installer path).
+"$VENV_DIR/bin/python" -m pip install -q "$THOTH_ROOT"
+
+# Hardware/runtime deps the daemon's optional drivers need at runtime.
 "$VENV_DIR/bin/python" -m pip install -q \
-    flask flask-socketio flask-cors requests python-dotenv netifaces \
-    APScheduler psutil 'PyJWT>=2.8.0' numpy spidev \
-    gpiozero pyserial pexpect
+    requests 'PyJWT>=2.8.0' numpy spidev gpiozero pyserial pexpect \
+    bleak dbus-next
 
 if [ "$THOTH_PROFILE" = "lite" ]; then
     # Lite (Pi 3 / 1 GB): skip the heavy scientific + inference wheels. They are
@@ -105,9 +161,11 @@ else
             torch --extra-index-url https://download.pytorch.org/whl/cpu
     fi
 fi
-"$VENV_DIR/bin/python" -c 'import flask, gpiozero, serial, spidev'
+"$VENV_DIR/bin/python" -c 'import thoth, whispy, bleak, gpiozero, serial, spidev'
 
 install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$THOTH_ROOT/data" "$THOTH_ROOT/config" "$THOTH_ROOT/logs"
+SERVICE_HOME="$(getent passwd "$SERVICE_USER" | cut -d: -f6)"
+install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0700 "$SERVICE_HOME/.thoth"
 
 # Seed the two optional example classifiers when the checkout is next to Desktop/models.
 EXAMPLE_MODELS="$(dirname "$THOTH_ROOT")/models"
@@ -124,11 +182,25 @@ fi
 #       -v "$THOTH_ROOT/config/homeassistant:/config" \
 #       ghcr.io/home-assistant/home-assistant:stable
 
+# ---------------------------------------------------------------------------
+# Legacy migration: the pre-package runtime ran src/app.py (dashboard) +
+# src/collector.py (minute collector) as two units. The packaged daemon
+# supersedes both — remove the collector unit entirely and repoint
+# thoth.service. Config/data under ~/.thoth and the checkout's data/, logs/
+# are preserved untouched.
+# ---------------------------------------------------------------------------
+log "Migrating any legacy src/ units"
+if [ -f /etc/systemd/system/thoth-collector.service ]; then
+    systemctl disable --now thoth-collector.service 2>/dev/null || true
+    rm -f /etc/systemd/system/thoth-collector.service
+    log "Removed thoth-collector.service (superseded by thoth daemon minutes)"
+fi
+
 log "Installing systemd services"
 cat > /etc/systemd/system/thoth.service <<EOF
 [Unit]
-Description=Thoth Raspberry Pi Dashboard
-After=network-online.target
+Description=Thoth Node Daemon
+After=network-online.target bluetooth.target
 Wants=network-online.target
 
 [Service]
@@ -138,7 +210,11 @@ Group=$SERVICE_GROUP
 WorkingDirectory=$THOTH_ROOT
 Environment=THOTH_ROOT=$THOTH_ROOT
 Environment=THOTH_PROFILE=$THOTH_PROFILE
-ExecStart=$VENV_DIR/bin/python $THOTH_ROOT/src/app.py
+# CAP_NET_BIND_SERVICE lets the dashboard bind :80 without running root;
+# ignored harmlessly when the port is already taken (daemon falls back).
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ExecStart=$VENV_DIR/bin/python -m thoth daemon
 Restart=always
 RestartSec=5
 
@@ -147,33 +223,11 @@ WantedBy=multi-user.target
 Alias=thoth-web.service
 EOF
 
-cat > /etc/systemd/system/thoth-collector.service <<EOF
-[Unit]
-Description=Thoth Continuous Minute Collector
-After=thoth.service network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$SERVICE_USER
-Group=$SERVICE_GROUP
-WorkingDirectory=$THOTH_ROOT
-Environment=THOTH_ROOT=$THOTH_ROOT
-Environment=THOTH_PROFILE=$THOTH_PROFILE
-Environment=THOTH_CAPTURE_SCRIPT=$THOTH_ROOT/src/backend/minute_collector.py
-ExecStart=$VENV_DIR/bin/python $THOTH_ROOT/src/collector.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
 systemctl disable --now thoth-firstboot.service 2>/dev/null || true
 rm -f /etc/systemd/system/thoth-firstboot.service
 systemctl daemon-reload
-systemctl enable avahi-daemon ssh thoth.service thoth-collector.service
-systemctl restart avahi-daemon ssh thoth.service thoth-collector.service
+systemctl enable avahi-daemon ssh thoth.service bluetooth
+systemctl restart avahi-daemon ssh bluetooth thoth.service
 
 # Friendly per-device hostname: thoth-<name>.local where <name> is a random
 # month, person, or city name. THOTH_HOSTNAME overrides for a fixed name.
@@ -183,7 +237,12 @@ bash "$SCRIPT_DIR/device-hostname.sh"
 DEVICE_HOSTNAME="$(hostname)"
 
 touch /etc/thoth-first-boot-done
-log "Thoth installation complete: http://$DEVICE_HOSTNAME.local:5000"
+log "Thoth installation complete: http://$DEVICE_HOSTNAME.local"
+log "  daemon: systemctl status thoth.service | journalctl -u thoth.service -f"
+log "  pair:   thoth pair   (or BLE commissioning when unprovisioned)"
 if [ ! -e /dev/spidev0.0 ]; then
     log "Reboot once to activate the newly enabled SPI radar interface"
+fi
+if ! id -nG "$SERVICE_USER" | tr ' ' '\n' | grep -qx bluetooth; then
+    log "NOTE: $SERVICE_USER not in bluetooth group — BLE features disabled"
 fi

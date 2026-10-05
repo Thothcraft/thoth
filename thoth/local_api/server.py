@@ -303,8 +303,34 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, d.metadata.document())
         if path == "/api/v1/context":
             return self._json(200, d.context())
+        if path == "/api/v1/capabilities":
+            return self._json(200, d.capabilities())
+        if path == "/api/v1/predictions":
+            limit = int(qs.get("limit", [50])[0])
+            return self._json(200, {"predictions": d.recent_predictions(limit)})
+        if path == "/api/v1/stream":
+            # Live local transport (observation/predicate events) — SSE so
+            # dashboard + SDK clients don't poll. ?token= works for
+            # EventSource which can't set Authorization.
+            if not self._dashboard_authorized(qs):
+                return self._json(401, {"error": "unauthorized"})
+            return self._sse(d, kinds=qs.get("kind", [""])[0])
         if path == "/api/v1/room":
             return self._json(200, d.room.document())
+        if path == "/api/v1/net":
+            # Provisioning + link state (local view — raw SSID ok here,
+            # the uplink only ever sees ssid_hash via net.link.v1).
+            return self._json(200, d.net_status())
+        if path == "/api/v1/net/scan":
+            return self._json(200, {"networks":
+                                    d.net_scan() if hasattr(d, "net_scan")
+                                    else []})
+        if path == "/api/v1/sources/conformance":
+            return self._json(200, d.source_conformance())
+        if path == "/api/v1/ble/devices":
+            return self._json(200, d.ble_known())
+        if path == "/api/v1/entities":
+            return self._json(200, d.entities.document())
         if path.startswith("/api/v1/minutes/"):
             rest = path[len("/api/v1/minutes/"):]
             parts = rest.split("/")
@@ -337,6 +363,35 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200 if desc else 404,
                             desc or {"error": "not found"})
         return self._json(404, {"error": "not found"})
+
+    def _sse(self, daemon, kinds: str = "") -> None:
+        """Server-Sent Events over the daemon's EventHub.
+
+        ``kinds`` is an optional comma filter (e.g. ``?kind=observation``).
+        Runs until the client disconnects; keepalive comments hold the
+        socket through proxies.
+        """
+        wanted = {k.strip() for k in kinds.split(",") if k.strip()}
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        q = daemon.events.subscribe()
+        try:
+            self.wfile.write(b": stream open\n\n")
+            self.wfile.flush()
+            for _seq, line in daemon.events.stream(q):
+                if wanted and not line.startswith(":"):
+                    ev = line.split("\n")[1]
+                    if not any(ev == f"event: {k}" for k in wanted):
+                        continue
+                self.wfile.write(line.encode("utf-8"))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            daemon.events.unsubscribe(q)
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -433,6 +488,41 @@ class _Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/v1/actuators/") and path.endswith("/actions"):
             actuator_id = path[len("/api/v1/actuators/"):-len("/actions")]
             return self._json(200, d.execute_actuator(actuator_id, body))
+        if path == "/api/v1/context/calibrate":
+            # Snapshot current RSSI vector as a zone fingerprint.
+            if not isinstance(body.get("zone"), str) or not body["zone"]:
+                return self._json(400, {"error": "zone required"})
+            return self._json(200, d.calibrate_zone(body["zone"]))
+        if path == "/api/v1/ble/enroll":
+            # {address, kind?, name?, person?} → enrolled device:uuid
+            if not isinstance(body.get("address"), str) \
+                    or not body["address"]:
+                return self._json(400, {"error": "address required"})
+            return self._json(200, d.ble_enroll(
+                body["address"], kind=str(body.get("kind") or "device"),
+                name=body.get("name"), person=body.get("person")))
+        if path == "/api/v1/ble/unenroll":
+            if not isinstance(body.get("address"), str) \
+                    or not body["address"]:
+                return self._json(400, {"error": "address required"})
+            return self._json(200, d.ble_unenroll(body["address"]))
+        if path == "/api/v1/entities":
+            return self._json(200, d.entities.upsert(
+                entity_id=body.get("id"), type=str(body.get("type") or "device"),
+                name=body.get("name"), attributes=body.get("attributes")))
+        if path == "/api/v1/relations":
+            for key in ("from", "to", "rel"):
+                if not isinstance(body.get(key), str) or not body[key]:
+                    return self._json(400,
+                                      {"error": f"{key} required"})
+            return self._json(200, d.entities.relate(
+                body["from"], body["to"], body["rel"]))
+        if path == "/api/v1/net":
+            if not isinstance(body.get("ssid"), str) or not body.get("ssid"):
+                return self._json(400, {"error": "ssid required"})
+            return self._json(202, d.net_provision(
+                body["ssid"], str(body.get("psk") or ""),
+                bool(body.get("hidden"))))
         if path == "/api/internal/prediction":
             # Inject a prediction — drives linked actuators (test hook).
             from whispy.contracts import Prediction

@@ -467,9 +467,144 @@ def events(ctx, brain, kind, since, device_id, follow):
         sys.exit(1)
 
 
+@main.group()
+def sources():
+    """Observation sources — inventory and tails."""
+
+
+@sources.command("list")
+@click.pass_context
+def sources_list(ctx):
+    """Source descriptors (same surface as `thoth sensors`)."""
+    try:
+        _echo(_client(ctx).get("/api/v1/sources"))
+    except DaemonUnavailable as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+
+
+@sources.command("tail")
+@click.argument("source_id")
+@click.option("--follow", is_flag=True,
+              help="poll the cursor — streams new samples as they arrive")
+@click.option("--cursor", default=0, type=int,
+              help="resume from this tail cursor")
+@click.option("--interval", default=1.0, type=float)
+@click.pass_context
+def sources_tail(ctx, source_id, follow, cursor, interval):
+    """Tail one source's latest samples (raw, not the uplink path)."""
+    client = _client(ctx)
+    while True:
+        try:
+            out = client.get(
+                f"/api/v1/sources/{source_id}/observations?cursor={cursor}")
+        except DaemonUnavailable as exc:
+            click.echo(str(exc), err=True)
+            sys.exit(1)
+        except Exception as exc:
+            click.echo(f"tail failed: {exc}", err=True)
+            sys.exit(1)
+        _echo(out)
+        cursor = out.get("next_cursor", cursor)
+        if not follow:
+            return
+        try:
+            import time as _t
+            _t.sleep(interval)
+        except KeyboardInterrupt:
+            return
+
+
+@main.command("context-watch")
+@click.option("--interval", default=2.0, type=float)
+@click.pass_context
+def context_watch(ctx, interval):
+    """Live context — re-render /api/v1/context states until Ctrl-C."""
+    client = _client(ctx)
+    import time as _t
+    last = None
+    while True:
+        try:
+            out = client.get("/api/v1/context")
+        except DaemonUnavailable as exc:
+            click.echo(str(exc), err=True)
+            sys.exit(1)
+        snap = {"states": out.get("states"),
+                "estimates": out.get("estimates")}
+        if snap != last:
+            _echo(snap)
+            last = snap
+        try:
+            _t.sleep(interval)
+        except KeyboardInterrupt:
+            return
+
+
+@main.group()
+def entities():
+    """Entity + relationship surface (persons, devices, spaces)."""
+
+
+@entities.command("list")
+@click.pass_context
+def entities_list(ctx):
+    try:
+        _echo(_client(ctx).get("/api/v1/entities"))
+    except DaemonUnavailable as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+
+
+@entities.command("add")
+@click.argument("type_")
+@click.option("--name", default=None)
+@click.pass_context
+def entities_add(ctx, type_, name):
+    """Create an entity: thoth entities add person --name alice"""
+    try:
+        _echo(_client(ctx).post("/api/v1/entities",
+                                {"type": type_, "name": name}))
+    except DaemonUnavailable as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+
+
+@main.command()
+@click.option("--entity", "entity_id", default=None)
+@click.option("--rel", default=None)
+@click.pass_context
+def relationships(ctx, entity_id, rel):
+    """List edges — optionally filtered to one entity or rel type."""
+    try:
+        doc = _client(ctx).get("/api/v1/entities")
+    except DaemonUnavailable as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+    rels = [r for r in doc.get("relations", [])
+            if (entity_id is None or entity_id in (r["from"], r["to"]))
+            and (rel is None or r["rel"] == rel)]
+    _echo(rels)
+
+
+@entities.command("relate")
+@click.argument("from_id")
+@click.argument("rel")
+@click.argument("to_id")
+@click.pass_context
+def entities_relate(ctx, from_id, rel, to_id):
+    """thoth entities relate person:x wears device:y"""
+    try:
+        _echo(_client(ctx).post("/api/v1/relations",
+                                {"from": from_id, "rel": rel,
+                                 "to": to_id}))
+    except DaemonUnavailable as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+
+
 @main.command()
 def mcp():
-    """Run the MCP stdio server (agents/IDEs ↔ Thoth tools)."""
+    """Run the MCP stdio server (agents/IDEs <-> Thoth tools)."""
     from ..mcp import serve
     serve()
 

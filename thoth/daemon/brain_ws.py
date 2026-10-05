@@ -111,6 +111,17 @@ class BrainWSClient:
         self._post_event(kind, data)
         return False
 
+    def send_frame(self, frame: Dict[str, Any]) -> bool:
+        """Enqueue a typed frame (e.g. ``observation_batch``).
+
+        Returns False when the socket is down — callers that need
+        reliability (the observation spool) keep items pending and retry
+        on the next flush. Send confirmation arrives via the daemon's
+        ``_observation_batch_sent``/``_observation_batch_failed`` hooks
+        driven from :meth:`_drain`.
+        """
+        return self._enqueue(frame)
+
     def _enqueue(self, frame: Dict[str, Any]) -> bool:
         if not self.connected or self._outbox is None or \
                 self._loop is None:
@@ -233,19 +244,34 @@ class BrainWSClient:
                     pass
 
     async def _drain(self, ws) -> None:
+        daemon = self._daemon
         while True:
             frame = await self._outbox.get()
             try:
                 await ws.send(json.dumps(frame))
             except Exception:
-                # Socket died mid-send — hand the frame off to REST so it
-                # isn't lost, then let the session tear down.
-                if frame.get("type") in ("event", "room_changed",
-                                         "metadata"):
+                # Socket died mid-send — hand event-type frames off to
+                # REST so they aren't lost; observation_batch items stay
+                # pending in the daemon spool and are re-sent on the next
+                # session (Brain dedupes on observation_id).
+                ftype = frame.get("type")
+                if ftype == "observation_batch" and daemon is not None:
+                    try:
+                        daemon._observation_batch_failed(frame.get("id"))
+                    except Exception:
+                        pass
+                elif ftype in ("event", "room_changed", "metadata"):
                     self._post_event(
-                        frame.get("kind") or frame.get("type") or "event",
+                        frame.get("kind") or ftype or "event",
                         frame.get("data") or {})
                 raise
+            # Send confirmed — let the daemon ack the spool.
+            if frame.get("type") == "observation_batch" and \
+                    daemon is not None:
+                try:
+                    daemon._observation_batch_sent(frame.get("id"))
+                except Exception:
+                    pass
 
     async def _on_message(self, ws, raw: Any) -> None:
         try:

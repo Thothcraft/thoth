@@ -23,11 +23,25 @@ from ..capture import CaptureManager
 from ..deployment import DeploymentManager
 from ..metadata import MetadataManager
 from ..models import ModelRegistry
+from ..events import EventHub
+from ..observations import (BATCH_MAX_ITEMS, Observation,
+                            ObservationSpool, build_batch)
 from ..room import RoomManager
-from ..settings import ConfigStore
+from ..settings import ConfigStore, config_dir
 from .actions import ActionScheduler
 
 logger = logging.getLogger(__name__)
+
+
+def _probe_bluetooth() -> bool:
+    """Cheap BlueZ presence probe for the capabilities advertisement —
+    no daemon ownership; the BLE subsystem owns the controller."""
+    try:
+        import shutil
+        return shutil.which("bluetoothctl") is not None or \
+            shutil.which("btmgmt") is not None
+    except Exception:
+        return False
 
 
 def _lan_ip() -> Optional[str]:
@@ -76,11 +90,34 @@ class ThothDaemon:
         # edge-triggered (label changes only, not every tick)
         self._last_pred_labels: Dict[str, str] = {}
         self._cap_subs: Dict[str, Dict[str, Any]] = {}
+        # observation/v1 uplink path — durable bounded outbox + a small
+        # local ring so the dashboard/API can introspect recent envelopes
+        # without touching the spool.
+        self._obs_spool = ObservationSpool(config_dir() / "spool")
+        self._obs_inflight: Dict[str, List[str]] = {}
+        self.observations: Deque[Dict[str, Any]] = deque(maxlen=500)
+        # Node-side context estimators — observations → versioned state
+        # keys (contract §4/§8); transitions uplink as context.state.v1.
+        from ..estimators import EstimatorHub
+        self.estimators = EstimatorHub(
+            device_id=self.device_id,
+            fingerprints_path=config_dir() / "fingerprints.json")
+        # Entities + relationships — persons/devices/spaces share the
+        # observation subject keyspace so evidence joins to identity.
+        from ..entities import EntityStore
+        self.entities = EntityStore(config_dir() / "entities.json")
+        # Local live transport — SSE fanout for the dashboard/SDK
+        # (observations + prediction edges; never the uplink path).
+        self.events = EventHub()
         self._started_at: Optional[float] = None
         self._last_heartbeat = 0.0
         self._last_metadata = 0.0
         self._dash = None            # dashboard server on :80 (may be None)
         self._brain_ws = None        # outbound Brain WS client
+        self._ws_lock = threading.Lock()  # serializes _start_brain_ws races
+        self._ble = None             # BlueZ subsystem (observer/central/peripheral)
+        self._prov = None            # provisioning state machine
+        self._watches: Dict[str, Any] = {}   # device_id → PinetimeLink
         # None → follow config["dashboard_enabled"] (default on);
         # --no-dashboard passes False for this run.
         self._serve_ui = serve_ui
@@ -105,6 +142,8 @@ class ThothDaemon:
         self._thread.start()
         self._start_api()
         self._start_brain_ws()
+        self._start_bluetooth()
+        self._start_provisioning()
         # First inferred refresh off the SMA thread — geo probes egress.
         self._maybe_refresh_metadata(force=True)
         logger.info("ThothDaemon started: %d sensor stream(s)", len(self._streams))
@@ -121,6 +160,32 @@ class ThothDaemon:
                 self._streams[sensor.id] = stream
             except Exception as exc:
                 logger.warning("sensor %s failed to open: %s", sensor.id, exc)
+
+    def _attach_watches(self) -> None:
+        """Central-role links to enrolled wearables — subscribe to
+        motion, push context back. Retried from ``_tick`` while the
+        BLE loop isn't up yet (``attach()`` is a no-op once attached)."""
+        ble = self._ble
+        if ble is None:
+            return
+        try:
+            from ..bluetooth.pinetime import PinetimeLink
+        except Exception:
+            return
+        for rec in ble.known.list():
+            if rec.get("kind") != "watch":
+                continue
+            did = rec["device_id"]
+            link = self._watches.get(did)
+            if link is None:
+                link = self._watches[did] = PinetimeLink(
+                    ble, rec["address"], did, self.emit_observation,
+                    ble.source_id)
+            if not link._attached:
+                try:
+                    link.attach()
+                except Exception:
+                    pass
 
     def _start_api(self) -> None:
         from ..local_api import LocalAPIServer
@@ -183,11 +248,114 @@ class ThothDaemon:
         except Exception as exc:
             logger.debug("mDNS advertiser not started: %s", exc)
 
+    def _start_bluetooth(self) -> None:
+        """BlueZ subsystem — observer/central roles feeding the
+        observation uplink; peripheral role is added by provisioning."""
+        try:
+            from ..bluetooth import BluetoothSubsystem
+            self._ble = BluetoothSubsystem(
+                self.config, emit=self.emit_observation,
+                device_id=self.device_id).start()
+            self._attach_watches()
+        except Exception as exc:
+            logger.debug("bluetooth subsystem not started: %s", exc)
+            self._ble = None
+
+    def _start_provisioning(self) -> None:
+        """Network bring-up: idle → provisioning → online/failed,
+        with the BLE commissioning GATT surface when unprovisioned."""
+        try:
+            from ..provisioning import ProvisionManager
+            self._prov = ProvisionManager(
+                self.config, emit=self.emit_observation,
+                device_id=self.device_id, ble=self._ble).start()
+        except Exception as exc:
+            logger.debug("provisioning not started: %s", exc)
+            self._prov = None
+
+    def net_status(self) -> Dict[str, Any]:
+        if self._prov is None:
+            return {"enabled": False, "state": "disabled"}
+        return self._prov.status()
+
+    def net_provision(self, ssid: str, psk: str = "",
+                      hidden: bool = False) -> Dict[str, Any]:
+        if self._prov is None:
+            return {"accepted": False, "error": "provisioning disabled"}
+        return self._prov.provision(ssid, psk, hidden)
+
+    def net_scan(self) -> List[Dict[str, Any]]:
+        if self._prov is None:
+            return []
+        return self._prov.scan_payload()
+
+    def calibrate_zone(self, zone: str) -> Dict[str, Any]:
+        """RSSI fingerprint calibration — record the current per-subject
+        RSSI vector as ``zone``'s fingerprint (Phase 7)."""
+        snap = self.estimators.calibrate_zone(str(zone))
+        if snap is None:
+            return {"ok": False, "error": "no ble.rssi.v1 evidence yet"}
+        return {"ok": True, "zone": str(zone), "anchors": snap}
+
+    # -- Phase 9: wearable enrollment + entity relations -------------------------
+    def ble_enroll(self, address: str, kind: str = "device",
+                   name: Optional[str] = None,
+                   person: Optional[str] = None) -> Dict[str, Any]:
+        """Bind a BLE address to a stable ``device:<uuid>`` subject and
+        optionally a ``person:<uuid>`` via a ``wears`` edge."""
+        ble = self._ble
+        if ble is None:
+            return {"ok": False, "error": "bluetooth unavailable"}
+        from ..bluetooth import BluetoothSubsystem
+        ah = BluetoothSubsystem.addr_hash(address, ble._salt())
+        ent = self.entities.upsert(
+            type="device", name=name,
+            attributes={"ble": True, "kind": kind})
+        rec = ble.known.enroll(ah, address, kind=kind, name=name,
+                               device_id=ent["id"])
+        out: Dict[str, Any] = {"ok": True, "device_id": ent["id"],
+                               "addr_hash": ah, "record": rec}
+        if person:
+            p = self._find_or_create_person(person)
+            edge = self.entities.relate(p["id"], ent["id"], "wears")
+            out["person_id"] = p["id"]
+            out["relation"] = edge
+        if kind == "watch":
+            self._attach_watches()
+        return out
+
+    def _find_or_create_person(self, name: str) -> Dict[str, Any]:
+        for p in self.entities.list(type="person"):
+            if p.get("name") == name:
+                return p
+        return self.entities.upsert(type="person", name=name)
+
+    def ble_unenroll(self, address: str) -> Dict[str, Any]:
+        ble = self._ble
+        if ble is None:
+            return {"ok": False, "error": "bluetooth unavailable"}
+        from ..bluetooth import BluetoothSubsystem
+        ah = BluetoothSubsystem.addr_hash(address, ble._salt())
+        return {"ok": ble.known.unenroll(ah), "addr_hash": ah}
+
+    def ble_known(self) -> Dict[str, Any]:
+        ble = self._ble
+        if ble is None:
+            return {"known": [], "seen_now": []}
+        return {"known": ble.known.list(), "seen_now": ble.seen_now()}
+
     def _start_brain_ws(self) -> None:
         """Outbound Brain channel (CONTRACT §2) — only when paired."""
         token = self.config.device_token
         if not token:
             return
+        with self._ws_lock:
+            if self._brain_ws is not None:
+                return
+            self._start_brain_ws_locked(token)
+
+    def _start_brain_ws_locked(self, token: str) -> None:
+        """Launch the WS client; caller holds ``_ws_lock``."""
         try:
             from .brain_ws import BrainWSClient
             host = str(self.config.get("local_host", "127.0.0.1"))
@@ -213,6 +381,82 @@ class ThothDaemon:
             except Exception as exc:
                 logger.debug("event send failed: %s", exc)
         # Unpaired or no WS client — nothing to do locally.
+
+    # -- observations (observation/v1) -----------------------------------------
+    def emit_observation(self, obs: Observation | Dict[str, Any]) -> str:
+        """Producer API: validate + enqueue one observation for uplink.
+
+        Sources call this for *context-relevant* envelopes only — raw
+        high-rate data stays on the capture/tail path. Returns the
+        observation_id (stable across reconnect redelivery).
+        """
+        item = obs.validate().to_dict() if isinstance(obs, Observation) else dict(obs)
+        obs_id = self._obs_spool.append(item)
+        item["observation_id"] = obs_id
+        self.observations.append(item)
+        try:
+            self.events.publish("observation", item)
+        except Exception:
+            pass
+        # estimators consume the stream and may emit context.state.v1
+        for state in self.estimators.consume(item):
+            self._emit_state(state)
+        return obs_id
+
+    def _emit_state(self, state: Dict[str, Any]) -> None:
+        """One estimator state transition → context.state.v1 on the
+        uplink (evidence-linked) and the local event fanout."""
+        try:
+            self.emit_observation(Observation(
+                schema="context.state.v1",
+                source_id="estimators",
+                subject=state.get("entity_id"),
+                value=state).validate())
+            # context-device channel — push the new state to watches
+            for link in self._watches.values():
+                try:
+                    link.push_context({"k": state.get("key"),
+                                       "v": state.get("value"),
+                                       "c": state.get("confidence")})
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _flush_observations(self) -> None:
+        """Drain the spool into ``observation_batch`` WS frames.
+
+        Peek-then-ack: items leave the spool only after the socket
+        confirms the send (``_observation_batch_sent``); a failed frame
+        keeps its items pending so reconnect redelivers them — Brain
+        dedupes on observation_id (contract §2).
+        """
+        ws = self._brain_ws
+        if ws is None or not ws.connected or len(self._obs_spool) == 0:
+            return
+        if len(self._obs_inflight) > 16:
+            # Outbound queue is saturated — let the drain task catch up.
+            return
+        items = self._obs_spool.pending(BATCH_MAX_ITEMS)
+        if not items:
+            return
+        frame = build_batch(items)
+        self._obs_inflight[frame["id"]] = [
+            str(i.get("observation_id")) for i in frame["items"]
+            if i.get("observation_id")]
+        if not ws.send_frame(frame):
+            self._obs_inflight.pop(frame["id"], None)
+
+    def _observation_batch_sent(self, batch_id: str) -> None:
+        """WS drain confirmation → ack items out of the spool."""
+        ids = self._obs_inflight.pop(batch_id, None)
+        if ids:
+            self._obs_spool.ack(ids)
+
+    def _observation_batch_failed(self, batch_id: str) -> None:
+        """Send died — drop the inflight marker; items stay pending and
+        are re-sent on the next flush."""
+        self._obs_inflight.pop(batch_id, None)
 
     def _automation_fired(self, auto: Any, action_cfg: Dict[str, Any],
                         prediction: Any) -> None:
@@ -293,6 +537,18 @@ class ThothDaemon:
             except Exception:
                 pass
             self._brain_ws = None
+        if self._ble is not None:
+            try:
+                self._ble.stop()
+            except Exception:
+                pass
+            self._ble = None
+        if self._prov is not None:
+            try:
+                self._prov.stop()
+            except Exception:
+                pass
+            self._prov = None
         if self._dash is not None:
             try:
                 self._dash.stop()
@@ -341,6 +597,13 @@ class ThothDaemon:
     def _tick(self) -> None:
         self._maybe_heartbeat()
         self._maybe_refresh_metadata()
+        # Observations must flush even when no sensor streams exist —
+        # sources like the BLE observer produce them independently.
+        self._flush_observations()
+        # estimator decay — silent sources produce no new observations
+        for state in self.estimators.tick():
+            self._emit_state(state)
+        self._attach_watches()
         if self._sync is None:
             # No streams: still drive time/schedule triggers (no features).
             self.automations.tick()
@@ -380,6 +643,10 @@ class ThothDaemon:
             return
         previous = self._last_pred_labels.get(mid)
         self._last_pred_labels[mid] = label
+        try:
+            self.events.publish("prediction", prediction.to_dict())
+        except Exception:
+            pass
         self.emit_event("prediction", {
             **prediction.to_dict(),
             "model_id": mid,
@@ -725,12 +992,60 @@ class ThothDaemon:
             "running": not self._stop.is_set(),
             "uptime_s": (time.time() - self._started_at)
                 if self._started_at else 0,
+            "observations_pending": len(self._obs_spool),
             "sources": sources,
             "actuators": self.actuators(),
             "models": {"installed": len(self.registry.list()),
                        "active": len(self.registry.active())},
             "captures_active": len(self.captures._active),
         }
+
+    def capabilities(self) -> Dict[str, Any]:
+        """Node capability advertisement (§12 /api/v1/capabilities).
+
+        Generic capability names — hardware appears as source types, not
+        product APIs. Probed, never fabricated: optional hardware that
+        isn't present simply doesn't appear.
+        """
+        import platform
+        caps: Dict[str, Any] = {
+            "device_id": self.device_id,
+            "platform": platform.system().lower(),
+            "compute": self.compute(),
+            "features": [],
+            "sources": {},
+        }
+        feats = caps["features"]
+        if self._brain_ws is not None:
+            feats.append("cloud_link")
+        feats.append("observation_uplink")
+        if self._streams:
+            feats.append("streaming")
+        try:
+            for d in self.sources():
+                key = d.get("modality") or d.get("type") or "unknown"
+                caps["sources"][key] = caps["sources"].get(key, 0) + 1
+        except Exception:
+            pass
+        if caps["sources"]:
+            feats.append("sensing")
+        if self.actuators():
+            feats.append("actuation")
+        caps["domains"] = self._detect_domains()
+        # Bluetooth capability — the BLE subsystem reports presence even
+        # before it is enabled, so provisioning surfaces can react.
+        ble = getattr(self, "_ble", None)
+        if ble is not None:
+            try:
+                caps["bluetooth"] = ble.capability()
+                feats.append("bluetooth")
+            except Exception:
+                caps["bluetooth"] = {"present": False}
+        else:
+            caps["bluetooth"] = {"present": _probe_bluetooth()}
+            if caps["bluetooth"]["present"]:
+                feats.append("bluetooth")
+        return caps
 
     def sources(self) -> List[Dict[str, Any]]:
         """All observation-source descriptors (exposure-filtered)."""
@@ -754,6 +1069,73 @@ class ThothDaemon:
         matches = [d for d in self.sources()
                    if d.get("modality") == key or d.get("type") == key]
         return matches[0] if len(matches) == 1 else None
+
+    # -- Phase 6: conformance + capability detection ----------------------------
+    _CONF_CACHE_S = 30.0
+
+    def source_conformance(self) -> Dict[str, Any]:
+        """whispy conformance gate over every discovered sensor adapter.
+        Cached — these checks touch hardware and must not be cheap."""
+        now = time.time()
+        cached = getattr(self, "_conf_cache", None)
+        if cached and now - cached[0] < self._CONF_CACHE_S:
+            return dict(cached[1])
+        reports: Dict[str, Any] = {}
+        device = self._device
+        adapters = getattr(device, "_adapters", {}) if device else {}
+        try:
+            from whispy.conformance import check_sensor_adapter
+        except Exception:
+            check_sensor_adapter = None
+        for name, adapter in adapters.items():
+            if check_sensor_adapter is None:
+                reports[name] = {"passed": None,
+                                 "error": "whispy.conformance unavailable"}
+                continue
+            try:
+                reports[name] = check_sensor_adapter(
+                    adapter, max_samples=1, timeout_s=3.0)
+            except Exception as exc:
+                reports[name] = {"passed": False,
+                                 "error": f"{type(exc).__name__}: {exc}"}
+        out = {"adapters": reports,
+               "passed": all(r.get("passed") for r in reports.values())
+                         if reports else None}
+        self._conf_cache = (now, out)
+        return dict(out)
+
+    def _detect_domains(self) -> Dict[str, bool]:
+        """Canonical sensing domains probed from descriptors, adapters
+        and subsystems — honest presence bits for the capabilities ad."""
+        modalities: set = set()
+        adapter_names: set = set()
+        device = self._device
+        if device is not None:
+            try:
+                for d in device.sensor_descriptors() or []:
+                    m = getattr(d, "modality", None) or \
+                        (d.to_dict().get("modality")
+                         if hasattr(d, "to_dict") else None)
+                    if m:
+                        modalities.add(str(m).lower())
+            except Exception:
+                pass
+            adapter_names = {str(n).lower()
+                             for n in getattr(device, "_adapters", {})}
+        haystack = modalities | adapter_names
+        ble = getattr(self, "_ble", None)
+        ble_present = bool(getattr(ble, "present", False)) or \
+            _probe_bluetooth()
+        return {
+            "camera": bool(haystack & {"camera", "video", "vision"}),
+            "radar": bool(haystack & {"radar", "csi", "mmwave"}),
+            "bluetooth": ble_present or "bluetooth" in haystack
+                          or "ble" in haystack,
+            "zigbee": bool(haystack & {"zigbee", "z2m", "zb"}),
+            "imu": bool(haystack & {"imu", "accel", "gyro"}),
+            "environmental": bool(haystack & {"environmental", "env",
+                                              "temperature", "humidity"}),
+        }
 
     def source_observations(self, source_id: str,
                             cursor: int = 0) -> Optional[Dict[str, Any]]:
@@ -891,6 +1273,9 @@ class ThothDaemon:
         return {
             "device_id": self.device_id,
             "states": states,
+            "observations": list(self.observations)[-50:],
+            "observations_pending": len(self._obs_spool),
+            "estimates": self.estimators.states(),
             "room": self.room.document(),
             "metadata": self.metadata.document(),
             "online": bool(self._brain_ws is not None),
