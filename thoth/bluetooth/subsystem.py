@@ -267,7 +267,13 @@ class BluetoothSubsystem:
                 subject=subject,
                 value={"rssi_dbm": rssi,
                        "tx_power_dbm": adv.tx_power,
-                       "addr_type": adv.addr_type},
+                       "addr_type": adv.addr_type,
+                       # Account-scoped correlation key: the app emits
+                       # ble:<MAC> for the same device — lets Brain's
+                       # proximity map merge edges seen by node + phone
+                       # into one node instead of two anonymous bubbles.
+                       "mac": str(adv.address).upper(),
+                       "name": dev.get("name")},
                 units={"rssi_dbm": "dBm", "tx_power_dbm": "dBm"},
                 sequence=seq,
                 timestamp=now,
