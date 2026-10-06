@@ -50,7 +50,19 @@ export interface RoomSensorSpec {
 
 export type Mount = 'wall' | 'table' | 'floor' | 'ceiling' | (string & {})
 
+export interface RoomSpatial {
+  surveyed: boolean
+  origin_enu_m: V3 | null
+  heading_deg: number | null
+  floor: number | null
+}
+export interface BuildingAnchor {
+  id: string
+  name: string
+  anchor: { latitude: number | null; longitude: number | null; altitude_m: number | null }
+}
 export interface RoomDevice {
+  position_uncertainty_m?: number | null
   device_id: string
   pos: V3
   rot_y?: number
@@ -63,6 +75,7 @@ export interface RoomDevice {
 /** A secondary named room: own geometry + furniture, devices join it via
  * `RoomDevice.room_id`. */
 export interface RoomSpec {
+  spatial?: RoomSpatial
   room_id: string
   name?: string
   dims: RoomDims
@@ -71,6 +84,8 @@ export interface RoomSpec {
 }
 
 export interface RoomDoc {
+  spatial?: RoomSpatial
+  building?: BuildingAnchor
   format: 'room/v1' | string
   room_id?: string
   name?: string
@@ -109,6 +124,7 @@ export function roomView(doc: RoomDoc, roomId: string): RoomDoc {
     room_id: r.room_id,
     name: r.name || r.room_id,
     dims: r.dims,
+    spatial: r.spatial,
     walls: r.walls ?? [],
     furniture: r.furniture ?? [],
     devices: (doc.devices ?? []).filter((d) => d.room_id === roomId),

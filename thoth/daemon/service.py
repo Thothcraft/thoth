@@ -96,6 +96,8 @@ class ThothDaemon:
         self._obs_spool = ObservationSpool(config_dir() / "spool")
         self._obs_inflight: Dict[str, List[str]] = {}
         self.observations: Deque[Dict[str, Any]] = deque(maxlen=500)
+        from ..radio_evidence import RadioEvidenceBridge
+        self._radio_evidence = RadioEvidenceBridge(self.device_id)
         # Node-side context estimators — observations → versioned state
         # keys (contract §4/§8); transitions uplink as context.state.v1.
         from ..estimators import EstimatorHub
@@ -154,7 +156,10 @@ class ThothDaemon:
         for sensor in self._device.sensors():
             try:
                 handle = self._device.sensor(sensor.id)
-                stream = SampleStream(handle.stream(), maxlen=4096,
+                # Pass the callable — SampleStream retries by calling it
+                # again after a raised exception; a bare iterator is dead
+                # forever once its pump loop exits.
+                stream = SampleStream(handle.stream, maxlen=4096,
                                       name=sensor.id)
                 stream.start()
                 self._streams[sensor.id] = stream
@@ -610,6 +615,8 @@ class ThothDaemon:
             return
         window = self._sync.rolling(self.window_seconds)
         self._record_captures()
+        for observation in self._radio_evidence.consume(window):
+            self.emit_observation(observation)
         from whispy.windows import WindowFeatures
         feats = WindowFeatures(window)
         last_pred: Optional[Any] = None

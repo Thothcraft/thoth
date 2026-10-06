@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ThreeEvent } from '@react-three/fiber'
 import { get, put } from '../api'
 import { RoomScene, roomOptions, roomView } from '../scene'
+import { SpatialSettings } from '../scene/SpatialSettings'
 import { EMPTY_ROOM } from '../scene/types'
 import type { RoomDevice, RoomDoc, RoomFurniture, RoomSpec, V3 } from '../scene'
 
@@ -152,6 +153,8 @@ export default function MetadataPage() {
     if (r.status === 200 && r.body) {
       setRoom(r.body)
       setSaved(`room saved ${ts(Date.now() / 1000)}`)
+    } else {
+      setSaved(`Save failed (${r.status}). Check the survey fields; no changes were saved.`)
     }
   }, [])
 
@@ -256,6 +259,9 @@ export default function MetadataPage() {
         </div>
 
         <div className="card">
+          {room && view && <SpatialSettings room={room} view={view}
+            onBuilding={(building) => mutate((d) => { d.building = building })}
+            onSpatial={(spatial) => mutateRoom((d) => { d.spatial = spatial })} />}
           <h3>Room — {roomOptions(room ?? EMPTY_ROOM).find((r) => r.room_id === selRoom)?.name ?? '…'}</h3>
           <div className="field"><span>name</span>
             <input value={view?.name ?? ''}

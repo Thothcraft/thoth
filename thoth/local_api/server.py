@@ -549,7 +549,10 @@ class _Handler(BaseHTTPRequestHandler):
                 body.get("manual"), dict) else body
             return self._json(200, d.metadata.set_manual(manual or {}))
         if path == "/api/v1/room":
-            return self._json(200, d.room.put(body))
+            try:
+                return self._json(200, d.room.put(body))
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
         return self._json(404, {"error": "not found"})
 
     def _authorized_header(self) -> bool:

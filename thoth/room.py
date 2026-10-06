@@ -12,6 +12,7 @@ persisted to ``~/.thoth/room.json`` here, never stored only remotely.
 from __future__ import annotations
 
 import json
+import math
 import logging
 import time
 from pathlib import Path
@@ -35,7 +36,8 @@ DEFAULT_ROOM: Dict[str, Any] = {
 
 def _num(value: Any, default: float = 0.0) -> float:
     try:
-        return float(value)
+        value = float(value)
+        return value if math.isfinite(value) else default
     except (TypeError, ValueError):
         return default
 
@@ -135,6 +137,18 @@ def normalize_room(doc: Dict[str, Any]) -> Dict[str, Any]:
             "sensors": sensors,
         })
     out["devices"] = devices
+    from .spatial_config import building, spatial, number
+    for source, target in [(doc, out)] + list(zip(
+            [r for r in doc.get("rooms", []) if isinstance(r, dict)], rooms)):
+        normalized = spatial(source.get("spatial"))
+        if normalized is not None:
+            target["spatial"] = normalized
+    normalized_building = building(doc.get("building"))
+    if normalized_building is not None:
+        out["building"] = normalized_building
+    for source, target in zip([d for d in doc.get("devices", []) if isinstance(d, dict)], devices):
+        uncertainty = source.get("position_uncertainty_m")
+        target["position_uncertainty_m"] = uncertainty if number(uncertainty) and uncertainty >= 0 else None
     out["updated_at"] = _num(doc.get("updated_at"), 0.0)
     return out
 
