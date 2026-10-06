@@ -753,7 +753,54 @@ class ThothDaemon:
                 "token": self.config.local_token,
             }
         return {"sensors": sensors, "actuators": actuators,
-                "local_api": local_api}
+                "local_api": local_api, "activity": self._activity()}
+
+    def _activity(self) -> Dict[str, Any]:
+        """Live "what is this node doing" snapshot for the fleet UI.
+
+        Lands under ``device.hardware_info.activity`` via the heartbeat
+        merge — mode + the sensors/captures/models/watch links actually
+        live right now, so the app can answer "idle? collecting through
+        the dashboard? streaming which sensors?" without guessing.
+        """
+        now = time.time()
+        streams: List[Dict[str, Any]] = []
+        for sid, st in (self._streams or {}).items():
+            try:
+                last = getattr(st, "_last", None)
+                age = (now - last.timestamp) if last is not None else None
+                subs = [getattr(s, "_name", "") or ""
+                        for s in getattr(st, "_subs", [])]
+                streams.append({
+                    "id": sid,
+                    "fresh": age is not None and age < 10.0,
+                    "last_age_s": round(age, 1) if age is not None else None,
+                    "subscribers": [n for n in subs if n],
+                })
+            except Exception:
+                pass
+        captures = [{"id": c.get("id"),
+                     "sensors": list(c.get("sensors") or [])}
+                    for c in getattr(self.captures, "_active", {}).values()]
+        try:
+            models = [m.runtime_model_id for m in self.registry.active()]
+        except Exception:
+            models = []
+        watches = [{"subject": w.subject, "connected": w.connected}
+                   for w in self._watches.values()]
+        brain = bool(self._brain_ws is not None
+                     and getattr(self._brain_ws, "connected", False))
+        if captures:
+            mode = "capturing"
+        elif models:
+            mode = "inferring"
+        elif any(s["fresh"] for s in streams):
+            mode = "sensing"
+        else:
+            mode = "idle"
+        return {"mode": mode, "captures": captures, "models": models,
+                "streams": streams, "watches": watches,
+                "brain_ws": brain}
 
     def _record_captures(self) -> None:
         """Flush each capture's private subscription queue to disk.

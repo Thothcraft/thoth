@@ -394,7 +394,15 @@ class BluetoothSubsystem:
                 handle = await self._backend.connect(session.address)
                 session.handle = handle
                 for char_uuid, cb in session.subscriptions.items():
-                    await self._backend.subscribe(handle, char_uuid, cb)
+                    try:
+                        await self._backend.subscribe(handle, char_uuid,
+                                                      cb)
+                    except Exception as exc:
+                        # Missing char (stock firmware lacks the fork
+                        # 00030003/0004 chars) — skip it, don't drop the
+                        # whole link into a reconnect loop.
+                        logger.debug("ble subscribe %s skipped: %s",
+                                     char_uuid, exc)
                 backoff = 1.0
                 self._state_cb(session, True)
                 while (handle.connected and not session.closed

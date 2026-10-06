@@ -1,0 +1,10 @@
+menu "Thoth CSI transmitter"
+    config THOTH_CSI_PROBE_RATE_HZ
+        int "Requested CSI probe rate (packets per second)"
+        range 1 1000
+        default 100
+        help
+            Requested ESP-NOW probe rate. Begin at 100 and measure receiver
+            output_dropped and queue_depth before increasing the load.
+            This is a requested rate, not a guaranteed reception rate.
+endmenu
