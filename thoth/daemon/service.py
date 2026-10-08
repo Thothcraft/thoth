@@ -1102,6 +1102,8 @@ class ThothDaemon:
                 "last_sample_ts": getattr(stream, "last_timestamp", None)
                     if stream else None,
                 "dropped": getattr(stream, "dropped", 0) if stream else 0,
+                "expected_rate": getattr(s, "sample_rate", None),
+                "actual_rate": self._measured_rate(stream),
             })
         return {
             "device_id": self.device_id,
@@ -1163,19 +1165,46 @@ class ThothDaemon:
                 feats.append("bluetooth")
         return caps
 
+    _RATE_WINDOW_S = 20.0
+
+    def _measured_rate(self, stream: Any) -> Optional[float]:
+        """Observed sample rate (Hz) over the last _RATE_WINDOW_S of the
+        ring buffer — the 'actual' half of device inspection (G11)."""
+        if stream is None:
+            return None
+        try:
+            n = len(stream.since(time.time() - self._RATE_WINDOW_S))
+        except Exception:
+            return None
+        return round(n / self._RATE_WINDOW_S, 2) if n else 0.0
+
+    def _annotate_rate(self, desc: Dict[str, Any],
+                       sensor: Any = None) -> Dict[str, Any]:
+        """Attach expected_rate (declared sample_rate) + actual_rate
+        (measured) to a source descriptor dict."""
+        stream = self._streams.get(desc.get("id"))
+        desc.setdefault("expected_rate",
+                        desc.get("sample_rate")
+                        or getattr(sensor, "sample_rate", None))
+        desc["actual_rate"] = self._measured_rate(stream)
+        return desc
+
     def sources(self) -> List[Dict[str, Any]]:
         """All observation-source descriptors (exposure-filtered)."""
         if self._device is None:
             return []
+        sensors = {s.id: s for s in self._device.sensors()}
         try:
             descriptors = self._device.sensor_descriptors()
         except Exception:
             descriptors = []
         if not descriptors:
             # Older devices only expose the Sensor inventory contract.
-            return [s.to_dict() for s in self._device.sensors()
+            return [self._annotate_rate(s.to_dict(), s)
+                    for s in self._device.sensors()
                     if self.sensor_exposed(s.id)]
-        return [d.to_dict() for d in descriptors
+        return [self._annotate_rate(d.to_dict(), sensors.get(d.id))
+                for d in descriptors
                 if self.sensor_exposed(d.id)]
 
     def source(self, key: str) -> Optional[Dict[str, Any]]:
