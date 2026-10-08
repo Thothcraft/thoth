@@ -59,9 +59,9 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: thoth/dashboard/package-lock.json
+          cache-dependency-path: dashboard/package-lock.json
       - name: Build node dashboard
-        working-directory: thoth/dashboard
+        working-directory: dashboard
         run: |
           npm ci
           npm run build
@@ -138,7 +138,9 @@ jobs:
       - name: Install NSIS
         run: choco install nsis -y --no-progress
       - name: Build Thoth-Setup-<v>.exe
-        run: makensis /DVERSION=$env:V packaging\windows\thoth.nsi
+        run: |
+          $env:Path += ";C:\Program Files (x86)\NSIS;C:\ProgramData\chocolatey\bin"
+          makensis /V4 /DVERSION=$env:V packaging\windows\thoth.nsi
       - uses: actions/upload-artifact@v4
         with:
           name: exe
@@ -207,6 +209,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.ESP_REPO }}
+          token: ${{ secrets.RELEASE_PAT || github.token }}
           path: esp
       - uses: actions/setup-python@v5
         with:
@@ -234,6 +237,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.WATCH_REPO }}
+          token: ${{ secrets.RELEASE_PAT || github.token }}
           submodules: recursive
       - name: Build DFU package (infinitime-build container)
         run: docker run --rm -v "$PWD:/sources" infinitime/infinitime-build
