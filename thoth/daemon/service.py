@@ -144,6 +144,16 @@ class ThothDaemon:
         # A pre-set _device (tests, embedded hosts) is used as-is.
         if self._device is None:
             self._device = whispy.local(device_id=self.config.device_id)
+        # Warm the lazy subsystem imports *before* sensor streams and the
+        # SMA thread start contending for the GIL — under stream load each
+        # deferred import crawls; uncontended they cost ~1s total.
+        try:
+            from ..local_api import LocalAPIServer  # noqa: F401
+            from ..bluetooth import BluetoothSubsystem  # noqa: F401
+            from ..provisioning import ProvisionManager  # noqa: F401
+            from .brain_ws import BrainWSClient  # noqa: F401
+        except Exception:
+            pass
         self._open_streams()
         from whispy.synchronization import WindowSynchronizer
         self._sync = WindowSynchronizer(
@@ -268,6 +278,9 @@ class ThothDaemon:
         """BlueZ subsystem — observer/central roles feeding the
         observation uplink; peripheral role is added by provisioning."""
         try:
+            if not bool(self.config.get("ble.enabled", True)):
+                self._ble = None
+                return
             from ..bluetooth import BluetoothSubsystem
             self._ble = BluetoothSubsystem(
                 self.config, emit=self.emit_observation,
@@ -281,6 +294,9 @@ class ThothDaemon:
         """Network bring-up: idle → provisioning → online/failed,
         with the BLE commissioning GATT surface when unprovisioned."""
         try:
+            if not bool(self.config.get("provisioning.enabled", True)):
+                self._prov = None
+                return
             from ..provisioning import ProvisionManager
             self._prov = ProvisionManager(
                 self.config, emit=self.emit_observation,

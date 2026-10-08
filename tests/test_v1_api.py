@@ -22,6 +22,12 @@ def _daemon(tmp_home, port):
 
     cfg = ConfigStore()
     cfg.set("local_port", port)
+    # These tests only exercise /api/v1 — skip hardware/network
+    # subsystems whose platform probing dominates start() on
+    # machines without BlueZ/NM (BLE scan, wifi manager, :80 bind).
+    cfg.set("ble.enabled", False)
+    cfg.set("provisioning.enabled", False)
+    cfg.set("dashboard_enabled", False)
     daemon = ThothDaemon(config=cfg, window_seconds=0.5, tick_hz=4.0)
     daemon._device = LocalDevice(
         device_id="rpi1",
@@ -30,7 +36,8 @@ def _daemon(tmp_home, port):
     # share on slow machines.
     daemon._device.open({"fixture": {"sensor_type": "microphone",
                                      "payloads": [[0.5]],
-                                     "sample_rate": 10}})
+                                     "sample_rate": 10,
+                                     "realtime": True}})
     return daemon
 
 

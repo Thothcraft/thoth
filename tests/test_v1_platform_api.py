@@ -23,13 +23,19 @@ def _daemon(tmp_home, port):
 
     cfg = ConfigStore()
     cfg.set("local_port", port)
+    # /net and /ble surface tests need those subsystems alive (they
+    # fast-fail without hardware) — but fixture pumps must be paced:
+    # without realtime=true they free-run at 100% GIL and starve the
+    # HTTP handler thread (~100s+ per request on slow machines).
+    cfg.set("dashboard_enabled", False)
     daemon = ThothDaemon(config=cfg, window_seconds=0.5, tick_hz=4.0)
     daemon._device = LocalDevice(
         device_id="rpi1",
         drivers={"fixture": FixtureDriver()})
     daemon._device.open({"fixture": {"sensor_type": "microphone",
                                      "payloads": [[0.5]],
-                                     "sample_rate": 10}})
+                                     "sample_rate": 10,
+                                     "realtime": True}})
     return daemon
 
 

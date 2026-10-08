@@ -34,7 +34,11 @@ def _daemon(tmp_home, port, dash_port=0, dash_dir=None):
         drivers={"fixture": FixtureDriver()})
     daemon._device.open({"fixture": {"sensor_type": "microphone",
                                      "payloads": [[0.5]],
-                                     "sample_rate": 10}})
+                                     "sample_rate": 10,
+                                     # pace the pumps — un-paced fixture
+                                     # streams free-run at 100% GIL and
+                                     # starve the HTTP handler thread
+                                     "realtime": True}})
     return daemon
 
 
