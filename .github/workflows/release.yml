@@ -142,6 +142,7 @@ jobs:
         run: |
           $env:Path += ";C:\Program Files (x86)\NSIS;C:\ProgramData\chocolatey\bin"
           makensis /V4 /DVERSION=$env:V packaging\windows\thoth.nsi
+          Move-Item packaging\windows\Thoth-Setup-*.exe .
       - uses: actions/upload-artifact@v4
         with:
           name: exe
