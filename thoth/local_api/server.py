@@ -303,6 +303,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, d.metadata.document())
         if path == "/api/v1/context":
             return self._json(200, d.context())
+        if path == "/api/v1/context/uplink":
+            return self._json(200, d.context_uplink.status())
+        if path == "/api/v1/discriminators":
+            return self._json(200, d.discriminators.status())
         if path == "/api/v1/capabilities":
             return self._json(200, d.capabilities())
         if path == "/api/v1/predictions":
@@ -488,6 +492,52 @@ class _Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/v1/actuators/") and path.endswith("/actions"):
             actuator_id = path[len("/api/v1/actuators/"):-len("/actions")]
             return self._json(200, d.execute_actuator(actuator_id, body))
+        if path == "/api/v1/context/uplink":
+            # {enabled?, rate_s?, detail?} — merged + normalized + persisted
+            from ..context_uplink import normalize_config
+            cfg = normalize_config({**(d.config.get("context") or {}),
+                                    **(body or {})})
+            d.config.set("context", cfg)
+            return self._json(200, d.context_uplink.status())
+        if path.startswith("/api/v1/discriminators/"):
+            # /api/v1/discriminators/<name>/<op>  op: calibrate|reset|enable
+            # /api/v1/discriminators/session/<op> op: next|finish|cancel
+            parts = path[len("/api/v1/discriminators/"):].split("/")
+            if len(parts) != 2:
+                return self._json(404, {"error": "not found"})
+            name, op = parts
+            rt = d.discriminators
+            try:
+                if name == "session":
+                    if op == "next":
+                        return self._json(200, rt.next_step())
+                    if op == "finish":
+                        return self._json(200, rt.finish())
+                    if op == "cancel":
+                        return self._json(200, rt.cancel())
+                elif op == "calibrate":
+                    mode = str(body.get("mode") or "guided")
+                    if mode == "auto":
+                        return self._json(200, rt.calibrate_auto(name))
+                    return self._json(200, rt.start_guided(name))
+                elif op == "reset":
+                    return self._json(200, rt.reset(name))
+                elif op == "enable":
+                    rt.bank.get(name)
+                    cfg = dict(d.config.get("discriminators") or {})
+                    disabled = set(cfg.get("disabled") or [])
+                    if body.get("enabled", True):
+                        disabled.discard(name)
+                    else:
+                        disabled.add(name)
+                    cfg["disabled"] = sorted(disabled)
+                    d.config.set("discriminators", cfg)
+                    return self._json(200, rt.status())
+            except KeyError as exc:
+                return self._json(404, {"error": str(exc)})
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
+            return self._json(404, {"error": "unknown operation"})
         if path == "/api/v1/context/calibrate":
             # Snapshot current RSSI vector as a zone fingerprint.
             if not isinstance(body.get("zone"), str) or not body["zone"]:

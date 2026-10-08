@@ -272,7 +272,8 @@ class BluetoothSubsystem:
                        # ble:<MAC> for the same device — lets Brain's
                        # proximity map merge edges seen by node + phone
                        # into one node instead of two anonymous bubbles.
-                       "mac": str(adv.address).upper(),
+                       **({"mac": str(adv.address).upper()}
+                          if adv.addr_type == "public" else {}),
                        "name": dev.get("name")},
                 units={"rssi_dbm": "dBm", "tx_power_dbm": "dBm"},
                 sequence=seq,

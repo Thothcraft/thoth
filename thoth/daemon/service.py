@@ -108,6 +108,17 @@ class ThothDaemon:
         # observation subject keyspace so evidence joins to identity.
         from ..entities import EntityStore
         self.entities = EntityStore(config_dir() / "entities.json")
+        # Context uplink — descriptors/predictions/metadata to Brain at
+        # the configured rate + detail level (config["context"]).
+        from ..context_uplink import ContextUplink
+        self.context_uplink = ContextUplink(
+            lambda: self.config.get("context") or {}, self.device_id)
+        # Built-in discriminators over physical descriptors (guided/auto
+        # calibration persisted under ~/.thoth/calibration).
+        from ..discriminators import DiscriminatorRuntime
+        self.discriminators = DiscriminatorRuntime(
+            lambda: self.config.get("discriminators") or {},
+            config_dir() / "calibration")
         # Local live transport — SSE fanout for the dashboard/SDK
         # (observations + prediction edges; never the uplink path).
         self.events = EventHub()
@@ -612,6 +623,7 @@ class ThothDaemon:
         if self._sync is None:
             # No streams: still drive time/schedule triggers (no features).
             self.automations.tick()
+            self._maybe_context_uplink(None)
             return
         window = self._sync.rolling(self.window_seconds)
         self._record_captures()
@@ -635,7 +647,41 @@ class ThothDaemon:
             self._fire_actions(model, prediction)
             self.automations.on_prediction(prediction, features=feats)
             last_pred = prediction
+        for prediction in self._run_discriminators(window):
+            self.automations.on_prediction(prediction, features=feats)
+            last_pred = prediction
         self.automations.tick(prediction=last_pred, features=feats)
+        self._maybe_context_uplink(window)
+
+    def _run_discriminators(self, window: Any) -> List[Any]:
+        """Built-in discriminators: record calibration windows, predict
+        when calibrated, and publish like any model prediction."""
+        try:
+            from types import SimpleNamespace
+            from whispy.descriptors import window_descriptors
+            preds = self.discriminators.observe(
+                window_descriptors(window), device_id=self.device_id)
+        except Exception as exc:
+            logger.warning("discriminators failed: %s", exc)
+            return []
+        for p in preds:
+            self.predictions.append(p.to_dict())
+            self._emit_prediction_edge(
+                SimpleNamespace(runtime_model_id=p.runtime_model_id,
+                                config={}), p)
+        return preds
+
+    def _maybe_context_uplink(self, window: Any) -> None:
+        if not self.context_uplink.due():
+            return
+        try:
+            self.context_uplink.maybe_emit(
+                self.emit_observation, window=window,
+                predictions=list(self.predictions)[-50:],
+                estimates=self.estimators.states(),
+                room=self.room.document())
+        except Exception as exc:
+            logger.warning("context uplink failed: %s", exc)
 
     def _emit_prediction_edge(self, model: Any, prediction: Any) -> None:
         """Emit a ``prediction`` event on each label transition.

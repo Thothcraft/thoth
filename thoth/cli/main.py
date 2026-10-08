@@ -421,6 +421,77 @@ def context(ctx, remote):
 
 
 @main.command()
+@click.option("--rate", "rate_s", type=float, default=None,
+              help="seconds between context uplinks (5-3600)")
+@click.option("--detail", type=click.Choice(["minimal", "descriptors", "full"]),
+              default=None, help="how much descriptor detail to send")
+@click.option("--enable/--disable", "enabled", default=None)
+@click.pass_context
+def uplink(ctx, rate_s, detail, enabled):
+    """Show or set the context uplink (descriptors → Brain context map)."""
+    body = {k: v for k, v in (("rate_s", rate_s), ("detail", detail),
+                              ("enabled", enabled)) if v is not None}
+    try:
+        client = _client(ctx)
+        _echo(client.post("/api/v1/context/uplink", body) if body
+              else client.get("/api/v1/context/uplink"))
+    except DaemonUnavailable as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+
+
+@main.command()
+@click.argument("name", required=False)
+@click.option("--auto", "auto_mode", is_flag=True,
+              help="unlabeled 2-means calibration from recent history")
+@click.option("--reset", is_flag=True, help="drop the stored calibration")
+@click.option("--enable/--disable", "enabled", default=None)
+@click.pass_context
+def calibrate(ctx, name, auto_mode, reset, enabled):
+    """Calibrate built-in discriminators (guided by default).
+
+    No NAME lists discriminators. Guided mode prints each step, records
+    while you follow it, and advances when you press Enter.
+    """
+    try:
+        client = _client(ctx)
+        if not name:
+            st = client.get("/api/v1/discriminators")
+            for d in st.get("discriminators", []):
+                flag = "calibrated" if d["calibrated"] else "uncalibrated"
+                on = "on" if d.get("enabled") else "off"
+                click.echo(f"{d['name']:<18} {d['task']:<10} {flag:<13} {on}")
+            return
+        base = f"/api/v1/discriminators/{name}"
+        if enabled is not None:
+            _echo(client.post(f"{base}/enable", {"enabled": enabled}))
+            return
+        if reset:
+            _echo(client.post(f"{base}/reset", {}))
+            return
+        if auto_mode:
+            _echo(client.post(f"{base}/calibrate", {"mode": "auto"}))
+            return
+        st = client.post(f"{base}/calibrate", {"mode": "guided"})
+        while st.get("current"):
+            step = st["current"]
+            click.echo(f"\n[{st['step'] + 1}/{st['steps']}] {step['label']}: "
+                       f"{step['instruction']}")
+            click.echo(f"Recording for ~{int(step['seconds'])}s — press Enter "
+                       f"when done.")
+            click.pause(info="")
+            st = client.post("/api/v1/discriminators/session/next", {})
+            click.echo(f"recorded: {st.get('recorded')}")
+        _echo(client.post("/api/v1/discriminators/session/finish", {}))
+    except DaemonUnavailable as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"calibration failed: {exc}", err=True)
+        sys.exit(1)
+
+
+@main.command()
 @click.option("--brain", is_flag=True,
               help="read the Brain event feed instead of local daemon state")
 @click.option("--kind", default=None, help="filter by event kind")
