@@ -168,12 +168,15 @@ class SettingsTests(unittest.TestCase):
         with mock.patch(
             "backend.sensor_detection.serial_candidates",
             return_value=["/dev/ttyACM0", "/dev/ttyUSB0", "/dev/ttyAMA10"],
+        ), mock.patch(
+            "serial.tools.list_ports.comports", return_value=[]
         ):
             self.assertEqual(
                 likely_csi_serial_candidates(),
                 ["/dev/ttyACM0", "/dev/ttyUSB0"],
             )
-        with mock.patch("backend.capture_hardware.serial_candidates", return_value=["/dev/ttyACM0", "/dev/ttyACM1"]):
+        with mock.patch("backend.capture_hardware.serial_candidates", return_value=["/dev/ttyACM0", "/dev/ttyACM1"]), \
+                mock.patch("backend.capture_hardware.likely_csi_serial_candidates", return_value=[]):
             ports, candidates = find_csi_ports(None, 115200, 0)
         self.assertEqual(ports, ["/dev/ttyACM0", "/dev/ttyACM1"])
         self.assertEqual(candidates, ports)
