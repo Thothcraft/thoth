@@ -28,7 +28,7 @@ permissions:
   contents: write
 
 env:
-  APP_REPO: Thothcraft/thoth-app
+  APP_REPO: Thothcraft/thothApp
   ESP_REPO: Thothcraft/thothESP
   WATCH_REPO: Thothcraft/thothWatch
   BRAIN_URL: https://api.thothcraft.com
