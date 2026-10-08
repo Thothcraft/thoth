@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { clearToken, getToken, isPortalViewer, saveToken } from './api'
+import CellLogo from './CellLogo'
 import StatusPage from './pages/StatusPage'
 import LivePage from './pages/LivePage'
 import CapturesPage from './pages/CapturesPage'
@@ -96,7 +97,7 @@ function SignIn({ onUnlock }: { onUnlock: (t: string) => Promise<void> }) {
     <div className="gate">
       <div className="gatecard">
         <h2>
-          <span className="brand"><b>◈</b></span> thoth node
+          <span className="brand"><CellLogo size={26} pulse /></span> thoth node
         </h2>
         <div className="sub">{location.hostname} — sign in</div>
         {mode === 'account' ? (
@@ -190,7 +191,7 @@ export default function App() {
   return (
     <>
       <header>
-        <span className="brand"><b>◈</b> thoth node</span>
+        <span className="brand"><CellLogo size={22} /> thoth node</span>
         <nav>
           {TABS.map((t) => (
             <NavLink key={t.to} to={t.to}

@@ -168,3 +168,6 @@ a { color: var(--acc); }
   .pill.live { animation: none; }
   * { transition: none !important; }
 }
+header .brand { display: inline-flex; align-items: center; gap: 9px; }
+header .brand svg { flex: 0 0 auto; }
+.gatecard .brand { display: inline-flex; align-items: center; margin-right: 10px; }
