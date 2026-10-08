@@ -1,7 +1,7 @@
 name: release
 
 # One release feed for the whole platform (website /download reads
-# api.github.com/repos/Thothcraft/thoth/releases/latest). Tag `v*` to ship:
+# api.github.com/repos/Thothcraft/thothNode/releases/latest). Tag `v*` to ship:
 #   Thoth-Setup-<v>.exe        Windows web-installer (runs install.ps1)
 #   Thoth-<v>.pkg              macOS package (runs install.sh for console user)
 #   thoth_<v>_amd64/arm64.deb  Debian/Ubuntu + Raspberry Pi OS packages
@@ -12,8 +12,9 @@ name: release
 #   thoth_node-*.{whl,tar.gz}  Python dist of thoth-node
 #   SHA256SUMS                 checksums over every asset
 #
-# Cross-repo checkouts read PUBLIC repos. If thoth-app/thothESP/thothWatch go
-# private, add a `RELEASE_PAT` secret and set `token:` on those checkouts.
+# thothESP/thothWatch are PRIVATE — cross-repo checkouts need a PAT with repo
+# scope stored as secret `RELEASE_PAT` on this repo (falls back to the job
+# token, which only works once those repos are public).
 
 on:
   push:
@@ -203,6 +204,7 @@ jobs:
   esp32:
     needs: version
     runs-on: ubuntu-latest
+    continue-on-error: true
     env:
       V: ${{ needs.version.outputs.version }}
     steps:
