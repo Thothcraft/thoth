@@ -1,0 +1,11 @@
+Package: thoth
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Thothcraft <hello@thothcraft.com>
+Depends: python3 (>= 3.10), python3-venv, python3-pip
+Section: net
+Priority: optional
+Description: Thoth node — local-first sensor daemon (whispy SDK + thoth CLI)
+ Turns this machine into a Thoth node: sensors, models, automations,
+ local API + dashboard, and an outbound channel to Brain.
+ The postinst script installs whispy + thoth-node for the calling user.

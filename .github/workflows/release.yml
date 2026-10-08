@@ -1,0 +1,271 @@
+name: release
+
+# One release feed for the whole platform (website /download reads
+# api.github.com/repos/Thothcraft/thoth/releases/latest). Tag `v*` to ship:
+#   Thoth-Setup-<v>.exe        Windows web-installer (runs install.ps1)
+#   Thoth-<v>.pkg              macOS package (runs install.sh for console user)
+#   thoth_<v>_amd64/arm64.deb  Debian/Ubuntu + Raspberry Pi OS packages
+#   thoth-<v>.apk              Android release build (thoth-app @ main)
+#   thoth-<v>.ipa              iOS unsigned package (sideload/TestFlight path)
+#   thoth_csi-<v>.bin          merged ESP32-C6 flash image (thothESP prebuilt)
+#   thothiot-<v>.zip           PineTime DFU package (thothWatch docker build)
+#   thoth_node-*.{whl,tar.gz}  Python dist of thoth-node
+#   SHA256SUMS                 checksums over every asset
+#
+# Cross-repo checkouts read PUBLIC repos. If thoth-app/thothESP/thothWatch go
+# private, add a `RELEASE_PAT` secret and set `token:` on those checkouts.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.2.0) — no tag created'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  APP_REPO: Thothcraft/thoth-app
+  ESP_REPO: Thothcraft/thothESP
+  WATCH_REPO: Thothcraft/thothWatch
+  BRAIN_URL: https://api.thothcraft.com
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+  python-dist:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: thoth/dashboard/package-lock.json
+      - name: Build node dashboard
+        working-directory: thoth/dashboard
+        run: |
+          npm ci
+          npm run build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build thoth-node sdist + wheel
+        run: |
+          pip install build
+          python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/*
+
+  deb:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bundle installer + build .deb (amd64, arm64)
+        run: |
+          curl -fsSL https://thothcraft.com/install.sh -o install.sh
+          for ARCH in amd64 arm64; do
+            ROOT="pkg-$ARCH"
+            mkdir -p "$ROOT/DEBIAN" "$ROOT/opt/thoth" "$ROOT/usr/bin"
+            sed -e "s/@VERSION@/$V/" -e "s/@ARCH@/$ARCH/" \
+                packaging/deb/control > "$ROOT/DEBIAN/control"
+            install -m 755 packaging/deb/postinst "$ROOT/DEBIAN/postinst"
+            install -m 755 install.sh "$ROOT/opt/thoth/install.sh"
+            echo "$V" > "$ROOT/opt/thoth/VERSION"
+            printf '#!/bin/sh\nexec bash /opt/thoth/install.sh "$@"\n' \
+                > "$ROOT/usr/bin/thoth-install"
+            chmod 755 "$ROOT/usr/bin/thoth-install"
+            dpkg-deb --build "$ROOT" "thoth_${V}_${ARCH}.deb"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debs
+          path: thoth_*.deb
+
+  pkg:
+    needs: version
+    runs-on: macos-latest
+    env:
+      V: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Thoth-<v>.pkg
+        run: |
+          curl -fsSL https://thothcraft.com/install.sh -o install.sh
+          mkdir -p payload/opt/thoth scripts
+          cp install.sh payload/opt/thoth/install.sh
+          chmod 755 payload/opt/thoth/install.sh
+          cp packaging/macos/postinstall scripts/postinstall
+          chmod 755 scripts/postinstall
+          pkgbuild --root payload --scripts scripts \
+            --identifier com.thoth.node --version "$V" \
+            --install-location / "Thoth-$V.pkg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg
+          path: Thoth-*.pkg
+
+  exe:
+    needs: version
+    runs-on: windows-latest
+    env:
+      V: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+      - name: Build Thoth-Setup-<v>.exe
+        run: makensis /DVERSION=$env:V packaging\windows\thoth.nsi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exe
+          path: Thoth-Setup-*.exe
+
+  android:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.APP_REPO }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Build release APK
+        run: flutter build apk --release --dart-define=BRAIN_URL=$BRAIN_URL
+      - run: cp build/app/outputs/flutter-apk/app-release.apk "thoth-$V.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: thoth-*.apk
+
+  ios:
+    needs: version
+    runs-on: macos-latest
+    continue-on-error: true
+    env:
+      V: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.APP_REPO }}
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+          architecture: ARM64
+      - run: flutter pub get
+      - name: Build unsigned iOS app
+        run: flutter build ios --release --no-codesign --dart-define=BRAIN_URL=$BRAIN_URL
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -r build/ios/iphoneos/Runner.app Payload/
+          zip -qry "thoth-$V.ipa" Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipa
+          path: thoth-*.ipa
+
+  esp32:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ESP_REPO }}
+          path: esp
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Merge unified flash image
+        run: |
+          pip install esptool
+          esptool.py --chip esp32c6 merge_bin -o "thoth_csi-$V.bin" \
+            --flash_mode dio --flash_freq 80m --flash_size 2MB \
+            0x0     esp/prebuilt/thoth_csi/bootloader.bin \
+            0xa000  esp/prebuilt/thoth_csi/partition-table.bin \
+            0x20000 esp/prebuilt/thoth_csi/thoth_csi.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp32
+          path: thoth_csi-*.bin
+
+  watch:
+    needs: version
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      V: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.WATCH_REPO }}
+          submodules: recursive
+      - name: Build DFU package (infinitime-build container)
+        run: docker run --rm -v "$PWD:/sources" infinitime/infinitime-build
+      - name: Collect DFU zip
+        run: |
+          Z=$(ls build/output/pinetime-mcuboot-app-dfu-*.zip | head -1)
+          cp "$Z" "thothiot-$V.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: watch
+          path: thothiot-*.zip
+
+  release:
+    needs: [version, python-dist, deb, pkg, exe, android, ios, esp32, watch]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*'
+          path: assets
+          merge-multiple: true
+      - name: Checksums
+        working-directory: assets
+        run: sha256sum * > SHA256SUMS
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: Thoth ${{ env.TAG }}
+          generate_release_notes: true
+          files: assets/*
+          fail_on_unmatched_files: false

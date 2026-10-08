@@ -1,0 +1,14 @@
+#!/bin/bash
+# thoth .pkg postinstall — run the bundled installer for the console user.
+set -e
+
+USER_NAME="$(stat -f%Su /dev/console 2>/dev/null || true)"
+
+if [ -n "$USER_NAME" ] && [ "$USER_NAME" != "root" ] && [ "$USER_NAME" != "loginwindow" ]; then
+    su -l "$USER_NAME" -c "bash /opt/thoth/install.sh --no-ssh" || \
+        echo "thoth: per-user install failed — run: bash /opt/thoth/install.sh"
+else
+    echo "thoth: no console user — run 'bash /opt/thoth/install.sh' after logging in."
+fi
+
+exit 0

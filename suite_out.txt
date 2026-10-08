@@ -1,0 +1,82 @@
+........................................................................ [ 42%]
+................................................................F....... [ 85%]
+.........................                                                [100%]
+================================== FAILURES ===================================
+_ SettingsTests.test_multiple_csi_receivers_are_retained_and_rates_are_calculated _
+
+self = <test_settings_and_occupancy.SettingsTests testMethod=test_multiple_csi_receivers_are_retained_and_rates_are_calculated>
+
+    def test_multiple_csi_receivers_are_retained_and_rates_are_calculated(self):
+        with mock.patch(
+            "backend.sensor_detection.serial_candidates",
+            return_value=["/dev/ttyACM0", "/dev/ttyUSB0", "/dev/ttyAMA10"],
+        ):
+>           self.assertEqual(
+                likely_csi_serial_candidates(),
+                ["/dev/ttyACM0", "/dev/ttyUSB0"],
+            )
+E           AssertionError: Lists differ: ['/dev/ttyACM0', '/dev/ttyUSB0', 'COM10'] != ['/dev/ttyACM0', '/dev/ttyUSB0']
+E           
+E           First list contains 1 additional elements.
+E           First extra element 2:
+E           'COM10'
+E           
+E           - ['/dev/ttyACM0', '/dev/ttyUSB0', 'COM10']
+E           ?                                ---------
+E           
+E           + ['/dev/ttyACM0', '/dev/ttyUSB0']
+
+tests\test_settings_and_occupancy.py:172: AssertionError
+============================== warnings summary ===============================
+tests/test_auth_manager.py::test_expired_config_token_is_removed_from_runtime
+tests/test_auth_manager.py::test_expired_saved_token_is_deleted_and_not_retried
+tests/test_auth_manager.py::test_valid_config_token_is_available_to_device_scheduler
+  C:\Users\ggad\Desktop\thothcraft\thoth\src\backend\auth_manager.py:103: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    expiry = datetime.utcfromtimestamp(token_data['exp']) if token_data.get('exp') else None
+
+tests/test_auth_manager.py::test_expired_config_token_is_removed_from_runtime
+tests/test_auth_manager.py::test_expired_saved_token_is_deleted_and_not_retried
+tests/test_auth_manager.py::test_valid_config_token_is_available_to_device_scheduler
+  C:\Users\ggad\Desktop\thothcraft\thoth\src\backend\auth_manager.py:108: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if expiry and datetime.utcnow() >= expiry:
+
+tests/test_auth_manager.py::test_valid_config_token_is_available_to_device_scheduler
+  C:\Users\ggad\Desktop\thothcraft\thoth\src\backend\auth_manager.py:173: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if self.token_expiry and datetime.utcnow() >= self.token_expiry:
+
+tests/test_auth_manager.py::test_pairing_claim_persists_device_scoped_token
+  C:\Users\ggad\Desktop\thothcraft\thoth\src\backend\auth_manager.py:257: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    self.token_expiry = datetime.utcfromtimestamp(token_data['exp'])
+
+tests/test_model_runtime.py::test_radar_only_upload_is_disabled_then_runs[raw_adc]
+tests/test_model_runtime.py::test_radar_only_upload_is_disabled_then_runs[fft_power]
+tests/test_model_runtime.py::test_csi_only_representations_and_missing_samples[iq]
+tests/test_model_runtime.py::test_csi_only_representations_and_missing_samples[magnitude_phase]
+tests/test_model_runtime.py::test_multimodal_output_selector_and_multiple_models
+tests/test_model_runtime.py::test_invalid_artifact_dimension_and_malformed_input
+tests/test_model_runtime.py::test_legacy_thoth_model_schema_accepted
+  C:\Users\ggad\AppData\Roaming\Python\Python314\site-packages\torch\jit\_trace.py:994: DeprecationWarning: `torch.jit.trace` is not supported in Python 3.14+ and may break. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+tests/test_model_runtime.py: 14 warnings
+  C:\Users\ggad\AppData\Roaming\Python\Python314\site-packages\torch\jit\_trace.py:1133: DeprecationWarning: `torch.jit.trace_method` is not supported in Python 3.14+ and may break. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+tests/test_model_runtime.py::test_radar_only_upload_is_disabled_then_runs[raw_adc]
+tests/test_model_runtime.py::test_radar_only_upload_is_disabled_then_runs[fft_power]
+tests/test_model_runtime.py::test_csi_only_representations_and_missing_samples[iq]
+tests/test_model_runtime.py::test_csi_only_representations_and_missing_samples[magnitude_phase]
+tests/test_model_runtime.py::test_multimodal_output_selector_and_multiple_models
+tests/test_model_runtime.py::test_invalid_artifact_dimension_and_malformed_input
+tests/test_model_runtime.py::test_legacy_thoth_model_schema_accepted
+  C:\Users\ggad\AppData\Roaming\Python\Python314\site-packages\torch\jit\_serialization.py:83: DeprecationWarning: `torch.jit.save` is not supported in Python 3.14+ and may break. Please switch to `torch.export`.
+    warnings.warn(
+
+tests/test_model_runtime.py: 15 warnings
+  C:\Users\ggad\AppData\Roaming\Python\Python314\site-packages\torch\jit\_serialization.py:170: DeprecationWarning: `torch.jit.load` is not supported in Python 3.14+ and may break. Please switch to `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_settings_and_occupancy.py::SettingsTests::test_multiple_csi_receivers_are_retained_and_rates_are_calculated
+1 failed, 168 passed, 51 warnings in 308.49s (0:05:08)

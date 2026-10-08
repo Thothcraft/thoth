@@ -1,0 +1,17 @@
+#!/bin/sh
+# thoth postinst — run the bundled installer for the invoking (non-root) user.
+set -e
+
+USER_NAME="${SUDO_USER:-}"
+if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ]; then
+    USER_NAME="$(logname 2>/dev/null || true)"
+fi
+
+if [ -n "$USER_NAME" ] && [ "$USER_NAME" != "root" ]; then
+    su - "$USER_NAME" -c "bash /opt/thoth/install.sh --no-ssh" || \
+        echo "thoth: per-user install failed for $USER_NAME — run: bash /opt/thoth/install.sh"
+else
+    echo "thoth: no login user detected — run as your user: bash /opt/thoth/install.sh"
+fi
+
+exit 0
