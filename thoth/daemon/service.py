@@ -223,7 +223,8 @@ class ThothDaemon:
         dash_dir_cfg = self.config.get("dashboard_dir")
         dash_dir = Path(dash_dir_cfg) if dash_dir_cfg else None
 
-        # Dashboard surface: CONTRACT §5 serves the node UI + API on :80.
+        # Dashboard surface: one port for UI + API (local_port, 5000).
+        # A separate dashboard_port is opt-in only.
         # Same exposure policy as the API port (LAN only when opted in).
         # On by default; `--no-dashboard` or config dashboard_enabled=false
         # runs API-only.
@@ -232,7 +233,7 @@ class ThothDaemon:
             serve_ui = bool(self.config.get("dashboard_enabled", True))
         dash_port = (self._dashboard_port
                      if self._dashboard_port is not None
-                     else int(self.config.get("dashboard_port", 80)))
+                     else int(self.config.get("dashboard_port", api_port)))
         ui_on_api = False
         if not serve_ui:
             logger.info("dashboard disabled — API-only mode")
@@ -269,6 +270,8 @@ class ThothDaemon:
             from ..mdns import MdnsAdvertiser
             import socket as _s
             names = {self.config.device_name, _s.gethostname()}
+            names |= {n if n.lower().startswith("thoth-") else f"thoth-{n}"
+                      for n in list(names) if n}
             self._mdns = MdnsAdvertiser().start(
                 names, port, device_id=self.device_id)
         except Exception as exc:
@@ -821,8 +824,15 @@ class ThothDaemon:
                 "port": int(self.config.get("local_port", 5000)),
                 "token": self.config.local_token,
             }
+        name = str(self.config.device_name or "").strip().lower()
+        if name and not name.startswith("thoth-"):
+            name = f"thoth-{name}"
+        hostname = f"{name}.local" if name else None
+        if local_api and hostname:
+            local_api["hostname"] = hostname
         return {"sensors": sensors, "actuators": actuators,
-                "local_api": local_api, "activity": self._activity()}
+                "local_api": local_api, "hostname": hostname,
+                "activity": self._activity()}
 
     def _activity(self) -> Dict[str, Any]:
         """Live "what is this node doing" snapshot for the fleet UI.

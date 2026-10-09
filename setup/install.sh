@@ -5,9 +5,8 @@
 #
 # Optional env:
 #   THOTH_HOSTNAME=thoth-denver   mDNS/portal name (thoth-<name>.local)
-#   THOTH_DASHBOARD_PORT=8080     dashboard UI port (default 80 → falls back
-#                               to the API port when unprivileged)
-#   THOTH_API_PORT=5000           local API port
+#   THOTH_API_PORT=5000           local dashboard + API port (single port)
+#   THOTH_DASHBOARD_PORT=8080     optional separate dashboard port (opt-in)
 set -euo pipefail
 
 REPOSITORY_URL="https://github.com/Thothcraft/thoth.git"
@@ -44,15 +43,14 @@ PYEOF
 
 print_next() {
   local name="${THOTH_HOSTNAME:-$(hostname -s | tr '[:upper:]' '[:lower:]')}"
-  local dash_port="${THOTH_DASHBOARD_PORT:-80}"
   local api_port="${THOTH_API_PORT:-5000}"
+  local dash_port="${THOTH_DASHBOARD_PORT:-$api_port}"
+  [[ "$name" == thoth-* ]] || name="thoth-${name}"
   echo
   echo "== thoth-node installed =="
   echo "Next: pair this node to your portal account:"
   echo "    thoth pair            # prompts for portal username + password"
-  echo "Dashboard: http://${name}.local:${dash_port}  "
-  echo "  (falls back to :${api_port} when :${dash_port} is unavailable,"
-  echo "   or use the device's LAN IP)"
+  echo "Dashboard: http://${name}.local:${dash_port}  (or the device's LAN IP)"
 }
 
 # ---------------------------------------------------------------------------

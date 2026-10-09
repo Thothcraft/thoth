@@ -83,9 +83,8 @@ def main(ctx, port):
               help="serve the local dashboard UI (default: on, or the "
                    "dashboard_enabled config key)")
 @click.option("--dashboard-port", "dashboard_port", default=None, type=int,
-              help="port for the dashboard UI (default: 80, or the "
-                   "dashboard_port config key; falls back to the API port "
-                   "when unbindable)")
+              help="separate port for the dashboard UI (default: same as "
+                   "the API port 5000, or the dashboard_port config key)")
 @click.pass_context
 def daemon(ctx, window, tick, stop, status_, dashboard, dashboard_port):
     """Run the node service in the foreground (single instance).

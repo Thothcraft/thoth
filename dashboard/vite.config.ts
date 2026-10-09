@@ -15,10 +15,10 @@ export default defineConfig({
   server: {
     port: 5174,
     // Point the dev server at a live node:
-    //   VITE_THOTH_API=http://10.0.0.88:5001 npm run dev
+    //   VITE_THOTH_API=http://thoth-april.local:5000 npm run dev
     proxy: {
       '/api': {
-        target: process.env.VITE_THOTH_API || 'http://127.0.0.1:5001',
+        target: process.env.VITE_THOTH_API || 'http://127.0.0.1:5000',
         changeOrigin: true,
       },
     },
