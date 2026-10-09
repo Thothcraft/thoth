@@ -18,11 +18,11 @@ SetCompressor /SOLID lzma
 
 Section "Install"
     DetailPrint "Fetching https://thothcraft.com/install.ps1 ..."
-    nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://thothcraft.com/install.ps1))); exit $$LASTEXITCODE"'
+    nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$$f = Join-Path $$env:TEMP thoth-install.ps1; irm https://thothcraft.com/install.ps1 -OutFile $$f; & $$f; exit $$LASTEXITCODE"'
     Pop $0
     DetailPrint "Installer exit code: $0"
     IntCmp $0 0 done
         SetErrorLevel 1
-        MessageBox MB_ICONEXCLAMATION|MB_OK "Thoth installer reported an error ($0). You can retry manually in PowerShell: & ([scriptblock]::Create((irm https://thothcraft.com/install.ps1)))"
+        MessageBox MB_ICONEXCLAMATION|MB_OK "Thoth installer reported an error ($0). You can retry manually: download https://thothcraft.com/install.ps1 and run it with powershell -File"
     done:
 SectionEnd
