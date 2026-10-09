@@ -123,7 +123,7 @@ if [ -d "$WHISPY_LOCAL/whispy" ]; then
     done
 else
     "$VENV_DIR/bin/python" -m pip install -q \
-        "whispy @ git+https://github.com/Thothcraft/whispy#subdirectory=packages/whispy" \
+        "whispy @ git+https://github.com/gadm21/whispy#subdirectory=packages/whispy" \
         || "$VENV_DIR/bin/python" -m pip install -q whispy
     for pkg in whispy-sensor-dreamhat whispy-sensor-mmwhat whispy-sensor-csi \
                whispy-sensor-opencv-camera whispy-sensor-microphone \
@@ -132,7 +132,7 @@ else
                whispy-actuator-sensehat whispy-actuator-speaker \
                whispy-model-whisper-stt whispy-model-face; do
         "$VENV_DIR/bin/python" -m pip install -q \
-            "$pkg @ git+https://github.com/Thothcraft/whispy#subdirectory=packages/$pkg" \
+            "$pkg @ git+https://github.com/gadm21/whispy#subdirectory=packages/$pkg" \
             || true
     done
 fi
