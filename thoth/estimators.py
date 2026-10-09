@@ -81,15 +81,16 @@ class EstimatorHub:
         self._lock = threading.Lock()
         # recent evidence: subject → deque of (ts, observation_id, rssi)
         self._ble_seen: Dict[str, deque] = {}
-        # subject → current zone rssi snapshot for fingerprinting
-        self._imu_windows: deque = deque(maxlen=8)
+        # subject → deque of imu windows (per-subject — a shared buffer
+        # let one person's motion contaminate another's state)
+        self._imu_windows: Dict[str, deque] = {}
+        # subject → its own activity.motion.v1 state entry
+        self._motion_states: Dict[str, _State] = {}
         self._fp_path = fingerprints_path
         self._fingerprints: Dict[str, Dict[str, float]] = self._load_fp()
         self._states: Dict[str, _State] = {
             "occupancy.v1": _State("occupancy.v1", device_id,
                                    "ble-presence/1"),
-            "activity.motion.v1": _State("activity.motion.v1", device_id,
-                                         "imu-variance/1"),
             "location.zone.v1": _State("location.zone.v1", device_id,
                                        "rssi-fingerprint/1"),
         }
@@ -136,11 +137,11 @@ class EstimatorHub:
                 if schema == "ble.rssi.v1":
                     self._eval_zone(now, changed)
             elif schema == "imu.window.v1":
-                self._imu_windows.append(
-                    (now, str(obs.get("observation_id") or ""),
-                     obs.get("value") or {},
-                     obs.get("subject")))
-                self._eval_motion(now, changed)
+                subj = str(obs.get("subject") or self.device_id)
+                dq = self._imu_windows.setdefault(subj, deque(maxlen=8))
+                dq.append((now, str(obs.get("observation_id") or ""),
+                           obs.get("value") or {}))
+                self._eval_motion(subj, now, changed)
         return changed
 
     def tick(self, now: Optional[float] = None) -> List[Dict[str, Any]]:
@@ -156,34 +157,56 @@ class EstimatorHub:
 
     # -- estimators ---------------------------------------------------------------
     _OCC_WINDOW_S = 120.0
+    _ZONE_TTL_S = 120.0
+
+    # Anonymous BLE subjects (``device:ble:<hmac12>``) are radio
+    # presence only — a printer/neighbour must not claim a person is
+    # home. Occupancy requires ≥1 enrolled subject; anonymous-only or
+    # zero-evidence windows report ``occupied: None`` (unknown) unless
+    # an enrolled device was previously seen and went silent (empty).
+    _ANON_PREFIX = "device:ble:"
 
     def _eval_occupancy(self, now: float,
                         changed: Optional[List[Dict[str, Any]]] = None
                         ) -> None:
-        """occupied ⟸ ≥1 subject (enrolled or anonymous) seen recently."""
+        """occupied ⟸ ≥1 *enrolled* subject seen recently."""
         cutoff = now - self._OCC_WINDOW_S
-        live: Dict[str, List[str]] = {}
+        enrolled: Dict[str, List[str]] = {}
+        anon: Dict[str, List[str]] = {}
         for subj, dq in self._ble_seen.items():
             recent = [oid for ts, oid, _ in dq if ts >= cutoff]
-            if recent:
-                live[subj] = recent[-4:]
-        occupied = bool(live)
-        evidence = [oid for ids in live.values() for oid in ids]
-        conf = min(1.0, 0.6 + 0.1 * len(live)) if occupied else 0.4
+            if not recent:
+                continue
+            (anon if subj.startswith(self._ANON_PREFIX)
+             else enrolled)[subj] = recent[-4:]
+        enrolled_known = any(
+            not s.startswith(self._ANON_PREFIX) for s in self._ble_seen)
+        if enrolled:
+            occupied: Optional[bool] = True
+            conf = min(1.0, 0.6 + 0.1 * len(enrolled))
+        elif anon or not enrolled_known:
+            occupied = None   # presence without identity ≠ occupancy
+            conf = 0.3
+        else:
+            occupied = False  # enrolled subjects exist but went silent
+            conf = 0.5
+        evidence = [oid for ids in enrolled.values() for oid in ids]
         if self._states["occupancy.v1"].apply(
-                {"occupied": occupied, "distinct_subjects": len(live)},
+                {"occupied": occupied,
+                 "distinct_subjects": len(enrolled),
+                 "anonymous_subjects": len(anon)},
                 conf, evidence[-10:], now) and changed is not None:
             changed.append(self._states["occupancy.v1"].to_dict())
 
-    def _eval_motion(self, now: float,
+    def _eval_motion(self, subject: str, now: float,
                      changed: Optional[List[Dict[str, Any]]] = None
                      ) -> None:
-        """imu.window.v1 → stationary|moving from per-axis variance."""
-        windows = list(self._imu_windows)[-4:]
+        """imu.window.v1 → stationary|moving from per-axis variance,
+        partitioned per subject — never mix windows across people."""
+        windows = list(self._imu_windows.get(subject, ()))[-4:]
         variances: List[float] = []
         evidence: List[str] = []
-        subject = None
-        for ts, oid, value, subj in windows:
+        for ts, oid, value in windows:
             axes = (value or {}).get("axes") or {}
             xs = axes.get("x") or []
             ys = axes.get("y") or []
@@ -194,18 +217,19 @@ class EstimatorHub:
                     variances.append(
                         sum((v - mean) ** 2 for v in arr) / len(arr))
             evidence.append(oid)
-            subject = subject or subj
         if not variances:
             return
         var = sum(variances) / len(variances)
         moving = var > 0.02    # g² threshold — resting wrist ≈ 0.001–0.01
-        st = self._states["activity.motion.v1"]
+        st = self._motion_states.get(subject)
+        if st is None:
+            st = self._motion_states[subject] = _State(
+                "activity.motion.v1", subject, "imu-variance/1")
         if st.apply({"motion": "moving" if moving else "stationary",
-                     "variance": round(var, 5)},
+                     "variance": round(var, 5),
+                     "subject": subject},
                     0.8, evidence[-8:], now) and changed is not None:
             changed.append(st.to_dict())
-        if subject:
-            st.entity_id = str(subject)
 
     def _eval_zone(self, now: float,
                    changed: Optional[List[Dict[str, Any]]] = None
@@ -214,14 +238,21 @@ class EstimatorHub:
         carry fingerprints (enrolled anchors)."""
         if not self._fingerprints:
             return
-        # current per-subject rssi (latest sample per subject)
+        # current per-subject rssi (latest *fresh* sample per subject —
+        # anchors gone silent must not hold a zone estimate confident)
+        cutoff = now - self._ZONE_TTL_S
         current: Dict[str, float] = {}
         for subj, dq in self._ble_seen.items():
-            if dq:
-                rssi = dq[-1][2]
-                if rssi is not None:
-                    current[subj] = float(rssi)
+            if dq and dq[-1][0] >= cutoff and dq[-1][2] is not None:
+                current[subj] = float(dq[-1][2])
         if not current:
+            # Evidence expired — publish 'unknown' so consumers don't
+            # act on a zone anchored to stale RSSI.
+            st = self._states["location.zone.v1"]
+            if st.value is not None and st.value.get("zone"):
+                if st.apply({"zone": None, "expired": True},
+                            0.1, [], now) and changed is not None:
+                    changed.append(st.to_dict())
             return
         best_zone, best_dist = None, float("inf")
         evidence: List[str] = []
@@ -267,12 +298,25 @@ class EstimatorHub:
     # -- read ----------------------------------------------------------------------
     def states(self) -> List[Dict[str, Any]]:
         with self._lock:
-            return [s.to_dict() for s in self._states.values()
+            out = [s for s in self._states.values() if s.value is not None]
+            out += [s for s in self._motion_states.values()
                     if s.value is not None]
+            return [s.to_dict() for s in out]
 
-    def state_for(self, key: str) -> Optional[Dict[str, Any]]:
+    def state_for(self, key: str,
+                  subject: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Latest state for ``key`` — per-subject motion keys resolve by
+        ``subject`` (or return the freshest when omitted/ambiguous)."""
         with self._lock:
-            st = self._states.get(key)
+            if key == "activity.motion.v1":
+                pool = self._motion_states
+                st = pool.get(subject) if subject else None
+                if st is None and pool:
+                    st = max((s for s in pool.values()
+                              if s.value is not None),
+                             key=lambda s: s.ts, default=None)
+            else:
+                st = self._states.get(key)
             return st.to_dict() if st and st.value is not None else None
 
 

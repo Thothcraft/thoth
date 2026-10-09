@@ -244,14 +244,21 @@ jobs:
           submodules: recursive
       - name: Build DFU package (infinitime-build container)
         run: docker run --rm -v "$PWD:/sources" infinitime/infinitime-build
-      - name: Collect DFU zip
+      - name: Collect DFU zip + firmware manifest
         run: |
           Z=$(ls build/output/pinetime-mcuboot-app-dfu-*.zip | head -1)
+          FW=$(basename "$Z" | sed -E 's/pinetime-mcuboot-app-dfu-(.*)\.zip/\1/')
           cp "$Z" "thothiot-$V.zip"
+          SHA=$(sha256sum "thothiot-$V.zip" | cut -d' ' -f1)
+          printf '{"tag":"v%s","fw_version":"%s","asset":"thothiot-%s.zip","sha256":"%s"}\n' \
+            "$V" "$FW" "$V" "$SHA" > thothiot-latest.json
+          cat thothiot-latest.json
       - uses: actions/upload-artifact@v4
         with:
           name: watch
-          path: thothiot-*.zip
+          path: |
+            thothiot-*.zip
+            thothiot-latest.json
 
   release:
     needs: [version, python-dist, deb, pkg, exe, android, ios, esp32, watch]
