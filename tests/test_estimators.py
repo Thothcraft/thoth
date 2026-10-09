@@ -85,6 +85,16 @@ def test_states_only_report_after_first_value(tmp_path):
     hub.consume(_rssi("device:x", -55))
     keys = {s["key"] for s in hub.states()}
     assert "occupancy.v1" in keys
+    assert "presence.radio.v1" in keys
+
+
+def test_radio_presence_clears_when_all_silent(tmp_path):
+    hub = EstimatorHub("node1", fingerprints_path=tmp_path / "fp.json")
+    t0 = time.time() - 300.0
+    hub.consume(_rssi("device:ble:9f2ab1", -60, ts=t0, oid="n1"))
+    changed = hub.tick()
+    pres = [c for c in changed if c["key"] == "presence.radio.v1"]
+    assert pres and pres[0]["value"]["present"] is False
 
 
 # -- Phase-1 fixes ------------------------------------------------------
@@ -99,6 +109,12 @@ def test_anonymous_ble_is_presence_not_occupancy(tmp_path):
     assert occ[0]["value"]["distinct_subjects"] == 0
     assert occ[0]["value"]["anonymous_subjects"] == 1
     assert occ[0]["evidence_ids"] == []                  # not occupancy evidence
+    # radio presence IS published — just on its own key
+    pres = [c for c in changed if c["key"] == "presence.radio.v1"]
+    assert pres and pres[0]["value"]["present"] is True
+    assert pres[0]["value"]["anonymous_subjects"] == 1
+    assert pres[0]["value"]["enrolled_subjects"] == 0
+    assert pres[0]["evidence_ids"] == ["n1"]
     # an enrolled device arriving flips to occupied
     changed = hub.consume(_rssi("device:x", -55, oid="e1"))
     occ = [c for c in changed if c["key"] == "occupancy.v1"]

@@ -9,7 +9,9 @@ monotonic ``version`` per key so consumers can detect stale state.
 
 Phase 7 scope:
 
-- ``occupancy.v1``    — BLE presence/RSSI freshness → space occupied
+- ``presence.radio.v1`` — BLE subjects heard recently (radio presence
+  only — a device on air is not a person in the room)
+- ``occupancy.v1``    — enrolled-subject presence → occupied|empty|unknown
 - ``activity.motion.v1`` — ``imu.window.v1`` variance → still|moving
 - ``location.zone.v1`` — RSSI fingerprint nearest-zone estimate
 """
@@ -89,6 +91,8 @@ class EstimatorHub:
         self._fp_path = fingerprints_path
         self._fingerprints: Dict[str, Dict[str, float]] = self._load_fp()
         self._states: Dict[str, _State] = {
+            "presence.radio.v1": _State("presence.radio.v1", device_id,
+                                        "ble-presence/1"),
             "occupancy.v1": _State("occupancy.v1", device_id,
                                    "ble-presence/1"),
             "location.zone.v1": _State("location.zone.v1", device_id,
@@ -197,6 +201,17 @@ class EstimatorHub:
                  "anonymous_subjects": len(anon)},
                 conf, evidence[-10:], now) and changed is not None:
             changed.append(self._states["occupancy.v1"].to_dict())
+        # Radio presence is reported on its own key — anonymous devices
+        # count here even though they can never claim occupancy.
+        all_ids = evidence + [oid for ids in anon.values()
+                              for oid in ids]
+        if self._states["presence.radio.v1"].apply(
+                {"present": bool(enrolled or anon),
+                 "enrolled_subjects": len(enrolled),
+                 "anonymous_subjects": len(anon)},
+                0.9 if (enrolled or anon) else 0.5,
+                all_ids[-10:], now) and changed is not None:
+            changed.append(self._states["presence.radio.v1"].to_dict())
 
     def _eval_motion(self, subject: str, now: float,
                      changed: Optional[List[Dict[str, Any]]] = None
