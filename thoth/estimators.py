@@ -13,7 +13,13 @@ Phase 7 scope:
   only — a device on air is not a person in the room)
 - ``occupancy.v1``    — enrolled-subject presence → occupied|empty|unknown
 - ``activity.motion.v1`` — ``imu.window.v1`` variance → still|moving
-- ``location.zone.v1`` — RSSI fingerprint nearest-zone estimate
+- ``location.zone.v1`` — probabilistic RSSI fingerprinting: each zone
+  keeps a per-anchor Gaussian (mean/std/count) learned over a
+  calibration window and merged across repeated calibrations; a window
+  is scored by per-anchor log-likelihood, zones compared via a softmax
+  posterior, and the estimate abstains (``zone=None``) when every zone
+  is implausible or the posterior is ambiguous — RADAR-style
+  fingerprinting rather than single-snapshot nearest-match.
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +96,10 @@ class EstimatorHub:
         self._motion_states: Dict[str, _State] = {}
         self._fp_path = fingerprints_path
         self._fingerprints: Dict[str, Dict[str, float]] = self._load_fp()
+        # zone → subject → ts watermark of the last calibration merge,
+        # so repeated calibrate_zone() calls fold only fresh samples
+        # into the distribution instead of double-counting overlap
+        self._cal_mark: Dict[str, Dict[str, float]] = {}
         self._states: Dict[str, _State] = {
             "presence.radio.v1": _State("presence.radio.v1", device_id,
                                         "ble-presence/1"),
@@ -162,6 +172,26 @@ class EstimatorHub:
     # -- estimators ---------------------------------------------------------------
     _OCC_WINDOW_S = 120.0
     _ZONE_TTL_S = 120.0
+    _CAL_WINDOW_S = 120.0    # calibration samples within this horizon
+    _MIN_STD_DB = 2.0        # BLE RSSI never sits perfectly still
+    _MISS_PENALTY = 2.0      # per calibrated anchor not currently heard
+    _MIN_SCORE = -8.0        # mean log-likelihood floor — below this no
+                           # zone is plausible → abstain (softmax over a
+                           # single zone would otherwise report p=1.0)
+    _MIN_POSTERIOR = 0.4     # top posterior under this → ambiguous
+
+    @staticmethod
+    def _fp_stats(v: Any) -> Dict[str, float]:
+        """Normalize a fingerprint entry — legacy scalar means or the
+        current ``{mean,std,count}`` distribution form."""
+        if isinstance(v, dict):
+            return {"mean": float(v.get("mean", 0.0)),
+                    "std": max(EstimatorHub._MIN_STD_DB,
+                               float(v.get("std")
+                                     or EstimatorHub._MIN_STD_DB)),
+                    "count": float(v.get("count") or 1)}
+        return {"mean": float(v), "std": EstimatorHub._MIN_STD_DB,
+                "count": 1.0}
 
     # Anonymous BLE subjects (``device:ble:<hmac12>``) are radio
     # presence only — a printer/neighbour must not claim a person is
@@ -249,64 +279,138 @@ class EstimatorHub:
     def _eval_zone(self, now: float,
                    changed: Optional[List[Dict[str, Any]]] = None
                    ) -> None:
-        """Nearest zone by RSSI fingerprint — only over subjects that
-        carry fingerprints (enrolled anchors)."""
+        """Zone posterior by Gaussian RSSI fingerprinting — the mean
+        fresh RSSI per anchor is scored against each zone's calibrated
+        per-anchor Gaussian (log-likelihood, mean over observed
+        anchors, penalized for anchors that went silent), softmaxed
+        into a posterior. The estimate abstains when the best zone is
+        implausible (score below _MIN_SCORE) or ambiguous (posterior
+        below _MIN_POSTERIOR)."""
         if not self._fingerprints:
             return
-        # current per-subject rssi (latest *fresh* sample per subject —
-        # anchors gone silent must not hold a zone estimate confident)
+        # current per-subject rssi — mean over samples still fresh
+        # (anchors gone silent must not hold a zone estimate confident)
         cutoff = now - self._ZONE_TTL_S
         current: Dict[str, float] = {}
+        last_oid: Dict[str, str] = {}
         for subj, dq in self._ble_seen.items():
-            if dq and dq[-1][0] >= cutoff and dq[-1][2] is not None:
-                current[subj] = float(dq[-1][2])
+            vals = [r for ts, _, r in dq
+                    if ts >= cutoff and r is not None]
+            if vals:
+                current[subj] = sum(vals) / len(vals)
+                last_oid[subj] = dq[-1][1]
+        st = self._states["location.zone.v1"]
         if not current:
             # Evidence expired — publish 'unknown' so consumers don't
             # act on a zone anchored to stale RSSI.
-            st = self._states["location.zone.v1"]
             if st.value is not None and st.value.get("zone"):
                 if st.apply({"zone": None, "expired": True},
                             0.1, [], now) and changed is not None:
                     changed.append(st.to_dict())
             return
-        best_zone, best_dist = None, float("inf")
-        evidence: List[str] = []
+        scores: Dict[str, float] = {}
         for zone, fp in self._fingerprints.items():
-            common = [s for s in fp if s in current]
-            if not common:
+            anchors = {s: self._fp_stats(e) for s, e in fp.items()}
+            observed = [s for s in anchors if s in current]
+            if not observed:
                 continue
-            dist = math.sqrt(sum(
-                (current[s] - fp[s]) ** 2 for s in common)) / len(common)
-            if dist < best_dist:
-                best_dist, best_zone = dist, zone
-        if best_zone is None:
+            ll = 0.0
+            for s in observed:
+                a = anchors[s]
+                z = (current[s] - a["mean"]) / a["std"]
+                ll += -0.5 * z * z - math.log(a["std"])
+            ll /= len(observed)
+            # An anchor heard strongly that the fingerprint can't
+            # explain counts against the zone (Horus-style coverage
+            # penalty) — silence itself is not evidence either way.
+            unseen = len(current) - len(observed)
+            ll -= self._MISS_PENALTY * unseen / max(1, len(current))
+            scores[zone] = ll
+        if not scores:
             return
-        # distance→confidence: 0 dB error ≈ 1.0, ≥15 dB ≈ 0.2
-        conf = max(0.2, min(1.0, 1.0 - best_dist / 15.0))
-        for dq in self._ble_seen.values():
-            if dq:
-                evidence.append(dq[-1][1])
-        st = self._states["location.zone.v1"]
-        if st.apply({"zone": best_zone,
-                     "rssi_distance": round(best_dist, 2)},
-                    conf, evidence[-10:], now) and changed is not None:
+        mx = max(scores.values())
+        weights = {z: math.exp(s - mx) for z, s in scores.items()}
+        total = sum(weights.values())
+        top_zone = max(weights, key=weights.get)
+        top_p = weights[top_zone] / total
+        runner = sorted((w for z, w in weights.items()
+                         if z != top_zone), reverse=True)
+        margin = top_p - (runner[0] / total if runner else 0.0)
+        evidence = [last_oid[s] for s in current if last_oid.get(s)]
+        if scores[top_zone] < self._MIN_SCORE or top_p < self._MIN_POSTERIOR:
+            if st.apply({"zone": None,
+                         "reason": ("implausible"
+                                    if scores[top_zone] < self._MIN_SCORE
+                                    else "ambiguous"),
+                         "best_zone": top_zone,
+                         "posterior": round(top_p, 3),
+                         "score": round(scores[top_zone], 2)},
+                        max(0.05, min(0.3, top_p)),
+                        evidence[-10:], now) and changed is not None:
+                changed.append(st.to_dict())
+            return
+        if st.apply({"zone": top_zone,
+                     "posterior": round(top_p, 3),
+                     "margin": round(margin, 3),
+                     "score": round(scores[top_zone], 2),
+                     "anchors": len([s for s in self._fingerprints[top_zone]
+                                     if s in current])},
+                    round(min(1.0, 0.5 + 0.5 * top_p + 0.3 * margin), 3),
+                    evidence[-10:], now) and changed is not None:
             changed.append(st.to_dict())
 
-    def calibrate_zone(self, zone: str) -> Optional[Dict[str, float]]:
-        """Snapshot current per-subject RSSI as ``zone``'s fingerprint —
-        run while the node sits in that zone."""
+    def calibrate_zone(self, zone: str) -> Optional[Dict[str, Any]]:
+        """Fold the recent per-subject RSSI samples into ``zone``'s
+        fingerprint — per anchor a Gaussian {mean, std, count} merged
+        across repeated calibrations (Chan's parallel variance), so
+        recalibrating a zone refines rather than replaces its
+        distribution."""
         with self._lock:
-            snap: Dict[str, float] = {}
+            cutoff = time.time() - self._CAL_WINDOW_S
+            marks = self._cal_mark.setdefault(zone, {})
+            samples: Dict[str, List[Tuple[float, float]]] = {}
             for subj, dq in self._ble_seen.items():
-                if dq and dq[-1][2] is not None:
-                    snap[subj] = float(dq[-1][2])
-            if not snap:
+                since = marks.get(subj)
+                vals = [(ts, float(r)) for ts, _, r in dq
+                        if ts >= cutoff and r is not None
+                        and (since is None or ts > since)]
+                if vals:
+                    samples[subj] = vals
+            if not samples:
                 return None
-            self._fingerprints[zone] = snap
+            fp = self._fingerprints.setdefault(zone, {})
+            for subj, vals in samples.items():
+                marks[subj] = max(ts for ts, _ in vals)
+                xs = [r for _, r in vals]
+                n2 = float(len(xs))
+                m2 = sum(xs) / len(xs)
+                var2 = (sum((x - m2) ** 2 for x in xs) / (len(xs) - 1)
+                        if len(xs) > 1 else 0.0)
+                old = fp.get(subj)
+                if old is None:
+                    fp[subj] = {"mean": round(m2, 3),
+                                "std": round(max(self._MIN_STD_DB,
+                                                 math.sqrt(var2)), 3),
+                                "count": int(n2)}
+                    continue
+                o = self._fp_stats(old)
+                n1, m1, s1 = o["count"], o["mean"], o["std"]
+                n = n1 + n2
+                mean = (n1 * m1 + n2 * m2) / n
+                # pooled within-group SS + between-group SS → merged var
+                ss = (s1 * s1 * max(n1 - 1, 0)
+                      + var2 * max(n2 - 1, 0)
+                      + n1 * (m1 - mean) ** 2
+                      + n2 * (m2 - mean) ** 2)
+                fp[subj] = {"mean": round(mean, 3),
+                            "std": round(max(self._MIN_STD_DB,
+                                             math.sqrt(ss / max(n - 1, 1))),
+                                         3),
+                            "count": int(n)}
             self._save_fp()
-            return dict(snap)
+            return {s: dict(v) for s, v in fp.items()}
 
-    def fingerprints(self) -> Dict[str, Dict[str, float]]:
+    def fingerprints(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:
             return {z: dict(fp) for z, fp in self._fingerprints.items()}
 

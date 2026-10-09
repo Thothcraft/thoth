@@ -325,8 +325,9 @@ class ThothDaemon:
         return self._prov.scan_payload()
 
     def calibrate_zone(self, zone: str) -> Dict[str, Any]:
-        """RSSI fingerprint calibration — record the current per-subject
-        RSSI vector as ``zone``'s fingerprint (Phase 7)."""
+        """RSSI fingerprint calibration — fold the recent per-subject
+        RSSI samples into ``zone``'s per-anchor Gaussian distribution
+        (Phase 7 — recalibration merges, never replaces)."""
         snap = self.estimators.calibrate_zone(str(zone))
         if snap is None:
             return {"ok": False, "error": "no ble.rssi.v1 evidence yet"}

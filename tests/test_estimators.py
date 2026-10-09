@@ -163,3 +163,77 @@ def test_zone_estimate_expires_on_stale_anchors(tmp_path):
     assert zone and zone[0]["value"]["zone"] is None
     assert zone[0]["value"]["expired"] is True
     assert zone[0]["confidence"] <= 0.2
+
+
+# -- probabilistic fingerprinting (RADAR-style) ------------------------
+
+def test_calibrate_zone_builds_and_merges_distributions(tmp_path):
+    """Calibration folds a sample window into per-anchor Gaussians —
+    recalibrating the same zone merges into a refined distribution."""
+    hub = EstimatorHub("node1", fingerprints_path=tmp_path / "fp.json")
+    for i, r in enumerate((-40, -42, -38)):
+        hub.consume(_rssi("device:a", r, oid=f"a{i}"))
+    snap = hub.calibrate_zone("kitchen")
+    assert snap["device:a"]["mean"] == -40.0
+    assert snap["device:a"]["count"] == 3
+    assert snap["device:a"]["std"] >= 2.0      # floor
+    # second pass shifts the mean and grows support
+    for i, r in enumerate((-50, -50)):
+        hub.consume(_rssi("device:a", r, oid=f"a{i+3}"))
+    snap = hub.calibrate_zone("kitchen")
+    assert snap["device:a"]["count"] == 5
+    assert -40.0 > snap["device:a"]["mean"] > -50.0
+
+
+def test_zone_abstains_when_every_zone_implausible(tmp_path):
+    """RSSI nowhere near any calibrated zone → zone stays None, never
+    a forced label (single-zone softmax can't fake confidence)."""
+    fp_path = tmp_path / "fp.json"
+    hub = EstimatorHub("node1", fingerprints_path=fp_path)
+    hub.consume(_rssi("device:a", -40, oid="a1"))
+    hub.calibrate_zone("kitchen")
+    hub.consume(_rssi("device:a", -41, oid="a2"))   # confirm estimate
+    st = hub.state_for("location.zone.v1")
+    assert st["value"]["zone"] == "kitchen"
+
+    # now the anchor screams nowhere-near values — implausible, abstain
+    for i in range(5):
+        changed = hub.consume(_rssi("device:a", -110, oid=f"a9{i}"))
+    zone = [c for c in changed if c["key"] == "location.zone.v1"]
+    assert zone and zone[0]["value"]["zone"] is None
+    assert zone[0]["value"]["reason"] == "implausible"
+    assert zone[0]["value"]["best_zone"] == "kitchen"   # inspectable
+
+
+def test_zone_posterior_picks_nearest_of_two_zones(tmp_path):
+    fp_path = tmp_path / "fp.json"
+    hub = EstimatorHub("node1", fingerprints_path=fp_path)
+    hub.consume(_rssi("device:a", -45, oid="a1"))
+    hub.calibrate_zone("kitchen")
+    hub._fingerprints["hall"] = {
+        "device:a": {"mean": -70.0, "std": 3.0, "count": 5}}
+    # several fresh samples so the observed mean converges near hall's
+    for i in range(4):
+        hub.consume(_rssi("device:a", -66, oid=f"a{i+2}"))
+    st = hub.state_for("location.zone.v1")
+    assert st["value"]["zone"] == "hall"
+    assert st["value"]["posterior"] > 0.9
+    assert st["value"]["margin"] > 0
+
+
+def test_zone_ignores_heard_anchor_not_in_fingerprint(tmp_path):
+    """A heard anchor the fingerprint can't explain counts against the
+    zone — a kitchen fingerprint blind to anchor c loses to a hall
+    fingerprint that explains both heard anchors."""
+    fp_path = tmp_path / "fp.json"
+    hub = EstimatorHub("node1", fingerprints_path=fp_path)
+    hub._fingerprints["kitchen"] = {
+        "device:a": {"mean": -45.0, "std": 2.0, "count": 4}}
+    hub._fingerprints["hall"] = {
+        "device:a": {"mean": -48.0, "std": 3.0, "count": 4},
+        "device:c": {"mean": -60.0, "std": 3.0, "count": 4}}
+    hub.consume(_rssi("device:a", -46, oid="a1"))
+    hub.consume(_rssi("device:c", -61, oid="c1"))
+    st = hub.state_for("location.zone.v1")
+    assert st["value"]["zone"] == "hall"
+    assert st["value"]["posterior"] > 0.5
