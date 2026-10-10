@@ -144,6 +144,14 @@ class ThothDaemon:
         # A pre-set _device (tests, embedded hosts) is used as-is.
         if self._device is None:
             self._device = whispy.local(device_id=self.config.device_id)
+        # Per-adapter configs (duty cycling, resolution, …) flow through
+        # Device.open(); a pre-set device may not support it — optional.
+        open_cfg = getattr(self._device, "open", None)
+        if callable(open_cfg):
+            try:
+                open_cfg(self._adapter_configs())
+            except Exception as exc:
+                logger.debug("adapter configs skipped: %s", exc)
         # Warm the lazy subsystem imports *before* sensor streams and the
         # SMA thread start contending for the GIL — under stream load each
         # deferred import crawls; uncontended they cost ~1s total.
@@ -172,9 +180,51 @@ class ThothDaemon:
         logger.info("ThothDaemon started: %d sensor stream(s)", len(self._streams))
         return self
 
+    _SENSOR_CFG_KEYS = {"enabled", "disabled"}
+
+    def _adapter_configs(self) -> Dict[str, Dict[str, Any]]:
+        """``sensors`` config → per-adapter options. Reserved keys
+        ``enabled``/``disabled`` are the permission gates; every other
+        dict value is passed to the adapter of that name as its config.
+        The camera duty-cycles by default — its privacy LED is meant to
+        be ON as little as possible; ``idle_s: 0`` restores continuous
+        capture (needed by live video consumers)."""
+        sens = self.config.get("sensors") or {}
+        if not isinstance(sens, dict):
+            sens = {}
+        cfgs = {name: dict(v) for name, v in sens.items()
+                if name not in self._SENSOR_CFG_KEYS
+                and isinstance(v, dict)}
+        cam = cfgs.setdefault("opencv-camera", {})
+        cam.setdefault("idle_s", 2.0)
+        cam.setdefault("burst_s", 0.5)
+        return cfgs
+
+    def _sensor_enabled(self, sensor) -> bool:
+        """Permission gate — whether this node may sample the sensor at
+        all (privacy: camera/mic exclusion happens BEFORE the device is
+        opened, not just hidden from the API). Config:
+        ``sensors.enabled``  — allowlist (non-empty → only these),
+        ``sensors.disabled`` — blocklist; both match sensor id, modality
+        (camera/audio/radar/…) or adapter name."""
+        sens = self.config.get("sensors") or {}
+        if not isinstance(sens, dict):
+            sens = {}
+        tokens = {getattr(sensor, "id", None),
+                  getattr(sensor, "type", None),
+                  getattr(sensor, "adapter", None)} - {None, ""}
+        enabled = set(sens.get("enabled") or [])
+        if enabled:
+            return bool(tokens & enabled)
+        disabled = set(sens.get("disabled") or [])
+        return not (tokens & disabled)
+
     def _open_streams(self) -> None:
         from whispy.streams import SampleStream
         for sensor in self._device.sensors():
+            if not self._sensor_enabled(sensor):
+                logger.info("sensor %s disabled by config", sensor.id)
+                continue
             try:
                 handle = self._device.sensor(sensor.id)
                 # Pass the callable — SampleStream retries by calling it
@@ -1110,6 +1160,7 @@ class ThothDaemon:
             stream = self._streams.get(s.id)
             sources.append({
                 "id": s.id, "type": s.type, "online": s.online,
+                "enabled": self._sensor_enabled(s),
                 "exposed": self.sensor_exposed(s.id),
                 "last_sample_ts": getattr(stream, "last_timestamp", None)
                     if stream else None,

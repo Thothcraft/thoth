@@ -279,3 +279,53 @@ def test_daemon_prediction_injection_drives_actuators(tmp_home):
         assert results[-1]["result"]["status"] in ("failed", "unsupported")
     finally:
         daemon.stop()
+
+
+class _FakeSensor:
+    def __init__(self, sid, stype, adapter="a"):
+        self.id, self.type, self.adapter = sid, stype, adapter
+
+
+def test_sensor_permission_gate(tmp_home):
+    """sensors.enabled/disabled gate sampling BEFORE the device opens —
+    the camera LED (and mic privacy) is a config decision."""
+    pytest.importorskip("whispy")
+    from thoth.daemon import ThothDaemon
+
+    cam = _FakeSensor("camera-1", "camera", "opencv-camera")
+    mic = _FakeSensor("mic-1", "audio", "soundcard-mic")
+    rad = _FakeSensor("radar-1", "radar", "mmwhat-radar")
+
+    d = ThothDaemon(config=ConfigStore())
+    assert d._sensor_enabled(cam) and d._sensor_enabled(mic)
+
+    d.config.set("sensors", {"disabled": ["camera"]})
+    assert not d._sensor_enabled(cam)          # modality block
+    assert d._sensor_enabled(mic) and d._sensor_enabled(rad)
+
+    d.config.set("sensors", {"enabled": ["radar", "mic-1"]})
+    assert not d._sensor_enabled(cam)
+    assert d._sensor_enabled(rad)              # modality allow
+    assert d._sensor_enabled(mic)              # id allow
+
+
+def test_adapter_configs_camera_duty_default(tmp_home):
+    """The camera duty-cycles by default — LED ON as little as possible —
+    and sensors.<adapter> passes through; reserved keys don't leak."""
+    pytest.importorskip("whispy")
+    from thoth.daemon import ThothDaemon
+
+    d = ThothDaemon(config=ConfigStore())
+    cfgs = d._adapter_configs()
+    assert cfgs["opencv-camera"]["idle_s"] == 2.0
+    assert cfgs["opencv-camera"]["burst_s"] == 0.5
+
+    d.config.set("sensors", {
+        "disabled": ["mic-1"],                       # gate, not a config
+        "opencv-camera": {"idle_s": 0, "fps": 15},   # opt out of duty
+    })
+    cfgs = d._adapter_configs()
+    assert "disabled" not in cfgs
+    assert cfgs["opencv-camera"]["idle_s"] == 0     # override respected
+    assert cfgs["opencv-camera"]["burst_s"] == 0.5  # default backfilled
+    assert cfgs["opencv-camera"]["fps"] == 15
