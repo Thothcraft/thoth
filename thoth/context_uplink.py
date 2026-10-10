@@ -30,10 +30,12 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 from .observations import Observation
 
 SCHEMA = "context.descriptors.v1"
+GEO_SCHEMA = "location.geo.v1"
 TEXT_DEFAULTS: Dict[str, Any] = {"speech": True, "person": True,
                                  "face": True, "face_recognizer": None}
 DEFAULTS: Dict[str, Any] = {"enabled": True, "rate_s": 60.0,
                             "detail": "descriptors",
+                            "site": "",  # user-set address/place label
                             "text": dict(TEXT_DEFAULTS)}
 DETAIL_LEVELS = ("minimal", "descriptors", "full")
 MIN_RATE_S = 5.0
@@ -108,6 +110,7 @@ class ContextUplink:
               predictions: Optional[List[Mapping[str, Any]]] = None,
               estimates: Optional[List[Mapping[str, Any]]] = None,
               room: Optional[Mapping[str, Any]] = None,
+              geo: Optional[Mapping[str, Any]] = None,
               now: Optional[float] = None) -> Dict[str, Any]:
         cfg = self.config
         now = self._clock() if now is None else now
@@ -128,6 +131,17 @@ class ContextUplink:
                                        "confidence") if k in e}
                 for e in (estimates or [])][:32],
         }
+        # Where this node is — self-resolved egress geo plus the
+        # user-set site label ("43 Hillsmount") and manual room. The
+        # builder anchors a place: entity to this.
+        if geo or cfg["site"]:
+            value["location"] = {
+                **{k: (geo or {}).get(k) for k in
+                   ("lat", "lon", "postal_code", "city")},
+                "site": cfg["site"] or None,
+                "room": (room or {}).get("name") if room else None,
+                "updated_at": (geo or {}).get("updated_at"),
+            }
         if detail != "minimal" and window is not None:
             from whispy.descriptors import window_descriptors
             value["window_s"] = round(
@@ -155,6 +169,23 @@ class ContextUplink:
             }
         return value
 
+    def _geo_observation(self, value: Dict[str, Any], now: float
+                         ) -> Optional[Observation]:
+        """A location.geo.v1 evidence row mirroring the uplink's
+        location block — so it lands in Brain's descriptor aggregates
+        as well as the scene."""
+        loc = value.get("location")
+        if not isinstance(loc, dict):
+            return None
+        if not any(loc.get(k) for k in ("lat", "lon", "site",
+                                        "postal_code", "city")):
+            return None
+        return Observation(GEO_SCHEMA,
+                           source_id=f"node:{self.device_id}",
+                           value=loc,
+                           subject=f"device:{self.device_id}",
+                           observer=self.device_id, timestamp=now)
+
     def maybe_emit(self, emit: Callable[[Observation], Any], **kwargs: Any
                    ) -> Optional[Dict[str, Any]]:
         now = kwargs.pop("now", None)
@@ -166,6 +197,9 @@ class ContextUplink:
                           value=value, subject=f"device:{self.device_id}",
                           observer=self.device_id, timestamp=now)
         emit(obs)
+        geo_obs = self._geo_observation(value, now)
+        if geo_obs is not None:
+            emit(geo_obs)
         self._last_emit = now
         self.last = value
         self.emitted += 1

@@ -699,7 +699,8 @@ class ThothDaemon:
                 self.emit_observation, window=window,
                 predictions=list(self.predictions)[-50:],
                 estimates=self.estimators.states(),
-                room=self.room.document())
+                room=self.room.document(),
+                geo=self.metadata.inferred().get("location"))
         except Exception as exc:
             logger.warning("context uplink failed: %s", exc)
 

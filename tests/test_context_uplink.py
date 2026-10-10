@@ -24,6 +24,7 @@ PRED = [{"runtime_model_id": "rm-occ", "label": "occupied",
 def test_normalize_clamps_and_defaults():
     assert normalize_config(None) == {
         "enabled": True, "rate_s": 60.0, "detail": "descriptors",
+        "site": "",
         "text": {"speech": True, "person": True, "face": True,
                  "face_recognizer": None}}
     assert normalize_config({"text": {"speech": 0, "bogus": 1}})["text"] \
@@ -121,3 +122,31 @@ def test_no_window_still_reports_predictions():
     up = ContextUplink(lambda: {}, "dev-1")
     v = up.build(window=None, predictions=PRED, now=1.0)
     assert "sensors" not in v and "rm-occ" in v["predictions"]
+
+
+def test_geo_and_site_uplink():
+    """location block rides the descriptor uplink AND emits a sibling
+    location.geo.v1 observation so it lands in Brain aggregates."""
+    cfg = {"site": "43 Hillsmount"}
+    up = ContextUplink(lambda: cfg, "dev-1")
+    sent = []
+    geo = {"lat": 43.65, "lon": -79.38, "city": "Toronto",
+           "postal_code": "M6K", "updated_at": 100.0}
+    v = up.maybe_emit(sent.append, window=_window(), geo=geo,
+                      room={"name": "Bedroom"}, now=1000.0)
+    assert v["location"]["site"] == "43 Hillsmount"
+    assert v["location"]["lat"] == 43.65
+    assert v["location"]["room"] == "Bedroom"
+    schemas = {o.schema for o in sent}
+    assert schemas == {SCHEMA, "location.geo.v1"}
+    geo_obs = next(o for o in sent if o.schema == "location.geo.v1")
+    assert geo_obs.to_dict()["value"]["site"] == "43 Hillsmount"
+
+
+def test_no_geo_no_location_block():
+    """No geo and no site → no location field, no geo observation."""
+    up = ContextUplink(lambda: {}, "dev-1")
+    sent = []
+    v = up.maybe_emit(sent.append, window=_window(), now=1000.0)
+    assert "location" not in v
+    assert all(o.schema == SCHEMA for o in sent)
